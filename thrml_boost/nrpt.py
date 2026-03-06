@@ -3,9 +3,6 @@
 Based on Syed et al. (2021), "Non-Reversible Parallel Tempering:
 a Scalable Highly Parallel MCMC Scheme" (arXiv:1905.02939).
 
-Drop-in enhancement for thrml_boost.tempering.parallel_tempering.
-Improvements over v0.2.0:
-
   1. Vectorized swap pass exploiting temperature-linearity of Ising energy:
      E_β(x) = β·E_base(x)  →  1 energy eval per chain replaces 4 per pair.
      All even (or odd) swaps execute simultaneously via permutation indexing.
@@ -45,7 +42,7 @@ from thrml_boost.round_trips import (
 
 
 # ---------------------------------------------------------------------------
-# Helpers (unchanged from v0.2.0)
+# Helpers
 # ---------------------------------------------------------------------------
 
 
@@ -88,12 +85,20 @@ def _compute_base_energies(
     n_chains: int,
     n_free_blocks: int,
 ) -> jax.Array:
-    """Compute E_base(x) = E(x)/β for all chains. Shape: (n_chains,)."""
+    """Compute E_base(x) = E(x)/β for all chains.
+
+    Exploits temperature-linearity: E_β(x) = β·E_base(x), so
+    E_base(x) = E_β(x)/β. Requires all β > 0.
+
+    Shape: (n_chains,).
+    """
     spec = programs[0].gibbs_spec
     energies = []
     for c in range(n_chains):
         state_c = [stacked_states[b][c] for b in range(n_free_blocks)]
         energies.append(ebms[c].energy(state_c + clamp_state, spec))
+    # Guard: β=0 would make this division undefined. The caller is
+    # responsible for ensuring all betas > 0 (see nrpt() validation).
     return jnp.stack(energies) / betas
 
 
@@ -115,8 +120,13 @@ def _vectorized_swap(
 ) -> tuple[list, jax.Array, jax.Array, jax.Array]:
     """Execute all swaps for one set of non-overlapping pairs.
 
+    Acceptance probability per Eq. (6) of Syed et al.:
+        α^(i,i+1) = exp(min{0, (β_{i+1} - β_i)(V(x^{i+1}) - V(x^i))})
+
+    Algebraically equivalent form used here (double negation):
+        log_r = (β_i - β_{i+1})(V_i - V_{i+1})
+
     Returns (new_states, accept_counts, attempt_counts, permutation).
-    The permutation is used by round trip tracking.
     """
     i_idx = pair_indices
     j_idx = pair_indices + 1
@@ -134,7 +144,6 @@ def _vectorized_swap(
     perm = perm.at[j_idx].set(jnp.where(accepted, i_idx, j_idx))
     new_states = [stacked_states[b][perm] for b in range(n_free_blocks)]
 
-    # Stats
     acc = (
         jnp.zeros(n_pairs, dtype=jnp.int32)
         .at[pair_indices]
@@ -149,10 +158,21 @@ def _vectorized_swap(
 # Adaptive schedule (Section 5.4)
 # ---------------------------------------------------------------------------
 
+# Minimum per-pair rejection rate floor. Prevents degenerate (collapsed) β
+# values when contiguous chains have near-identical rejection rates, which
+# would cause jnp.interp to produce duplicate knots.
+_REJECTION_FLOOR = 1e-6
+
 
 def optimize_schedule(rejection_rates: jax.Array, betas: jax.Array) -> jax.Array:
-    """Equalize per-pair rejection rates by redistributing β values."""
-    cum = jnp.concatenate([jnp.array([0.0]), jnp.cumsum(rejection_rates)])
+    """Equalize per-pair rejection rates by redistributing β values.
+
+    A small floor is applied to rejection rates before computing the
+    cumulative distribution to prevent degenerate schedules when some
+    pairs have zero rejection.
+    """
+    floored = jnp.maximum(rejection_rates, _REJECTION_FLOOR)
+    cum = jnp.concatenate([jnp.array([0.0]), jnp.cumsum(floored)])
     target = jnp.linspace(0.0, cum[-1], len(betas))
     new = jnp.interp(target, cum, betas)
     return new.at[0].set(betas[0]).at[-1].set(betas[-1])
@@ -185,6 +205,9 @@ def nrpt(
     When track_round_trips=True (default), monitors the index process per
     machine and includes round trip diagnostics in stats.
 
+    All betas must be strictly positive. The temperature-linearity
+    optimization computes E_base(x) = E_β(x)/β, which is undefined at β=0.
+
     Stats keys:
         accepted, attempted, acceptance_rate, rejection_rates, betas
         round_trip_diagnostics (if track_round_trips=True):
@@ -209,6 +232,11 @@ def nrpt(
 
     if betas is None:
         betas = jnp.array([float(getattr(ebm, "beta")) for ebm in ebms])
+
+    if jnp.any(betas <= 0):
+        raise ValueError(
+            "All betas must be > 0. Temperature-linearity requires E_base = E_β/β."
+        )
 
     states = [list(s) for s in init_states]
     sampler_states = (
@@ -266,7 +294,7 @@ def nrpt(
             in_axes=(0, [0] * n_free_blocks, pbi_in_axes),
         )
 
-    # Pair indices
+    # Pair indices for DEO alternation (Eq. 8, Syed et al.)
     n_pairs = n_chains - 1
     even_pairs = jnp.arange(0, n_pairs, 2, dtype=jnp.int32)
     odd_pairs = jnp.arange(1, n_pairs, 2, dtype=jnp.int32)
