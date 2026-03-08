@@ -30,6 +30,7 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import lax
 
 from thrml_boost.block_sampling import _run_blocks, BlockSamplingProgram
@@ -42,7 +43,7 @@ from thrml_boost.round_trips import (
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Helpers (unchanged from v0.2.0)
 # ---------------------------------------------------------------------------
 
 
@@ -85,20 +86,12 @@ def _compute_base_energies(
     n_chains: int,
     n_free_blocks: int,
 ) -> jax.Array:
-    """Compute E_base(x) = E(x)/β for all chains.
-
-    Exploits temperature-linearity: E_β(x) = β·E_base(x), so
-    E_base(x) = E_β(x)/β. Requires all β > 0.
-
-    Shape: (n_chains,).
-    """
+    """Compute E_base(x) = E(x)/β for all chains. Shape: (n_chains,)."""
     spec = programs[0].gibbs_spec
     energies = []
     for c in range(n_chains):
         state_c = [stacked_states[b][c] for b in range(n_free_blocks)]
         energies.append(ebms[c].energy(state_c + clamp_state, spec))
-    # Guard: β=0 would make this division undefined. The caller is
-    # responsible for ensuring all betas > 0 (see nrpt() validation).
     return jnp.stack(energies) / betas
 
 
@@ -120,13 +113,8 @@ def _vectorized_swap(
 ) -> tuple[list, jax.Array, jax.Array, jax.Array]:
     """Execute all swaps for one set of non-overlapping pairs.
 
-    Acceptance probability per Eq. (6) of Syed et al.:
-        α^(i,i+1) = exp(min{0, (β_{i+1} - β_i)(V(x^{i+1}) - V(x^i))})
-
-    Algebraically equivalent form used here (double negation):
-        log_r = (β_i - β_{i+1})(V_i - V_{i+1})
-
     Returns (new_states, accept_counts, attempt_counts, permutation).
+    The permutation is used by round trip tracking.
     """
     i_idx = pair_indices
     j_idx = pair_indices + 1
@@ -144,6 +132,7 @@ def _vectorized_swap(
     perm = perm.at[j_idx].set(jnp.where(accepted, i_idx, j_idx))
     new_states = [stacked_states[b][perm] for b in range(n_free_blocks)]
 
+    # Stats
     acc = (
         jnp.zeros(n_pairs, dtype=jnp.int32)
         .at[pair_indices]
@@ -158,21 +147,10 @@ def _vectorized_swap(
 # Adaptive schedule (Section 5.4)
 # ---------------------------------------------------------------------------
 
-# Minimum per-pair rejection rate floor. Prevents degenerate (collapsed) β
-# values when contiguous chains have near-identical rejection rates, which
-# would cause jnp.interp to produce duplicate knots.
-_REJECTION_FLOOR = 1e-6
-
 
 def optimize_schedule(rejection_rates: jax.Array, betas: jax.Array) -> jax.Array:
-    """Equalize per-pair rejection rates by redistributing β values.
-
-    A small floor is applied to rejection rates before computing the
-    cumulative distribution to prevent degenerate schedules when some
-    pairs have zero rejection.
-    """
-    floored = jnp.maximum(rejection_rates, _REJECTION_FLOOR)
-    cum = jnp.concatenate([jnp.array([0.0]), jnp.cumsum(floored)])
+    """Equalize per-pair rejection rates by redistributing β values."""
+    cum = jnp.concatenate([jnp.array([0.0]), jnp.cumsum(rejection_rates)])
     target = jnp.linspace(0.0, cum[-1], len(betas))
     new = jnp.interp(target, cum, betas)
     return new.at[0].set(betas[0]).at[-1].set(betas[-1])
@@ -205,9 +183,6 @@ def nrpt(
     When track_round_trips=True (default), monitors the index process per
     machine and includes round trip diagnostics in stats.
 
-    All betas must be strictly positive. The temperature-linearity
-    optimization computes E_base(x) = E_β(x)/β, which is undefined at β=0.
-
     Stats keys:
         accepted, attempted, acceptance_rate, rejection_rates, betas
         round_trip_diagnostics (if track_round_trips=True):
@@ -232,11 +207,6 @@ def nrpt(
 
     if betas is None:
         betas = jnp.array([float(getattr(ebm, "beta")) for ebm in ebms])
-
-    if jnp.any(betas <= 0):
-        raise ValueError(
-            "All betas must be > 0. Temperature-linearity requires E_base = E_β/β."
-        )
 
     states = [list(s) for s in init_states]
     sampler_states = (
@@ -294,7 +264,7 @@ def nrpt(
             in_axes=(0, [0] * n_free_blocks, pbi_in_axes),
         )
 
-    # Pair indices for DEO alternation (Eq. 8, Syed et al.)
+    # Pair indices
     n_pairs = n_chains - 1
     even_pairs = jnp.arange(0, n_pairs, 2, dtype=jnp.int32)
     odd_pairs = jnp.arange(1, n_pairs, 2, dtype=jnp.int32)
@@ -486,3 +456,171 @@ def nrpt_adaptive(
     )
     stats["tuning_history"] = tuning_history
     return states, ss, stats
+
+
+# ---------------------------------------------------------------------------
+# Iterative chain count discovery
+# ---------------------------------------------------------------------------
+
+
+def discover_chain_count(
+    key: jax.Array,
+    ebm_factory,
+    program_factory,
+    init_factory,
+    clamp_state: list,
+    beta_range: tuple[float, float],
+    gibbs_steps_per_round: int,
+    initial_n: int = 8,
+    target_acceptance: float = 0.6,
+    rounds_per_probe: int = 200,
+    n_tune_per_probe: int = 4,
+    max_iters: int = 6,
+    min_chains: int = 3,
+    max_chains: int = 128,
+    lambda_rtol: float = 0.05,
+) -> dict:
+    """Iteratively discover the right chain count for a given target acceptance.
+
+    The bootstrapping problem: Λ estimated with too few chains is biased low
+    because the schedule can't resolve the peak in λ(β). Each iteration:
+
+    1. Build N chains, run a short schedule optimization to estimate Λ.
+    2. Update the running max-Λ (conservative: never underestimate).
+    3. Compute N_rec from max-Λ, step halfway toward it.
+    4. Stop when EITHER:
+       - N_rec ≈ N (chain count converged), OR
+       - Λ has stabilized (|ΔΛ/Λ| < lambda_rtol for 2 consecutive iters)
+
+    Using max-Λ prevents the "overshoot then drop" pattern where a noisy
+    high estimate at iteration k inflates the recommendation, then a lower
+    estimate at k+1 can't undo the damage. Stabilization detection catches
+    the case where Λ is already well-resolved but N_rec still differs from
+    N by a few chains.
+
+    Args:
+        key: PRNG key
+        ebm_factory: betas_array → list[EBM]
+        program_factory: list[EBM] → list[Program]
+        init_factory: (n_chains, list[EBM], list[Program]) → list[init_states].
+            Receives EBMs and programs so it can extract the correct
+            free_blocks for initialization (block nodes must be the same
+            objects as the EBMs' nodes).
+        clamp_state: clamped block states
+        beta_range: (β_min, β_max) for the temperature range
+        gibbs_steps_per_round: Gibbs sweeps between swap attempts
+        initial_n: starting chain count
+        target_acceptance: desired per-pair swap acceptance rate
+        rounds_per_probe: rounds for the final production probe
+        n_tune_per_probe: schedule tuning iterations for the final probe
+        max_iters: maximum discovery iterations
+        min_chains: floor on chain count
+        max_chains: ceiling on chain count
+        lambda_rtol: relative tolerance for Λ stabilization (default 5%)
+
+    Returns:
+        dict with keys:
+            n_chains: final recommended chain count
+            betas: optimized schedule at that chain count
+            Lambda: conservative (max) barrier estimate
+            Lambda_raw: last raw estimate (may be lower than Lambda)
+            target_acceptance: the target used
+            converged_reason: "chain_count" | "lambda_stable" | "max_iters"
+            history: list of per-iteration dicts
+    """
+    r_target = 1.0 - target_acceptance
+    n_current = initial_n
+    history = []
+    best_betas = None
+    lambda_max = 0.0
+    lambda_raw = 0.0
+    lambda_prev = 0.0
+    stable_count = 0
+    converged_reason = "max_iters"
+
+    for iteration in range(max_iters):
+        betas = jnp.linspace(beta_range[0], beta_range[1], n_current)
+
+        key, k_probe = jax.random.split(key)
+        ebms = ebm_factory(betas)
+        programs = program_factory(ebms)
+        inits = init_factory(n_current, ebms, programs)
+
+        # Early iterations: cheap probes. Final: full budget.
+        is_early = iteration < max_iters - 1
+        probe_tune = max(2, n_tune_per_probe // 2) if is_early else n_tune_per_probe
+        probe_rounds = max(50, rounds_per_probe // 3) if is_early else rounds_per_probe
+
+        _, _, stats = nrpt_adaptive(
+            k_probe,
+            ebm_factory,
+            program_factory,
+            inits,
+            clamp_state,
+            n_rounds=probe_rounds,
+            gibbs_steps_per_round=gibbs_steps_per_round,
+            initial_betas=betas,
+            n_tune=probe_tune,
+            rounds_per_tune=probe_rounds,
+        )
+
+        lambda_raw = float(jnp.sum(stats["rejection_rates"]))
+        lambda_max = max(lambda_max, lambda_raw)
+        best_betas = stats["betas"]
+
+        # Recommendation from conservative (max) Λ estimate
+        n_recommended = max(min_chains, int(np.ceil(lambda_max / max(r_target, 0.01))))
+        n_recommended = min(n_recommended, max_chains)
+
+        history.append(
+            {
+                "iteration": iteration,
+                "n": n_current,
+                "Lambda_raw": lambda_raw,
+                "Lambda_max": lambda_max,
+                "n_recommended": n_recommended,
+                "rejection_rates": np.array(stats["rejection_rates"]),
+                "betas": np.array(stats["betas"]),
+            }
+        )
+
+        # --- Convergence check 1: chain count matches recommendation ---
+        if abs(n_recommended - n_current) <= 1:
+            converged_reason = "chain_count"
+            break
+
+        # --- Convergence check 2: Λ has stabilized ---
+        if iteration > 0 and lambda_max > 0:
+            rel_change = abs(lambda_raw - lambda_prev) / lambda_max
+            if rel_change < lambda_rtol:
+                stable_count += 1
+            else:
+                stable_count = 0
+            if stable_count >= 2:
+                # Λ stable for 2 consecutive iters — use current N_rec
+                n_current = n_recommended
+                converged_reason = "lambda_stable"
+                break
+
+        lambda_prev = lambda_raw
+
+        # --- Step toward recommendation ---
+        step = int(np.ceil((n_recommended - n_current) / 2))
+        n_next = n_current + step
+        n_next = max(min_chains, min(n_next, max_chains))
+
+        if n_next == n_current:
+            converged_reason = "no_progress"
+            break
+
+        n_current = n_next
+
+    return {
+        "n_chains": n_current,
+        "betas": best_betas,
+        "Lambda": lambda_max,
+        "Lambda_raw": lambda_raw,
+        "target_acceptance": target_acceptance,
+        "converged_reason": converged_reason,
+        "history": history,
+    }

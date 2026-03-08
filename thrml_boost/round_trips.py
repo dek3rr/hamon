@@ -184,12 +184,24 @@ def recommend_n_chains(
     Lambda: float | jax.Array,
     target_acceptance: float = 0.6,
 ) -> int:
-    """Suggest optimal chain count given estimated barrier.
+    """Suggest chain count for a given barrier and target acceptance rate.
 
-    For NRPT with equalized rejection rates: Nr* ≈ Λ, r* = Λ/N.
-    target_acceptance = 1 - r* → N = Λ / (1 - target_acceptance).
+    For NRPT with equalized rejection rates: Nr* ≈ Λ where r* = 1 - target_acceptance.
+    Solving: N = Λ / r* = Λ / (1 - target_acceptance).
 
-    Diminishing returns past N ≈ 2Λ.
+    The default target_acceptance=0.6 means 40% rejection per pair.
+
+    **Warning**: Λ estimated from a run with too few chains is biased low,
+    because the schedule can't resolve the peak in λ(β). If recommend_n_chains
+    keeps increasing on successive calls, use ``discover_chain_count`` in
+    ``nrpt.py`` which handles the bootstrapping problem iteratively.
+
+    Args:
+        Lambda: estimated global communication barrier
+        target_acceptance: desired per-pair acceptance rate (default: 0.6 = 60%)
+
+    Returns:
+        Recommended number of chains (minimum 2).
     """
     r_star = 1.0 - target_acceptance
     n_opt = float(Lambda) / max(r_star, 0.01)

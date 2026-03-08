@@ -37,6 +37,7 @@ from .pgm import SpinNode as SpinNode
 from .nrpt import nrpt as nrpt
 from .nrpt import nrpt_adaptive as nrpt_adaptive
 from .nrpt import optimize_schedule as optimize_schedule
+from .nrpt import discover_chain_count as discover_chain_count
 from .round_trips import round_trip_summary as round_trip_summary
 from .round_trips import recommend_n_chains as recommend_n_chains
 from .boundary_energy import EdgePartition as EdgePartition
@@ -45,5 +46,6 @@ from .dynamic_blocks import compute_aggregate_influence as compute_aggregate_inf
 from .dynamic_blocks import influence_aware_partition as influence_aware_partition
 from .dynamic_blocks import per_temperature_block_config as per_temperature_block_config
 from .dynamic_blocks import dynamic_reblock as dynamic_reblock
+from .dynamic_blocks import classify_nodes as classify_nodes
 
 __version__ = importlib.metadata.version("thrml_boost")
