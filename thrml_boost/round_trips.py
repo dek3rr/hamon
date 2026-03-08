@@ -67,14 +67,8 @@ def update_index_state(
     restarts = index_state["restarts"]
     N = n_chains - 1
 
-    # Invert the permutation: inv_perm[perm[i]] = i
-    inv_perm = (
-        jnp.zeros(n_chains, dtype=jnp.int32)
-        .at[perm]
-        .set(jnp.arange(n_chains, dtype=jnp.int32))
-    )
-
-    new_m2c = inv_perm[old_m2c]
+    # Self inverses perm == inv_perm
+    new_m2c = perm[old_m2c]
 
     # Detect visits to top (chain N)
     at_top = new_m2c == N
