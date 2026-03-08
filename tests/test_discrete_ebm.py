@@ -1089,7 +1089,7 @@ class TestBigGrid(unittest.TestCase):
     """
 
     def test_big(self):
-        side_lens = [50, 100, 200, 400]
+        side_lens = [64, 128, 256, 512]
         times = []
         for side_len in side_lens:
             g = nx.grid_graph((side_len, side_len))
