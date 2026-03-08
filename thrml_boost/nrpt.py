@@ -21,6 +21,9 @@ a Scalable Highly Parallel MCMC Scheme" (arXiv:1905.02939).
   5. Per-temperature block hooks: supports different BlockSamplingPrograms
      per chain (already in architecture), with helper functions to construct
      temperature-adapted partitions.
+
+  6. Vmapped energy computation: _compute_base_energies uses jax.vmap over
+     chain axis instead of a Python loop, producing a single batched kernel.
 """
 
 from __future__ import annotations
@@ -73,30 +76,36 @@ def _make_pbi_in_axes(stacked_pbi):
 
 
 # ---------------------------------------------------------------------------
-# Core: energy computation
+# Core: energy computation — vmapped (H1)
 # ---------------------------------------------------------------------------
 
 
 def _compute_base_energies(
-    ebms: Sequence[AbstractEBM],
-    programs: Sequence[BlockSamplingProgram],
+    ebm0: AbstractEBM,
+    beta0: jax.Array,
+    spec,
     stacked_states: list,
     clamp_state: list,
-    betas: jax.Array,
-    n_chains: int,
-    n_free_blocks: int,
 ) -> jax.Array:
-    """Compute E_base(x) = E(x)/β for all chains. Shape: (n_chains,)."""
-    spec = programs[0].gibbs_spec
-    energies = []
-    for c in range(n_chains):
-        state_c = [stacked_states[b][c] for b in range(n_free_blocks)]
-        energies.append(ebms[c].energy(state_c + clamp_state, spec))
-    return jnp.stack(energies) / betas
+    """Compute E_base(x) for all chains via vmap. Shape: (n_chains,).
+
+    Exploits temperature linearity: ebm0.energy(x, spec) = β₀·E_base(x),
+    so E_base = ebm0.energy(x, spec) / β₀. Vmapping over the chain axis
+    produces a single batched kernel instead of n_chains sequential calls.
+
+    beta0 is passed explicitly so the signature doesn't depend on the
+    concrete EBM subclass having a .beta attribute.
+    """
+
+    def _energy_one_chain(*block_slices):
+        state = list(block_slices) + clamp_state
+        return ebm0.energy(state, spec)
+
+    return jax.vmap(_energy_one_chain)(*stacked_states) / beta0
 
 
 # ---------------------------------------------------------------------------
-# Core: vectorized swap pass
+# Core: vectorized swap pass (H3/H4 precomputed constants)
 # ---------------------------------------------------------------------------
 
 
@@ -110,11 +119,14 @@ def _vectorized_swap(
     n_chains: int,
     n_pairs: int,
     n_free_blocks: int,
+    att_mask: jax.Array,
+    base_perm: jax.Array,
 ) -> tuple[list, jax.Array, jax.Array, jax.Array]:
     """Execute all swaps for one set of non-overlapping pairs.
 
     Returns (new_states, accept_counts, attempt_counts, permutation).
-    The permutation is used by round trip tracking.
+
+    att_mask and base_perm are precomputed outside the scan body (H3/H4).
     """
     i_idx = pair_indices
     j_idx = pair_indices + 1
@@ -126,21 +138,19 @@ def _vectorized_swap(
     u = jax.random.uniform(key, shape=(n_active,))
     accepted = u < accept_probs
 
-    # Build permutation: new_states[i] = old_states[perm[i]]
-    perm = jnp.arange(n_chains)
+    # Build permutation from precomputed identity
+    perm = base_perm
     perm = perm.at[i_idx].set(jnp.where(accepted, j_idx, i_idx))
     perm = perm.at[j_idx].set(jnp.where(accepted, i_idx, j_idx))
     new_states = [stacked_states[b][perm] for b in range(n_free_blocks)]
 
-    # Stats
     acc = (
         jnp.zeros(n_pairs, dtype=jnp.int32)
         .at[pair_indices]
         .set(accepted.astype(jnp.int32))
     )
-    att = jnp.zeros(n_pairs, dtype=jnp.int32).at[pair_indices].set(1)
 
-    return new_states, acc, att, perm
+    return new_states, acc, att_mask, perm
 
 
 # ---------------------------------------------------------------------------
@@ -175,10 +185,17 @@ def nrpt(
 ) -> tuple[list, list, dict]:
     """Non-Reversible Parallel Tempering with vectorized swaps.
 
-    API-compatible with parallel_tempering(). The key difference is that
-    swap passes use 1 energy evaluation per chain (exploiting temperature
-    linearity) instead of 4 per adjacent pair, and all non-overlapping
-    swaps execute simultaneously via permutation indexing.
+    API-compatible with parallel_tempering(). Key optimizations:
+    - Vmapped energy evaluation: single batched kernel for all chains (H1)
+    - 1 energy evaluation per chain per round (temperature linearity)
+    - All non-overlapping swaps execute simultaneously (permutation indexing)
+    - Precomputed attempt masks and identity perm avoid scatter in scan (H3/H4)
+
+    Single-pass DEO: one swap parity per round, alternating even/odd.
+    Multi-pass (both per round) breaks non-reversibility — with disjoint
+    transpositions, even∘odd composed with odd∘even = identity, creating
+    period-2 orbits instead of the conveyor belt drift needed for O(1)
+    round trip rates.
 
     When track_round_trips=True (default), monitors the index process per
     machine and includes round trip diagnostics in stats.
@@ -264,12 +281,22 @@ def nrpt(
             in_axes=(0, [0] * n_free_blocks, pbi_in_axes),
         )
 
-    # Pair indices
+    # Pair indices and precomputed constants (H3/H4)
     n_pairs = n_chains - 1
     even_pairs = jnp.arange(0, n_pairs, 2, dtype=jnp.int32)
     odd_pairs = jnp.arange(1, n_pairs, 2, dtype=jnp.int32)
     n_even = len(even_pairs)
     n_odd = len(odd_pairs)
+
+    # Precompute attempt masks — these are compile-time constants but
+    # making them explicit avoids scatter ops inside the scan body.
+    att_even = jnp.zeros(n_pairs, dtype=jnp.int32).at[even_pairs].set(1)
+    att_odd = jnp.zeros(n_pairs, dtype=jnp.int32).at[odd_pairs].set(1)
+    base_perm = jnp.arange(n_chains, dtype=jnp.int32)
+
+    # Reference EBM for vmapped energy (H1) — any chain works,
+    # temperature linearity means E_base = E_β / β for all.
+    ebm0 = ebms[0]
 
     accepted = jnp.zeros(n_pairs, dtype=jnp.int32)
     attempted = jnp.zeros(n_pairs, dtype=jnp.int32)
@@ -286,18 +313,19 @@ def nrpt(
         assert _run_all_chains is not None
         st_states = _run_all_chains(gibbs_keys, st_states, stacked_pbi)
 
-        # --- Base energies (1 eval per chain) ---
+        # --- Base energies: 1 vmapped eval per round (H1) ---
         base_E = _compute_base_energies(
-            ebms,
-            programs,
+            ebm0,
+            betas[0],
+            base_spec,
             st_states,
             clamp_state,
-            betas,
-            n_chains,
-            n_free_blocks,
         )
 
-        # --- DEO swap with round trip tracking ---
+        # --- Single-pass DEO swap with round trip tracking ---
+        # Alternating even/odd each round is essential for non-reversibility.
+        # Multi-pass (both per round) creates period-2 orbits that kill
+        # the conveyor belt — states oscillate instead of drifting.
         def do_even(args):
             ss, ac, at, sk, bE, ist = args
             ss2, ac2, at2, pm = _vectorized_swap(
@@ -310,6 +338,8 @@ def nrpt(
                 n_chains,
                 n_pairs,
                 n_free_blocks,
+                att_even,
+                base_perm,
             )
             ist2 = update_index_state(ist, pm, n_chains)
             return ss2, ac + ac2, at + at2, ist2
@@ -326,6 +356,8 @@ def nrpt(
                 n_chains,
                 n_pairs,
                 n_free_blocks,
+                att_odd,
+                base_perm,
             )
             ist2 = update_index_state(ist, pm, n_chains)
             return ss2, ac + ac2, at + at2, ist2
@@ -525,7 +557,7 @@ def discover_chain_count(
             Lambda: conservative (max) barrier estimate
             Lambda_raw: last raw estimate (may be lower than Lambda)
             target_acceptance: the target used
-            converged_reason: "chain_count" | "lambda_stable" | "max_iters"
+            converged_reason: "chain_count" | "lambda_stable" | "no_progress" | "max_iters"
             history: list of per-iteration dicts
     """
     r_target = 1.0 - target_acceptance
@@ -597,7 +629,6 @@ def discover_chain_count(
             else:
                 stable_count = 0
             if stable_count >= 2:
-                # Λ stable for 2 consecutive iters — use current N_rec
                 n_current = n_recommended
                 converged_reason = "lambda_stable"
                 break
