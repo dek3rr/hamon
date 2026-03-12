@@ -116,7 +116,6 @@ nav:
             - 'api/conditional_samplers.md'
             - 'api/observers.md'
         - Tempering:
-            - 'api/tempering.md'
             - 'api/nrpt.md'
             - 'api/round_trips.md'
         - Advanced:
