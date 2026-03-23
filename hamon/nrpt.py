@@ -469,16 +469,19 @@ def nrpt(
 
 def nrpt_adaptive(
     key: jax.Array,
-    ebm_factory,
-    program_factory,
-    init_states: Sequence[list],
-    clamp_state: list,
-    n_rounds: int,
-    gibbs_steps_per_round: int,
-    initial_betas: jax.Array,
+    ebm_factory: Callable | None = None,
+    program_factory: Callable | None = None,
+    init_states: Sequence[list] = (),
+    clamp_state: list | None = None,
+    n_rounds: int = 0,
+    gibbs_steps_per_round: int = 0,
+    initial_betas: jax.Array | None = None,
     n_tune: int = 5,
     rounds_per_tune: int = 200,
     track_round_trips: bool = True,
+    *,
+    ebm: AbstractEBM | None = None,
+    program: BlockSamplingProgram | None = None,
 ) -> tuple[list, list, dict]:
     """NRPT with iterative schedule optimization (Algorithm 4).
 
@@ -486,17 +489,45 @@ def nrpt_adaptive(
     the β schedule after each phase. Then runs the final n_rounds production
     phase with the optimized schedule.
 
+    Instead of providing ``ebm_factory`` and ``program_factory``, you can pass
+    a template ``ebm`` and ``program`` and the factories will be built
+    internally using ``ebm.with_beta()`` and ``program.with_ebm()``.
+
     Returns (states, sampler_states, stats) where stats includes tuning
     history in stats["tuning_history"].
     """
+    if ebm_factory is None and program_factory is None:
+        if ebm is None or program is None:
+            raise ValueError(
+                "Provide either (ebm_factory, program_factory) or (ebm=, program=)."
+            )
+        _ebm = ebm
+        _prog = program
+
+        def _make_ebms(betas):
+            return [_ebm.with_beta(jnp.array(float(b))) for b in betas]
+
+        def _make_programs(ebms):
+            return [_prog.with_ebm(e) for e in ebms]
+    elif ebm_factory is not None and program_factory is not None:
+        _make_ebms = ebm_factory
+        _make_programs = program_factory
+    else:
+        raise ValueError("Provide both ebm_factory and program_factory, or neither.")
+
+    if clamp_state is None:
+        clamp_state = []
+    if initial_betas is None:
+        raise ValueError("initial_betas is required.")
+
     betas = initial_betas
     current_states = init_states
     tuning_history = []
 
     for tune_iter in range(n_tune):
         key, subkey = jax.random.split(key)
-        ebms = ebm_factory(betas)
-        programs = program_factory(ebms)
+        ebms = _make_ebms(betas)
+        programs = _make_programs(ebms)
         states, ss, stats = nrpt(
             subkey,
             ebms,
@@ -524,8 +555,8 @@ def nrpt_adaptive(
 
     # Production run
     key, subkey = jax.random.split(key)
-    ebms = ebm_factory(betas)
-    programs = program_factory(ebms)
+    ebms = _make_ebms(betas)
+    programs = _make_programs(ebms)
     states, ss, stats = nrpt(
         subkey,
         ebms,
@@ -548,12 +579,12 @@ def nrpt_adaptive(
 
 def discover_chain_count(
     key: jax.Array,
-    ebm_factory,
-    program_factory,
-    init_factory,
-    clamp_state: list,
-    beta_range: tuple[float, float],
-    gibbs_steps_per_round: int,
+    ebm_factory: Callable | None = None,
+    program_factory: Callable | None = None,
+    init_factory: Callable | None = None,
+    clamp_state: list | None = None,
+    beta_range: tuple[float, float] = (0.0, 1.0),
+    gibbs_steps_per_round: int = 0,
     initial_n: int = 8,
     target_acceptance: float = 0.6,
     rounds_per_probe: int = 200,
@@ -562,6 +593,9 @@ def discover_chain_count(
     min_chains: int = 3,
     max_chains: int = 128,
     lambda_rtol: float = 0.05,
+    *,
+    ebm: AbstractEBM | None = None,
+    program: BlockSamplingProgram | None = None,
 ) -> dict:
     """Iteratively discover the right chain count for a given target acceptance.
 
@@ -580,6 +614,11 @@ def discover_chain_count(
     estimate at k+1 can't undo the damage. Stabilization detection catches
     the case where Λ is already well-resolved but N_rec still differs from
     N by a few chains.
+
+    Instead of providing ``ebm_factory`` and ``program_factory``, you can pass
+    a template ``ebm`` and ``program`` and the factories will be built
+    internally using ``ebm.with_beta()`` and ``program.with_ebm()``.
+    ``init_factory`` is still required as initialization varies by use case.
 
     Args:
         key: PRNG key
@@ -611,6 +650,30 @@ def discover_chain_count(
             converged_reason: "chain_count" | "lambda_stable" | "no_progress" | "max_iters"
             history: list of per-iteration dicts
     """
+    if ebm_factory is None and program_factory is None:
+        if ebm is None or program is None:
+            raise ValueError(
+                "Provide either (ebm_factory, program_factory) or (ebm=, program=)."
+            )
+        _ebm = ebm
+        _prog = program
+
+        def _make_ebms(betas):
+            return [_ebm.with_beta(jnp.array(float(b))) for b in betas]
+
+        def _make_programs(ebms):
+            return [_prog.with_ebm(e) for e in ebms]
+    elif ebm_factory is not None and program_factory is not None:
+        _make_ebms = ebm_factory
+        _make_programs = program_factory
+    else:
+        raise ValueError("Provide both ebm_factory and program_factory, or neither.")
+
+    if init_factory is None:
+        raise ValueError("init_factory is required.")
+    if clamp_state is None:
+        clamp_state = []
+
     r_target = 1.0 - target_acceptance
     n_current = initial_n
     history = []
@@ -625,8 +688,8 @@ def discover_chain_count(
         betas = jnp.linspace(beta_range[0], beta_range[1], n_current)
 
         key, k_probe = jax.random.split(key)
-        ebms = ebm_factory(betas)
-        programs = program_factory(ebms)
+        ebms = _make_ebms(betas)
+        programs = _make_programs(ebms)
         inits = init_factory(n_current, ebms, programs)
 
         # Early iterations: cheap probes. Final: full budget.
@@ -636,8 +699,8 @@ def discover_chain_count(
 
         _, _, stats = nrpt_adaptive(
             k_probe,
-            ebm_factory,
-            program_factory,
+            _make_ebms,
+            _make_programs,
             inits,
             clamp_state,
             n_rounds=probe_rounds,

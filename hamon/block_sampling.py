@@ -152,6 +152,17 @@ class BlockSamplingProgram(eqx.Module):
     - `_block_output_sds`: precomputed output ShapeDtypeStruct pytree for each free block
     """
 
+    def with_ebm(self, ebm) -> "BlockSamplingProgram":
+        """Return a copy of this program rewired to a different EBM.
+
+        Subclasses that want to work with `nrpt_adaptive(ebm=..., program=...)`
+        must override this method.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement with_ebm(). "
+            "Either implement it or provide explicit factory callables to nrpt_adaptive."
+        )
+
     gibbs_spec: BlockGibbsSpec
     samplers: list[AbstractConditionalSampler]
     per_block_interactions: list[list[PyTree]]

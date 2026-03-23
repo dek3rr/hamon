@@ -64,6 +64,9 @@ class IsingEBM(AbstractFactorizedEBM):
         self.weights = weights
         self.biases = biases
 
+    def with_beta(self, beta: Array) -> "IsingEBM":
+        return IsingEBM(self.nodes, self.edges, self.biases, self.weights, beta)
+
     @property
     def factors(self) -> list[EBMFactor]:
         return [
@@ -84,6 +87,11 @@ class IsingSamplingProgram(FactorSamplingProgram):
         samp = SpinGibbsConditional()
         spec = BlockGibbsSpec(free_blocks, clamped_blocks, ebm.node_shape_dtypes)
         super().__init__(spec, [samp for _ in spec.free_blocks], ebm.factors, [])
+
+    def with_ebm(self, ebm: IsingEBM) -> "IsingSamplingProgram":
+        return IsingSamplingProgram(
+            ebm, list(self.gibbs_spec.superblocks), self.gibbs_spec.clamped_blocks
+        )
 
 
 class IsingTrainingSpec(eqx.Module):

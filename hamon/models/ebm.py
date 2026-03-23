@@ -17,6 +17,17 @@ class AbstractEBM(eqx.Module):
     Something that has a well-defined energy function (map from a state to a scalar).
     """
 
+    def with_beta(self, beta: Array) -> "AbstractEBM":
+        """Return a copy of this EBM with a different inverse-temperature β.
+
+        Subclasses that want to work with `nrpt_adaptive(ebm=..., program=...)`
+        must override this method.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement with_beta(). "
+            "Either implement it or provide explicit factory callables to nrpt_adaptive."
+        )
+
     @abc.abstractmethod
     def energy(
         self, state: list[_State], blocks: "BlockSpec | list[Block]"

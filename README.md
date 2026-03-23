@@ -88,16 +88,11 @@ that exploit the temperature-linearity of Ising energies:
 ```python
 from hamon.nrpt import nrpt_adaptive
 
-def ebm_factory(betas):
-    return [IsingEBM(nodes, edges, biases, weights, jnp.array(float(b))) for b in betas]
-
-def program_factory(ebms):
-    return [IsingSamplingProgram(e, free_blocks, []) for e in ebms]
+ebm = IsingEBM(nodes, edges, biases, weights, jnp.array(1.0))
+program = IsingSamplingProgram(ebm, free_blocks, [])
 
 states, _, stats = nrpt_adaptive(
     jax.random.key(42),
-    ebm_factory,
-    program_factory,
     init_states=[init_state] * 8,
     clamp_state=[],
     n_rounds=500,
@@ -105,6 +100,8 @@ states, _, stats = nrpt_adaptive(
     initial_betas=jnp.linspace(0.1, 2.0, 8),
     n_tune=5,
     rounds_per_tune=200,
+    ebm=ebm,
+    program=program,
 )
 
 print(f"Final Λ: {stats['round_trip_diagnostics']['Lambda']:.3f}")
