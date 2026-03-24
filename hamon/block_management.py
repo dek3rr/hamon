@@ -331,7 +331,7 @@ def from_global_state(
     **Arguments:**
 
     - `global_state`: A state produced by
-        [`hamon.block_state_to_global(spec_from)`][].
+        [`hamon.block_state_to_global`][].
     - `spec_from`: The [`hamon.BlockSpec`][] associated with *global_state*.
     - `blocks_to_extract`: The blocks whose node states should be returned.
 

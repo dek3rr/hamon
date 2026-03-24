@@ -285,7 +285,7 @@ def make_rectangular_blocks(
     Args:
         L: grid side length
         block_size: m, the side length of each rectangular block
-        nodes_2d: L×L array of nodes, nodes_2d[i][j] is node at row i, col j
+        nodes_2d: L×L array of nodes, `nodes_2d[i][j]` is node at row `i`, col `j`
     """
     m = block_size
     n_blocks_per_axis = (L + m - 1) // m

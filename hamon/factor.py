@@ -14,7 +14,7 @@ class AbstractFactor(eqx.Module):
     """A factor represents a batch of undirected interactions between sets of random variables.
 
     Concretely, this class implements a batch of factors defined over a bunch of parallel node groups. A single
-    factor is defined over the nodes given by node_groups[k][i] for all k and a particular i. The defining trait of a
+    factor is defined over the nodes given by `node_groups[k][i]` for all `k` and a particular `i`. The defining trait of a
     factor is to produce InteractionGroups that affect each member of the factor in some way during the conditional
     updates of a block sampling program. As a user, you specify how this is done by implementing a
     concrete to_interaction_groups method for your child class.
@@ -35,7 +35,7 @@ class AbstractFactor(eqx.Module):
         **Arguments:**
 
         - `node_groups`: The node groups that this batch of factors acts on. A single Factor is defined
-            over node_groups[k][i] for all values of k and a particular batch index i.
+            over `node_groups[k][i]` for all values of `k` and a particular batch index `i`.
         """
 
         if not len(node_groups) > 0:

@@ -90,7 +90,7 @@ class AbstractParametricConditionalSampler(AbstractConditionalSampler):
         output_sd: PyTree[jax.ShapeDtypeStruct],
     ) -> PyTree:
         """Compute the parameters of the distribution. For a description of the arguments, see
-        [`thrml.AbstractConditionalSampler.sample`][]"""
+        [`hamon.AbstractConditionalSampler.sample`][]"""
         pass
 
     @abc.abstractmethod
@@ -154,7 +154,7 @@ class BernoulliConditional(AbstractParametricConditionalSampler):
         sampler_state: None,
         output_sd: PyTree[jax.ShapeDtypeStruct],
     ) -> tuple[_State, None]:
-        r"""Sample from a spin-valued bernoulli distribution given the parameter $\gamma$. In THRML,
+        r"""Sample from a spin-valued bernoulli distribution given the parameter $\gamma$. In hamon,
         1 is represented by the boolean value `True` and -1 is represented by `False`."""
         return jax.random.bernoulli(key, jax.nn.sigmoid(2 * parameters)), sampler_state
 

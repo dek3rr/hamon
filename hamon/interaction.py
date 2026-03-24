@@ -11,8 +11,8 @@ class InteractionGroup(eqx.Module):
     An `InteractionGroup` specifies information that is required to update the state of some subset
     of the nodes of a PGM during a block sampling routine.
 
-    More concretely, when the state of the node at head_nodes[i] is being updated, the sampler will receive the current
-    state of the nodes at tail_nodes[k][i] for all k, and the ith element of each array in the Interaction PyTree
+    More concretely, when the state of the node at `head_nodes[i]` is being updated, the sampler will receive the current
+    state of the nodes at `tail_nodes[k][i]` for all `k`, and the `i`th element of each array in the Interaction PyTree
     (sliced along the first dimension).
 
     **Attributes:**
@@ -41,8 +41,8 @@ class InteractionGroup(eqx.Module):
         - `head_nodes`: The nodes whose update is affected by the interaction.
         - `tail_nodes`: The groups of nodes whose state is required to update
             `head_nodes`. Each block in this list of blocks is intended to be parallel
-            to `head_nodes`. i.e, to update the state of head_nodes[i] during sampling
-            we need state info about tail_nodes[k][i] for all values of k.
+            to `head_nodes`. i.e, to update the state of `head_nodes[i]` during sampling
+            we need state info about `tail_nodes[k][i]` for all values of `k`.
         """
 
         interaction_size = len(head_nodes.nodes)
