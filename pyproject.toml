@@ -1,6 +1,6 @@
 [project]
 name = "hamon"
-version = "0.1.0"
+version = "0.2.0"
 description = "JAX-native thermal sampling for discrete energy-based models"
 readme = "README.md"
 license = "Apache-2.0"

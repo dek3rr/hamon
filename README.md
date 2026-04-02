@@ -144,7 +144,7 @@ If you use Hamon in your research, please cite:
     title        = {Hamon: JAX-Native Thermal Sampling for Discrete Energy-Based Models},
     year         = {2026},
     url          = {https://github.com/dek3rr/hamon},
-    version      = {0.1.0},
+    version      = {0.2.0},
     license      = {Apache-2.0},
 }
 ```

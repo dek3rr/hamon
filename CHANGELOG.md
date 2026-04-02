@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-04-02
+
+### Breaking
+
+- **NRPT return signature** — refactored `nrpt` / `nrpt_adaptive` to remove unused
+  return values; callers that destructure the full tuple will need updating
+
+### Added
+
+- **Observer support for NRPT** — collect per-round samples via pluggable observers
+- **Tuning diagnostics** — utilities for inspecting adaptive schedule behaviour
+- **`ising_sample` wrapper** — high-level convenience function for Ising model sampling
+- **Template EBM/program objects** — `nrpt_adaptive` and `discover_chain_count` now
+  accept a template object directly, reducing boilerplate
+- **Boundary energy ↔ NRPT integration** — connected `boundary_energy` module to the
+  NRPT pipeline
+- **NRPT correctness test**
+
+### Fixed
+
+- Random key propagation and block-edge validation in dynamic blocks
+- Flaky `TestBigGrid` stabilized
+- Lazy import guard for docs build
+- MkDocs warnings resolved
+
+### Changed
+
+- Internal NRPT refactor (cleaner scan carry, simplified state threading)
+- Removed old benchmarks
+- Refreshed example notebooks
+- Converted leftover thrml references in docs
+
 ## [0.1.0] — 2026-03-08
 
 First release under the **Hamon** name. Hamon is a spiritual successor to
