@@ -82,7 +82,7 @@ information between them.
 ```python
 from hamon.nrpt import nrpt, nrpt_adaptive
 
-betas = [0.2, 0.5, 0.8, 1.0]  # cold → hot
+betas = [0.2, 0.5, 0.8, 1.0]  # hot → cold
 ebms = [IsingEBM(nodes, edges, biases, weights, jnp.array(b)) for b in betas]
 progs = [IsingSamplingProgram(e, free_blocks, []) for e in ebms]
 
