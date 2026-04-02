@@ -1,0 +1,1946 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="JAX-native thermal sampling for discrete energy-based models.">
+      
+      
+        <meta name="author" content="Douglas E. Kerr Jr.">
+      
+      
+        <link rel="canonical" href="https://dek3rr.github.io/hamon/api/block_sampling/">
+      
+      
+        <link rel="prev" href="../block_management/">
+      
+      
+        <link rel="next" href="../conditional_samplers/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Block Sampling - Hamon</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,700,700i%7CJetBrains+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../assets/_hippogriffe.css">
+    
+      <link rel="stylesheet" href="../../_static/custom_css.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="light-blue">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#block-sampling" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="Hamon" class="md-header__button md-logo" aria-label="Hamon" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M6.92 5H5l9 9 1-.94m4.96 6.06-.84.84a.996.996 0 0 1-1.41 0l-3.12-3.12-2.68 2.66-1.41-1.41 1.42-1.42L3 7.75V3h4.75l8.92 8.92 1.42-1.42 1.41 1.41-2.67 2.67 3.12 3.12c.4.4.4 1.03.01 1.42"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Hamon
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Block Sampling
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="light-blue"  aria-hidden="true"  type="radio" name="__palette" id="__palette_0">
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/dek3rr/hamon" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    dek3rr/hamon
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+  
+
+<nav class="md-nav md-nav--primary md-nav--integrated" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="Hamon" class="md-nav__button md-logo" aria-label="Hamon" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M6.92 5H5l9 9 1-.94m4.96 6.06-.84.84a.996.996 0 0 1-1.41 0l-3.12-3.12-2.68 2.66-1.41-1.41 1.42-1.42L3 7.75V3h4.75l8.92 8.92 1.42-1.42 1.41 1.41-2.67 2.67 3.12 3.12c.4.4.4 1.03.01 1.42"/></svg>
+
+    </a>
+    Hamon
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/dek3rr/hamon" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    dek3rr/hamon
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/00_probabilistic_computing.ipynb" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    None
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concepts
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Concepts
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concepts
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Examples
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Examples
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/01_all_of_hamon.ipynb" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    None
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/02_spin_models.ipynb" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    None
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/03_parallel_tempering.ipynb" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    None
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_5_1" id="__nav_5_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Graph Primitives
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Graph Primitives
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../pgm/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Graph Primitives
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../interaction/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Interaction Groups
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../factor/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Factors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_2" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_5_2" id="__nav_5_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sampling
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_2_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Sampling
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../block_management/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block Management
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block Sampling
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../conditional_samplers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Conditional Samplers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../observers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Observers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_5_3" id="__nav_5_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tempering
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Tempering
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../nrpt/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    NRPT
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../round_trips/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Round-Trip Diagnostics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_5_4" id="__nav_5_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Advanced
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Advanced
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../dynamic_blocks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Dynamic Blocks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../boundary_energy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Boundary Energy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5_5" id="__nav_5_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Models
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Models
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../models/ebm/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Energy-Based Models
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../models/discrete_ebm/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Discrete EBM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../models/ising/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ising Models
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+                
+
+
+
+  
+
+
+  <nav class="md-path" aria-label="Navigation" >
+    <ol class="md-path__list">
+      
+        
+  
+  
+    <li class="md-path__item">
+      <a href="../.." class="md-path__link">
+        
+  <span class="md-ellipsis">
+    Home
+  </span>
+
+      </a>
+    </li>
+  
+
+      
+      
+        
+  
+  
+    
+    
+      
+  
+  
+    
+    
+      <li class="md-path__item">
+        <a href="../pgm/" class="md-path__link">
+          
+  <span class="md-ellipsis">
+    API Reference
+  </span>
+
+        </a>
+      </li>
+    
+  
+
+    
+  
+
+      
+        
+  
+  
+    
+    
+      <li class="md-path__item">
+        <a href="../block_management/" class="md-path__link">
+          
+  <span class="md-ellipsis">
+    Sampling
+  </span>
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ol>
+  </nav>
+
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+
+<h1 id="block-sampling">Block Sampling<a class="headerlink" href="#block-sampling" title="Permanent link">#</a></h1>
+<p>The sampling engine. <code>BlockSamplingProgram</code> wraps a model and its block
+structure into a callable that runs Gibbs sweeps. <code>sample_states</code> is the
+main entry point for collecting samples from a single chain.</p>
+
+
+<div class="doc doc-object doc-class">
+
+
+
+<h4 id="hamon.BlockGibbsSpec" class="doc doc-heading">
+<code class="doc-symbol doc-symbol-heading doc-symbol-class"></code>            <code>hamon.BlockGibbsSpec</code>
+
+
+<a href="#hamon.BlockGibbsSpec" class="headerlink" title="Permanent link">#</a></h4>
+
+
+    <div class="doc doc-contents first">
+
+
+
+        <p>A BlockGibbsSpec is a type of BlockSpec which contains additional information
+on free and clamped blocks.</p>
+<p>This entity also supports <code>SuperBlock</code>s, which are merely groups of blocks
+which are sampled at the same time algorithmically, but not programmatically.
+That is to say, superblock = (block1, block2) means that the states input to
+block1 and block2 are the same, but they are not executed at the same time.
+This may be because they are the same color on a graph, but require vastly
+different sampling methods such that JAX SIMD approaches are not feasible
+to parallelize them.</p>
+<p>A recurring theme in <code>hamon</code> is the importance of implicit indexing. One
+such example can be seen here. Because global states are created by
+concatenating lists of free and clamped blocks, providing the inputs
+in the same order as the blocks are defined is essential. This is almost
+always taken care of internally, but when writing custom functions or
+interfaces this is important to keep in mind.</p>
+<p><strong>Attributes:</strong></p>
+<ul>
+<li><code>free_blocks</code>: the list of free blocks (in order)</li>
+<li><code>sampling_order</code>: a list of <code>len(superblocks)</code> lists, where each
+    <code>sampling_order[i]</code> is the index of <code>free_blocks</code> to sample.
+    Sampling is done by iterating over this order and sampling each
+    sublist of free blocks at the same algorithmic time.</li>
+<li><code>clamped_blocks</code>: the list of clamped blocks</li>
+<li><code>superblocks</code>: the list of superblocks</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-object doc-function">
+
+
+<h5 id="hamon.BlockGibbsSpec.__init__" class="doc doc-heading">
+<code class="doc-symbol doc-symbol-heading doc-symbol-method"></code>            <code class="highlight language-python"><span class="fm">__init__</span><span class="p">(</span><span class="n">free_super_blocks</span><span class="p">:</span> <span class="n">typing</span><span class="o">.</span><span class="n">Sequence</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="n">hamon</span><span class="o">.</span><span class="n">block_management</span><span class="o">.</span><span class="n">Block</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span> <span class="o">|</span> <span class="n">hamon</span><span class="o">.</span><span class="n">block_management</span><span class="o">.</span><span class="n">Block</span><span class="p">],</span> <span class="n">clamped_blocks</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">hamon</span><span class="o">.</span><span class="n">block_management</span><span class="o">.</span><span class="n">Block</span><span class="p">],</span> <span class="n">node_shape_dtypes</span><span class="p">:</span> <span class="n">typing</span><span class="o">.</span><span class="n">Mapping</span><span class="p">[</span><span class="n">typing</span><span class="o">.</span><span class="n">Type</span><span class="p">[</span><span class="n">hamon</span><span class="o">.</span><span class="n">pgm</span><span class="o">.</span><span class="n">AbstractNode</span><span class="p">],</span> <span class="n">PyTree</span><span class="p">[</span><span class="n">jax</span><span class="o">.</span><span class="n">ShapeDtypeStruct</span><span class="p">]]</span> <span class="o">=</span> <span class="p">{</span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="err">&#39;</span><span class="nc">hamon</span><span class="o">.</span><span class="n">pgm</span><span class="o">.</span><span class="n">SpinNode</span><span class="s1">&#39;&gt;: ShapeDtypeStruct(shape=(), dtype=bool), &lt;class &#39;</span><span class="n">hamon</span><span class="o">.</span><span class="n">pgm</span><span class="o">.</span><span class="n">CategoricalNode</span><span class="s1">&#39;&gt;: ShapeDtypeStruct(shape=(), dtype=uint8)})</span></code>
+
+<a href="#hamon.BlockGibbsSpec.__init__" class="headerlink" title="Permanent link">#</a></h5>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Create a Gibbs specification from free and clamped blocks.</p>
+<p><strong>Arguments:</strong></p>
+<ul>
+<li><code>free_super_blocks</code>: An ordered sequence where each element is either
+    a single <code>Block</code>, or a tuple of blocks that must share the same global
+    state when calling their individual samplers.</li>
+<li><code>clamped_blocks</code>: Blocks whose nodes stay fixed during sampling.</li>
+<li><code>node_shape_dtypes</code>: Mapping from node class to a PyTree of
+    <code>jax.ShapeDtypeStruct</code>; identical to the argument in <code>BlockSpec</code>.</li>
+</ul>
+
+
+    </div>
+
+</div>
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h4 id="hamon.BlockSamplingProgram" class="doc doc-heading">
+<code class="doc-symbol doc-symbol-heading doc-symbol-class"></code>            <code>hamon.BlockSamplingProgram</code>
+
+
+<a href="#hamon.BlockSamplingProgram" class="headerlink" title="Permanent link">#</a></h4>
+
+
+    <div class="doc doc-contents first">
+
+
+
+        <p>A PGM block-sampling program.</p>
+<p>This class encapsulates everything that is needed to run a PGM block sampling program in hamon.
+<code>per_block_interactions</code> and <code>per_block_interaction_active</code> are parallel to the free blocks in <code>gibbs_spec</code>, and
+their members are passed directly to a sampler when the state of the corresponding free block is being updated
+during a sampling program. <code>per_block_interaction_global_inds</code> and <code>per_block_interaction_global_slices</code> are
+also parallel to the free blocks, and are used to slice the global state of the program to produce the
+state information required to update the state of each block alongside the static information contained in the
+interactions.</p>
+<p><strong>Attributes:</strong></p>
+<ul>
+<li><code>gibbs_spec</code>: A division of some PGM into free and clamped blocks.</li>
+<li><code>samplers</code>: A sampler to use to update every free block in <code>gibbs_spec</code>.</li>
+<li><code>per_block_interactions</code>: All the interactions that touch each free block in <code>gibbs_spec</code>.</li>
+<li><code>per_block_interaction_active</code>: indicates which interactions are real
+    and which interactions are not part of the model and have been added to pad data structures so that they
+    can be rectangular.</li>
+<li><code>per_block_interaction_global_inds</code>: how to find the information required to update each block within the global
+    state list</li>
+<li><code>per_block_interaction_global_slices</code>: how to slice each array in the global state list to find the information
+    required to update each block</li>
+<li><code>_block_sd_inds</code>: precomputed sd_index for each free block (avoids recomputing inside scan)</li>
+<li><code>_block_positions</code>: precomputed node positions in global state for each free block (avoids recomputing inside scan)</li>
+<li><code>_block_output_sds</code>: precomputed output ShapeDtypeStruct pytree for each free block</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-object doc-function">
+
+
+<h5 id="hamon.BlockSamplingProgram.__init__" class="doc doc-heading">
+<code class="doc-symbol doc-symbol-heading doc-symbol-method"></code>            <code class="highlight language-python"><span class="fm">__init__</span><span class="p">(</span><span class="n">gibbs_spec</span><span class="p">:</span> <span class="n">BlockGibbsSpec</span><span class="p">,</span> <span class="n">samplers</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">hamon</span><span class="o">.</span><span class="n">conditional_samplers</span><span class="o">.</span><span class="n">AbstractConditionalSampler</span><span class="p">],</span> <span class="n">interaction_groups</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">hamon</span><span class="o">.</span><span class="n">interaction</span><span class="o">.</span><span class="n">InteractionGroup</span><span class="p">])</span></code>
+
+<a href="#hamon.BlockSamplingProgram.__init__" class="headerlink" title="Permanent link">#</a></h5>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Construct a <code>BlockSamplingProgram</code>.</p>
+<p>Takes in a set of information that implicitly defines a sampling program
+and manipulates it into a shape appropriate for vectorized block-sampling.
+This involves reindexing, slicing, and often padding.</p>
+<p><strong>Arguments:</strong></p>
+<ul>
+<li><code>gibbs_spec</code>: A division of some PGM into free and clamped blocks.</li>
+<li><code>samplers</code>: The update rule to use for each free block in <code>gibbs_spec</code>.</li>
+<li><code>interaction_groups</code>: A list of <code>InteractionGroups</code> that define how the
+    variables in your sampling program affect one another.</li>
+</ul>
+
+
+    </div>
+
+</div>
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h4 id="hamon.SamplingSchedule" class="doc doc-heading">
+<code class="doc-symbol doc-symbol-heading doc-symbol-class"></code>            <code>hamon.SamplingSchedule</code>
+
+
+<a href="#hamon.SamplingSchedule" class="headerlink" title="Permanent link">#</a></h4>
+
+
+    <div class="doc doc-contents first">
+
+
+
+        <p>Represents a sampling schedule for a process.</p>
+<p><strong>Attributes:</strong></p>
+<ul>
+<li><code>n_warmup</code>: The number of warmup steps to run before collecting samples.</li>
+<li><code>n_samples</code>: The number of samples to collect.</li>
+<li><code>steps_per_sample</code>: The number of steps to run between each sample.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="hamon.sample_blocks" class="doc doc-heading">
+<code class="doc-symbol doc-symbol-heading doc-symbol-function"></code>            <code class="highlight language-python"><span class="n">hamon</span><span class="o">.</span><span class="n">sample_blocks</span><span class="p">(</span><span class="n">key</span><span class="p">:</span> <span class="n">Key</span><span class="p">[</span><span class="n">Array</span><span class="p">,</span> <span class="s1">&#39;&#39;</span><span class="p">],</span> <span class="n">state_free</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">PyTree</span><span class="p">[</span><span class="n">Shaped</span><span class="p">[</span><span class="n">Array</span><span class="p">,</span> <span class="s1">&#39;nodes ?*state&#39;</span><span class="p">],</span> <span class="n">_State</span><span class="p">]],</span> <span class="n">clamp_state</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">PyTree</span><span class="p">[</span><span class="n">Shaped</span><span class="p">[</span><span class="n">Array</span><span class="p">,</span> <span class="s1">&#39;nodes ?*state&#39;</span><span class="p">],</span> <span class="n">_State</span><span class="p">]],</span> <span class="n">program</span><span class="p">:</span> <span class="n">BlockSamplingProgram</span><span class="p">,</span> <span class="n">sampler_state</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="o">~</span><span class="n">_SamplerState</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">list</span><span class="p">[</span><span class="n">PyTree</span><span class="p">[</span><span class="n">Shaped</span><span class="p">[</span><span class="n">Array</span><span class="p">,</span> <span class="s1">&#39;nodes ?*state&#39;</span><span class="p">],</span> <span class="n">_State</span><span class="p">]],</span> <span class="nb">list</span><span class="p">[</span><span class="o">~</span><span class="n">_SamplerState</span><span class="p">]]</span></code>
+
+<a href="#hamon.sample_blocks" class="headerlink" title="Permanent link">#</a></h4>
+
+
+    <div class="doc doc-contents first">
+
+        <p>Perform one iteration of sampling, visiting every block.</p>
+<p><strong>Arguments:</strong></p>
+<ul>
+<li><code>key</code>: The JAX PRNG key.</li>
+<li><code>state_free</code>: The state of the free blocks.</li>
+<li><code>clamp_state</code>: The state of the clamped blocks.</li>
+<li><code>program</code>: The Gibbs program.</li>
+<li><code>sampler_state</code>: The state of the sampler.</li>
+</ul>
+<p><strong>Returns:</strong></p>
+<ul>
+<li>Updated free-block state list and sampler-state list.</li>
+</ul>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="hamon.sample_single_block" class="doc doc-heading">
+<code class="doc-symbol doc-symbol-heading doc-symbol-function"></code>            <code class="highlight language-python"><span class="n">hamon</span><span class="o">.</span><span class="n">sample_single_block</span><span class="p">(</span><span class="n">key</span><span class="p">:</span> <span class="n">Key</span><span class="p">[</span><span class="n">Array</span><span class="p">,</span> <span class="s1">&#39;&#39;</span><span class="p">],</span> <span class="n">state_free</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">PyTree</span><span class="p">[</span><span class="n">Shaped</span><span class="p">[</span><span class="n">Array</span><span class="p">,</span> <span class="s1">&#39;nodes ?*state&#39;</span><span class="p">],</span> <span class="n">_State</span><span class="p">]],</span> <span class="n">clamp_state</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">PyTree</span><span class="p">[</span><span class="n">Shaped</span><span class="p">[</span><span class="n">Array</span><span class="p">,</span> <span class="s1">&#39;nodes ?*state&#39;</span><span class="p">],</span> <span class="n">_State</span><span class="p">]],</span> <span class="n">program</span><span class="p">:</span> <span class="n">BlockSamplingProgram</span><span class="p">,</span> <span class="n">block</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">sampler_state</span><span class="p">:</span> <span class="o">~</span><span class="n">_SamplerState</span><span class="p">,</span> <span class="n">global_state</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">PyTree</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span> <span class="n">per_block_interactions</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">list</span><span class="p">[</span><span class="n">PyTree</span><span class="p">]]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">PyTree</span><span class="p">[</span><span class="n">Shaped</span><span class="p">[</span><span class="n">Array</span><span class="p">,</span> <span class="s1">&#39;nodes ?*state&#39;</span><span class="p">],</span> <span class="n">_State</span><span class="p">],</span> <span class="o">~</span><span class="n">_SamplerState</span><span class="p">]</span></code>
+
+<a href="#hamon.sample_single_block" class="headerlink" title="Permanent link">#</a></h4>
+
+
+    <div class="doc doc-contents first">
+
+        <p>Samples a single block within a Gibbs sampling program based on the current
+states and program configurations. It extracts neighboring states, processes
+required data, and applies a sampling function to generate output samples.</p>
+<p><strong>Arguments:</strong></p>
+<ul>
+<li><code>key</code>: Pseudo-random number generator key to ensure reproducibility of sampling.</li>
+<li><code>state_free</code>: Current states of free blocks, representing the values to be
+    updated during sampling.</li>
+<li><code>clamp_state</code>: Clamped states that remain fixed during the sampling process.</li>
+<li><code>program</code>: The Gibbs sampling program containing specifications, samplers,
+    neighborhood information, and parameters.</li>
+<li><code>block</code>: Index of the block to be sampled in the current iteration.</li>
+<li><code>sampler_state</code>: The current state of the sampler that will be used to
+    perform the update.</li>
+<li><code>global_state</code>: Optionally precomputed global state for the concatenated
+    free and clamped blocks; when omitted the function constructs it internally.</li>
+<li><code>per_block_interactions</code>: Optional override for the interaction weights. When
+    provided (e.g. inside a vmapped multi-chain runner), this is used instead of
+    <code>program.per_block_interactions</code>. The caller is responsible for ensuring the
+    PyTree structure matches <code>program.per_block_interactions</code>.</li>
+</ul>
+<p><strong>Returns:</strong></p>
+<ul>
+<li>Updated block state and sampler state for the specified block.</li>
+</ul>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="hamon.sample_with_observation" class="doc doc-heading">
+<code class="doc-symbol doc-symbol-heading doc-symbol-function"></code>            <code class="highlight language-python"><span class="n">hamon</span><span class="o">.</span><span class="n">sample_with_observation</span><span class="p">(</span><span class="n">key</span><span class="p">:</span> <span class="n">Key</span><span class="p">[</span><span class="n">Array</span><span class="p">,</span> <span class="s1">&#39;&#39;</span><span class="p">],</span> <span class="n">program</span><span class="p">:</span> <span class="n">BlockSamplingProgram</span><span class="p">,</span> <span class="n">schedule</span><span class="p">:</span> <span class="n">SamplingSchedule</span><span class="p">,</span> <span class="n">init_chain_state</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">PyTree</span><span class="p">[</span><span class="n">Shaped</span><span class="p">[</span><span class="n">Array</span><span class="p">,</span> <span class="s1">&#39;nodes ?*state&#39;</span><span class="p">]]],</span> <span class="n">state_clamp</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">PyTree</span><span class="p">[</span><span class="n">Shaped</span><span class="p">[</span><span class="n">Array</span><span class="p">,</span> <span class="s1">&#39;nodes ?*state&#39;</span><span class="p">],</span> <span class="n">_State</span><span class="p">]],</span> <span class="n">observation_carry_init</span><span class="p">:</span> <span class="o">~</span><span class="n">ObserveCarry</span><span class="p">,</span> <span class="n">f_observe</span><span class="p">:</span> <span class="n">AbstractObserver</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="o">~</span><span class="n">ObserveCarry</span><span class="p">,</span> <span class="nb">list</span><span class="p">[</span><span class="n">PyTree</span><span class="p">[</span><span class="n">Shaped</span><span class="p">[</span><span class="n">Array</span><span class="p">,</span> <span class="s1">&#39;n_samples nodes ?*state&#39;</span><span class="p">]]]]</span></code>
+
+<a href="#hamon.sample_with_observation" class="headerlink" title="Permanent link">#</a></h4>
+
+
+    <div class="doc doc-contents first">
+
+        <p>Run the full chain and call an Observer after every recorded sample.</p>
+<p><strong>Arguments:</strong></p>
+<ul>
+<li><code>key</code>: RNG key.</li>
+<li><code>program</code>: The sampling program.</li>
+<li><code>schedule</code>: Warm-up length, number of samples, number of steps between samples.</li>
+<li><code>init_chain_state</code>: Initial free-block state.</li>
+<li><code>state_clamp</code>: Clamped-block state.</li>
+<li><code>observation_carry_init</code>: Initial carry handed to <code>f_observe</code>.</li>
+<li><code>f_observe</code>: Observer instance.</li>
+</ul>
+<p><strong>Returns:</strong></p>
+<ul>
+<li>Tuple <code>(final_observer_carry, samples)</code> where <code>samples</code> is a PyTree whose
+    leading axis has size <code>schedule.n_samples</code>.</li>
+</ul>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="hamon.sample_states" class="doc doc-heading">
+<code class="doc-symbol doc-symbol-heading doc-symbol-function"></code>            <code class="highlight language-python"><span class="n">hamon</span><span class="o">.</span><span class="n">sample_states</span><span class="p">(</span><span class="n">key</span><span class="p">:</span> <span class="n">Key</span><span class="p">[</span><span class="n">Array</span><span class="p">,</span> <span class="s1">&#39;&#39;</span><span class="p">],</span> <span class="n">program</span><span class="p">:</span> <span class="n">BlockSamplingProgram</span><span class="p">,</span> <span class="n">schedule</span><span class="p">:</span> <span class="n">SamplingSchedule</span><span class="p">,</span> <span class="n">init_state_free</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">PyTree</span><span class="p">[</span><span class="n">Shaped</span><span class="p">[</span><span class="n">Array</span><span class="p">,</span> <span class="s1">&#39;nodes ?*state&#39;</span><span class="p">]]],</span> <span class="n">state_clamp</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">PyTree</span><span class="p">[</span><span class="n">Shaped</span><span class="p">[</span><span class="n">Array</span><span class="p">,</span> <span class="s1">&#39;nodes ?*state&#39;</span><span class="p">],</span> <span class="n">_State</span><span class="p">]],</span> <span class="n">nodes_to_sample</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">hamon</span><span class="o">.</span><span class="n">block_management</span><span class="o">.</span><span class="n">Block</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">PyTree</span><span class="p">[</span><span class="n">Shaped</span><span class="p">[</span><span class="n">Array</span><span class="p">,</span> <span class="s1">&#39;n_samples nodes ?*state&#39;</span><span class="p">]]]</span></code>
+
+<a href="#hamon.sample_states" class="headerlink" title="Permanent link">#</a></h4>
+
+
+    <div class="doc doc-contents first">
+
+        <p>Convenience wrapper to collect state information for <em>nodes_to_sample</em> only.</p>
+<p>Internally builds a <a class="autorefs autorefs-internal" title="            hamon.StateObserver" href="../observers/#hamon.StateObserver"><code>hamon.StateObserver</code></a>, runs
+<a class="autorefs autorefs-internal" title="            hamon.sample_with_observation(key: Key[Array, ''], program: BlockSamplingProgram, schedule: SamplingSchedule, init_chain_state: list[PyTree[Shaped[Array, 'nodes ?*state']]], state_clamp: list[PyTree[Shaped[Array, 'nodes ?*state'], _State]], observation_carry_init: ~ObserveCarry, f_observe: AbstractObserver) -> tuple[~ObserveCarry, list[PyTree[Shaped[Array, 'n_samples nodes ?*state']]]]" href="#hamon.sample_with_observation"><code>hamon.sample_with_observation</code></a>, and returns a stacked tensor of shape
+<code>(schedule.n_samples, ...)</code>.</p>
+
+
+    </div>
+
+</div>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.sections", "navigation.expand", "navigation.path", "toc.integrate", "header.autohide", "content.code.copy", "content.tabs.link"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+        <script src="../../_static/mathjax.js"></script>
+      
+        <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+      
+    
+  </body>
+</html>
