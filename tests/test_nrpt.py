@@ -9,10 +9,11 @@ Validates:
 
 import jax
 import jax.numpy as jnp
+import pytest
 
 from hamon import Block, SpinNode, make_empty_block_state, NRPTStateObserver
-from hamon.models import IsingEBM, IsingSamplingProgram, hinton_init
-from hamon.nrpt import _compute_base_energies, nrpt
+from hamon.models import AbstractEBM, IsingEBM, IsingSamplingProgram, hinton_init
+from hamon.nrpt import _compute_base_energies, _make_reference_ebm, nrpt, nrpt_adaptive
 
 
 # ---------------------------------------------------------------------------
@@ -437,3 +438,151 @@ class TestNRPTObserver:
         )
         assert "observations" not in stats
         assert "observer_carry" not in stats
+
+
+# ---------------------------------------------------------------------------
+# β₀ = 0 ladders (regression: base energies were NaN, silently rejecting
+# every swap)
+# ---------------------------------------------------------------------------
+
+
+class _OpaqueEBM(AbstractEBM):
+    """Delegates energy to an IsingEBM but does not implement with_beta().
+
+    Exercises the fallback reference-energy path in nrpt for EBM classes
+    that only satisfy the minimal AbstractEBM contract.
+    """
+
+    inner: IsingEBM
+
+    def energy(self, state, blocks):
+        return self.inner.energy(state, blocks)
+
+
+class TestZeroBetaHotChain:
+    """A hottest chain at exactly β = 0 must produce finite, working swaps."""
+
+    def test_swaps_accepted_with_zero_beta0(self):
+        """Regression: β₀ = 0 yielded NaN base energies → 0% acceptance."""
+        betas = [0.0, 0.4, 0.8, 1.2]
+        _, _, fb, ebms, progs = _make_ising(4, betas, coupling=0.4)
+        states = _make_states(jax.random.key(0), ebms, fb, 4)
+
+        _, stats = nrpt(
+            jax.random.key(1),
+            ebms,
+            progs,
+            states,
+            [],
+            n_rounds=100,
+            gibbs_steps_per_round=2,
+        )
+        acc = stats["acceptance_rate"]
+        assert jnp.all(jnp.isfinite(acc)), f"non-finite acceptance: {acc}"
+        # Pre-fix this was exactly 0 for every pair. With this gentle ladder
+        # every pair should accept at least once over 100 rounds.
+        assert jnp.all(acc > 0.0), f"swaps never accepted: {acc}"
+
+    def test_reference_ebm_prefers_beta1_copy(self):
+        """The reference EBM is an exact β=1 copy when with_beta() exists,
+        and base energies match a directly-constructed β=1 model."""
+        betas = [0.0, 0.5, 1.0]
+        nodes, edges, fb, ebms, progs = _make_ising(4, betas, coupling=0.7)
+        states = _make_states(jax.random.key(3), ebms, fb, 3)
+
+        betas_arr = jnp.array(betas)
+        ebm_ref, beta_ref = _make_reference_ebm(ebms, betas_arr)
+        assert float(ebm_ref.beta) == 1.0
+        assert float(beta_ref) == 1.0
+
+        spec = progs[0].gibbs_spec
+        stacked = [jnp.stack([states[c][b] for c in range(3)]) for b in range(len(fb))]
+        base_E = _compute_base_energies(ebm_ref, beta_ref, spec, stacked, [])
+        assert jnp.all(jnp.isfinite(base_E))
+
+        ebm_unit = IsingEBM(
+            nodes, edges, ebms[0].biases, ebms[0].weights, jnp.array(1.0)
+        )
+        expected = jnp.stack(
+            [
+                ebm_unit.energy([states[c][b] for b in range(len(fb))], spec)
+                for c in range(3)
+            ]
+        )
+        assert jnp.allclose(base_E, expected, atol=1e-5)
+
+    def test_fallback_without_with_beta_matches_ising_run(self):
+        """EBMs lacking with_beta() use the coldest chain as reference and
+        must reproduce the IsingEBM run exactly (same RNG, same energies)."""
+        betas = [0.5, 1.0, 1.5]
+        _, _, fb, ebms, progs = _make_ising(4, betas, coupling=0.5)
+        opaque_ebms = [_OpaqueEBM(inner=e) for e in ebms]
+        states = _make_states(jax.random.key(5), ebms, fb, 3)
+        betas_arr = jnp.array(betas)
+
+        _, stats_ising = nrpt(
+            jax.random.key(6),
+            ebms,
+            progs,
+            states,
+            [],
+            n_rounds=60,
+            gibbs_steps_per_round=2,
+            betas=betas_arr,
+        )
+        _, stats_opaque = nrpt(
+            jax.random.key(6),
+            opaque_ebms,
+            progs,
+            states,
+            [],
+            n_rounds=60,
+            gibbs_steps_per_round=2,
+            betas=betas_arr,
+        )
+        assert jnp.array_equal(stats_ising["attempted"], stats_opaque["attempted"])
+        assert jnp.array_equal(stats_ising["accepted"], stats_opaque["accepted"])
+
+    def test_fallback_with_zero_cold_beta_raises(self):
+        """No with_beta() and β_cold = 0 is unrecoverable — must raise."""
+        betas = [0.0, 0.0]
+        _, _, fb, ebms, progs = _make_ising(4, betas)
+        opaque_ebms = [_OpaqueEBM(inner=e) for e in ebms]
+        init = make_empty_block_state(fb, ebms[0].node_shape_dtypes)
+
+        with pytest.raises(ValueError, match="with_beta"):
+            nrpt(
+                jax.random.key(0),
+                opaque_ebms,
+                progs,
+                [init] * 2,
+                [],
+                n_rounds=5,
+                gibbs_steps_per_round=1,
+                betas=jnp.array(betas),
+            )
+
+    def test_adaptive_tuning_with_zero_beta0(self):
+        """nrpt_adaptive (the path ising_sample uses) works from β₀ = 0."""
+        betas = jnp.linspace(0.0, 1.2, 4)
+        _, _, fb, ebms, progs = _make_ising(4, [float(b) for b in betas], coupling=0.6)
+        ebm, prog = ebms[-1], progs[-1]
+        states = _make_states(jax.random.key(8), ebms, fb, 4)
+
+        _, stats = nrpt_adaptive(
+            jax.random.key(9),
+            ebm=ebm,
+            program=prog,
+            init_states=states,
+            clamp_state=[],
+            n_rounds=50,
+            gibbs_steps_per_round=2,
+            initial_betas=betas,
+            n_tune=2,
+            rounds_per_tune=50,
+        )
+        assert jnp.all(jnp.isfinite(stats["betas"]))
+        assert jnp.all(jnp.isfinite(stats["acceptance_rate"]))
+        assert jnp.all(stats["acceptance_rate"] > 0.0)
+        for phase in stats["tuning_history"]:
+            assert jnp.isfinite(phase["Lambda"])
