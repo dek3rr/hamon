@@ -412,3 +412,35 @@ class TestScatterBlockToGlobal(unittest.TestCase):
         )
         sd_ind, ref = self._reference(single, new_state)
         self.assertTrue(jnp.array_equal(out[sd_ind], ref))
+
+
+class TestFromGlobalState(unittest.TestCase):
+    """from_global_state must agree with a reference gather on both the
+    contiguous slice path and the non-contiguous fallback."""
+
+    def setUp(self):
+        self.sd = {Node1: jax.ShapeDtypeStruct((), jnp.float32)}
+        self.blocks = [
+            block_management.Block([Node1() for _ in range(4)]),
+            block_management.Block([Node1() for _ in range(3)]),
+        ]
+        self.spec = block_management.BlockSpec(self.blocks, self.sd)
+        self.global_state = [jax.random.normal(jax.random.key(7), (7,))]
+
+    def _reference(self, block):
+        sd_ind, positions = block_management.get_node_locations(block, self.spec)
+        return jnp.take(self.global_state[sd_ind], positions, axis=0)
+
+    def test_contiguous_blocks(self):
+        out = block_management.from_global_state(
+            self.global_state, self.spec, self.blocks
+        )
+        for block, extracted in zip(self.blocks, out):
+            self.assertTrue(jnp.array_equal(extracted, self._reference(block)))
+
+    def test_non_contiguous_block_falls_back(self):
+        mixed = block_management.Block(
+            [self.blocks[1][2], self.blocks[0][1], self.blocks[1][0]]
+        )
+        out = block_management.from_global_state(self.global_state, self.spec, [mixed])
+        self.assertTrue(jnp.array_equal(out[0], self._reference(mixed)))

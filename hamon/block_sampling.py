@@ -14,6 +14,7 @@ from hamon.block_management import (
     Block,
     BlockSpec,
     block_state_to_global,
+    from_global_state,
     scatter_block_to_global,
     get_node_locations,
     verify_block_state,
@@ -478,6 +479,11 @@ def _run_blocks(
 ]:
     """Perform `n_iters` steps of block sampling.
 
+    The scan carries only the sampler states and the concatenated global
+    state. Free-block states would duplicate data already present in the
+    global state (samplers read exclusively from the global state), so they
+    are extracted once after the scan instead of being threaded through it.
+
     **Arguments:**
 
     - `per_block_interactions`: Optional override for interaction weights.
@@ -505,7 +511,7 @@ def _run_blocks(
     block_slice_starts = program._block_slice_starts
 
     def body_fn(carry, _key):
-        state_free, sampler_state, global_state = carry
+        sampler_state, global_state = carry
 
         keys = jax.random.split(_key, len(program.gibbs_spec.free_blocks))
 
@@ -516,7 +522,7 @@ def _run_blocks(
             for i in sampling_group:
                 new_states[i], new_sampler_states[i] = sample_single_block(
                     keys[i],
-                    state_free,
+                    [],
                     state_clamp,
                     program,
                     i,
@@ -525,11 +531,6 @@ def _run_blocks(
                     per_block_interactions=pbi,
                 )
 
-            # Apply updates functionally.
-            state_free = [
-                new_states[i] if i in new_states else state_free[i]
-                for i in range(len(state_free))
-            ]
             sampler_state = [
                 new_sampler_states[i] if i in new_sampler_states else sampler_state[i]
                 for i in range(len(sampler_state))
@@ -557,11 +558,16 @@ def _run_blocks(
                     )
                 global_state = new_global
 
-        return (state_free, sampler_state, global_state), None
+        return (sampler_state, global_state), None
 
     keys = jax.random.split(key, n_iters)
-    (final_state_free, final_sampler_states, final_global), _ = jax.lax.scan(
-        body_fn, (init_chain_state, sampler_states, init_global_state), keys
+    (final_sampler_states, final_global), _ = jax.lax.scan(
+        body_fn, (sampler_states, init_global_state), keys
+    )
+    # Free-block states are contiguous slices of the global state, so this
+    # extraction lowers to static slices that XLA fuses away.
+    final_state_free = from_global_state(
+        final_global, program.gibbs_spec, program.gibbs_spec.free_blocks
     )
     return final_state_free, final_sampler_states, final_global
 

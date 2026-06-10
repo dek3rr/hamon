@@ -48,6 +48,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   imports the `jax_pmap_shmap_merge` config option removed in JAX 0.10.0 and
   fails at import
 - **CI test and example matrices now cover Python 3.11–3.14** (was 3.10–3.13)
+- **Gibbs scan carries one copy of the sampling state, not two** — the
+  `_run_blocks` scan previously threaded both the per-block state list and
+  the concatenated global state through the carry, although samplers only
+  read the global state. The carry now holds just the sampler states and
+  the global state; per-block states are extracted once after the scan.
+  `from_global_state` gained the same contiguous-slice fast path as the
+  write-back side, so the extraction lowers to static slices. Results are
+  bit-identical; measured ~6% faster NRPT rounds on CPU (the duplicate
+  carry was multiplied by `vmap` across chains) and ~3% faster plain Gibbs.
 - **Block write-back uses contiguous slice updates instead of scatters** —
   free blocks always occupy contiguous ranges of the global state (a
   `BlockSpec` layout invariant), so the per-block write-back in the Gibbs
