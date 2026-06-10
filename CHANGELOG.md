@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0] — 2026-06-10
 
 ### Added
 
@@ -38,6 +38,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   jaxtyping (≥ 0.3) releases hamon is developed against both require
   Python ≥ 3.11, so the previous 3.10 floor could only resolve to stale
   dependency versions. Python 3.14 is now supported and tested in CI.
+- **Padded interaction entries are pre-zeroed at program construction** —
+  `BlockSamplingProgram` masks the sliced interaction tensors with the active
+  flags once, and the built-in spin/categorical conditionals no longer
+  multiply by the active mask on every Gibbs step. Custom samplers invoked
+  through a `BlockSamplingProgram` may now rely on inactive entries being
+  zero; samplers called directly with hand-built (unmasked) interactions must
+  keep applying the active flags themselves.
 
 ### Changed
 
@@ -66,9 +73,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   faster on CPU; scatters are disproportionately expensive on GPU).
   Non-contiguous node sets keep the scatter fallback. Results are
   bit-identical.
+- **`track_round_trips=False` now skips the index-process update** inside the
+  swap pass instead of only omitting the summary.
+- **Conditional samplers accumulate in the weights' dtype** — the spin and
+  categorical Gibbs conditionals previously seeded their parameter
+  accumulators with float32 zeros regardless of the model dtype.
+- Documentation refreshed for the new internals: `architecture.md` now
+  describes the concatenated (not padded) global state layout and the actual
+  index-process representation; stale `hinton_init` and `CategoricalNode`
+  docstrings corrected.
 
 ### Fixed
 
+- **`sample_blocks` no longer mutates the caller's state and sampler-state
+  lists.**
 - **NRPT observers received post-swap states paired with pre-swap energies** —
   in the default (non-cached) energy mode, the base-energy vector was not
   permuted after accepted swaps before being handed to the observer, so

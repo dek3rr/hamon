@@ -290,8 +290,24 @@ class BlockSamplingProgram(eqx.Module):
                         interaction_group.interaction,
                     )
 
+                    # Pre-zero padded entries: inactive slots gathered junk
+                    # data (index-0 rows) during slicing. The active mask is a
+                    # compile-time constant, so masking here once removes a
+                    # multiply and an operand load from every sampler step.
+                    # Samplers may rely on inactive entries being zero; the
+                    # flags are still passed for samplers that need them.
+                    active_arr = jnp.array(active)
+
+                    def _premask(x, _mask=active_arr):
+                        if eqx.is_array(x):
+                            mask = _mask.astype(x.dtype)
+                            return x * mask.reshape(mask.shape + (1,) * (x.ndim - 2))
+                        return x
+
+                    sliced_interaction = jax.tree.map(_premask, sliced_interaction)
+
                     this_block_interactions.append(sliced_interaction)
-                    this_block_active.append(jnp.array(active))
+                    this_block_active.append(active_arr)
                     this_block_global_inds.append(global_inds)
                     this_block_global_slices.append(
                         [jnp.array(x) for x in global_slices]
@@ -436,6 +452,10 @@ def sample_blocks(
         sds = program.gibbs_spec.node_shape_struct
         verify_block_state(program.gibbs_spec.free_blocks, state_free, sds, -1)
         verify_block_state(program.gibbs_spec.clamped_blocks, clamp_state, sds, -1)
+
+    # Work on copies so the caller's lists are never mutated.
+    state_free = list(state_free)
+    sampler_state = list(sampler_state)
 
     keys = jax.random.split(key, (len(program.gibbs_spec.free_blocks),))
     global_state = block_state_to_global(state_free + clamp_state, program.gibbs_spec)

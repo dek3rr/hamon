@@ -184,6 +184,7 @@ def _make_swap_branch(
     n_pairs: int,
     n_free_blocks: int,
     base_perm: jax.Array,
+    track_round_trips: bool,
 ):
     """Build a lax.cond branch for even or odd swap pass.
 
@@ -204,11 +205,14 @@ def _make_swap_branch(
             n_free_blocks,
             base_perm,
         )
+        # Static flag: with round-trip tracking disabled, the index-process
+        # update is dropped from the compiled program entirely.
+        new_ist = update_index_state(ist, pm, n_chains) if track_round_trips else ist
         return (
             ss2,
             ac + ac2,
             at + att_mask,
-            update_index_state(ist, pm, n_chains),
+            new_ist,
             pm,
         )
 
@@ -261,6 +265,7 @@ def _nrpt_rounds(
     gibbs_steps_per_round: int,
     energy_delta_fn: Callable | None,
     observer: AbstractNRPTObserver | None,
+    track_round_trips: bool,
 ) -> tuple[NRPTCarry, Any]:
     """The jitted NRPT round loop: vmapped Gibbs sweeps + DEO swaps via scan.
 
@@ -326,7 +331,7 @@ def _nrpt_rounds(
     att_odd = jnp.zeros(n_pairs, dtype=jnp.int32).at[odd_pairs].set(1)
     base_perm = jnp.arange(n_chains, dtype=jnp.int32)
 
-    swap_args = (betas, n_chains, n_pairs, n_free_blocks, base_perm)
+    swap_args = (betas, n_chains, n_pairs, n_free_blocks, base_perm, track_round_trips)
     do_even = _make_swap_branch(
         even_pairs,
         len(even_pairs),
@@ -576,6 +581,7 @@ def nrpt(
             gibbs_steps_per_round,
             energy_delta_fn,
             observer,
+            track_round_trips,
         )
     else:
         final = NRPTCarry(
