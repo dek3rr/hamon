@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Breaking
+
+- **Minimum supported Python is now 3.11** (was 3.10). The JAX (≥ 0.9) and
+  jaxtyping (≥ 0.3) releases hamon is developed against both require
+  Python ≥ 3.11, so the previous 3.10 floor could only resolve to stale
+  dependency versions. Python 3.14 is now supported and tested in CI.
+
+### Changed
+
+- **jaxtyping floor raised to 0.3.10** (was 0.2.23) — picks up the fix for
+  `PyTree[A | B]` isinstance checks silently passing (0.3.9) and cloudpickle
+  round-trips of variadic annotations like `Shaped[Array, "..."]` (0.3.10)
+- **optax floor (testing extra) raised to 0.2.8** (was 0.2.4) — older optax
+  imports the `jax_pmap_shmap_merge` config option removed in JAX 0.10.0 and
+  fails at import
+- **CI test and example matrices now cover Python 3.11–3.14** (was 3.10–3.13)
+
 ## [0.2.0] — 2026-04-02
 
 ### Breaking
