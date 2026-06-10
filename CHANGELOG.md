@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **β₀ = 0 produced NaN base energies in NRPT, silently rejecting every swap** —
+  `nrpt` recovered base energies by dividing the hottest chain's energy by β₀,
+  which is 0/0 when the ladder is anchored at the reference distribution
+  (`beta_range=(0.0, ...)`, the `discover_chain_count` default and the range
+  `ising_sample` uses). Swap acceptance became NaN and every swap was rejected
+  with no error, degrading parallel tempering into independent chains and
+  inflating Λ estimates. Base energies are now computed from an exact β = 1
+  copy of the EBM via `with_beta()`, falling back to the coldest chain's β for
+  EBM classes without `with_beta()` (raising a clear error if that β is 0).
+
 ## [0.2.0] — 2026-04-02
 
 ### Breaking
