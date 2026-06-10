@@ -84,22 +84,49 @@ def _make_pbi_in_axes(stacked_pbi):
 
 
 def _compute_base_energies(
-    ebm0: AbstractEBM,
-    beta0: jax.Array,
+    ebm_ref: AbstractEBM,
+    beta_ref: jax.Array,
     spec,
     stacked_states: list,
     clamp_state: list,
 ) -> jax.Array:
     """Compute E_base(x) for all chains via vmap. Shape: (n_chains,).
 
-    E_base = ebm0.energy(x, spec) / β₀ (temperature linearity).
+    E_base = ebm_ref.energy(x, spec) / β_ref (temperature linearity).
+    β_ref must be nonzero; callers should prefer a β=1 reference EBM so the
+    division is exact (see `_make_reference_ebm`).
     """
 
     def _energy_one_chain(*block_slices):
         state = list(block_slices) + clamp_state
-        return ebm0.energy(state, spec)
+        return ebm_ref.energy(state, spec)
 
-    return jax.vmap(_energy_one_chain)(*stacked_states) / beta0
+    return jax.vmap(_energy_one_chain)(*stacked_states) / beta_ref
+
+
+def _make_reference_ebm(
+    ebms: Sequence[AbstractEBM], betas: jax.Array
+) -> tuple[AbstractEBM, jax.Array]:
+    """Pick the (EBM, β) pair used to recover base energies E_base = E(x)/β.
+
+    Using the hottest chain (β₀) breaks when β₀ = 0 — a standard NRPT ladder
+    anchored at the reference distribution — because E(x) is then identically
+    0 and the division yields NaN, which silently rejects every swap. Prefer
+    an exact β=1 copy of the EBM so no division error is possible; for EBM
+    classes that do not implement `with_beta()`, fall back to the coldest
+    chain, whose β is the largest (best-conditioned) divisor in the ladder.
+    """
+    try:
+        return ebms[-1].with_beta(jnp.asarray(1.0)), jnp.asarray(1.0)
+    except NotImplementedError:
+        if float(betas[-1]) == 0.0:
+            raise ValueError(
+                "Cannot compute base energies: the coldest chain has β = 0 and "
+                f"{type(ebms[-1]).__name__} does not implement with_beta(). "
+                "Either implement with_beta() or use a ladder whose coldest "
+                "chain has β > 0."
+            )
+        return ebms[-1], betas[-1]
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +266,9 @@ def nrpt(
     (lowest β, closest to the reference distribution) and index −1 is the
     **coldest** chain (highest β, the target distribution you want to
     sample from).  The returned ``states`` list preserves this ordering.
+    A hottest chain at exactly β = 0 (sampling the reference distribution)
+    is supported; base energies are computed from a β = 1 copy of the EBM
+    when ``with_beta()`` is available, falling back to the coldest chain.
 
     .. warning::
        To collect samples from the target distribution, always use
@@ -330,7 +360,7 @@ def nrpt(
     att_odd = jnp.zeros(n_pairs, dtype=jnp.int32).at[odd_pairs].set(1)
     base_perm = jnp.arange(n_chains, dtype=jnp.int32)
 
-    ebm0 = ebms[0]
+    ebm_ref, beta_ref = _make_reference_ebm(ebms, betas)
     accepted = jnp.zeros(n_pairs, dtype=jnp.int32)
     attempted = jnp.zeros(n_pairs, dtype=jnp.int32)
     idx_state = init_index_state(n_chains)
@@ -366,7 +396,7 @@ def nrpt(
 
         def _energy_fresh(st_states, old_states, cached_bE):
             return _compute_base_energies(
-                ebm0, betas[0], base_spec, st_states, clamp_state
+                ebm_ref, beta_ref, base_spec, st_states, clamp_state
             )
 
         def _permute_noop(bE, pm):
@@ -389,8 +419,8 @@ def nrpt(
 
     # --- Initial energy -------------------------------------------------------
     base_E = _compute_base_energies(
-        ebm0,
-        betas[0],
+        ebm_ref,
+        beta_ref,
         base_spec,
         stacked_states,
         clamp_state,
