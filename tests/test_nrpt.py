@@ -11,7 +11,14 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from hamon import Block, SpinNode, make_empty_block_state, NRPTStateObserver
+from hamon import (
+    AbstractNRPTObserver,
+    Block,
+    SpinNode,
+    make_empty_block_state,
+    make_ising_delta_fn,
+    NRPTStateObserver,
+)
 from hamon.models import AbstractEBM, IsingEBM, IsingSamplingProgram, hinton_init
 from hamon.nrpt import _compute_base_energies, _make_reference_ebm, nrpt, nrpt_adaptive
 
@@ -586,3 +593,75 @@ class TestZeroBetaHotChain:
         assert jnp.all(stats["acceptance_rate"] > 0.0)
         for phase in stats["tuning_history"]:
             assert jnp.isfinite(phase["Lambda"])
+
+
+# ---------------------------------------------------------------------------
+# Observer energy/state alignment (regression: in fresh-energy mode the
+# observer received post-swap states paired with pre-swap energies)
+# ---------------------------------------------------------------------------
+
+
+class _EnergyRecordingObserver(AbstractNRPTObserver):
+    """Record (states, base_energies) each round so alignment can be checked."""
+
+    def __call__(self, stacked_states, base_energies, round_idx, carry):
+        return None, (list(stacked_states), base_energies)
+
+
+class TestObserverEnergyAlignment:
+    """base_energies handed to observers must describe the states they
+    accompany, in both energy modes."""
+
+    n_rounds = 12
+    n_chains = 4
+    # Close betas → high swap acceptance, so misalignment cannot hide
+    # behind an identity permutation.
+    betas = [0.8, 1.0, 1.2, 1.4]
+
+    def _run(self, energy_delta_fn=None):
+        nodes, edges, fb, ebms, progs = _make_ising(4, self.betas, coupling=0.5)
+        states = _make_states(jax.random.key(0), ebms, fb, self.n_chains)
+
+        kwargs = {}
+        if energy_delta_fn == "ising":
+            kwargs["energy_delta_fn"] = make_ising_delta_fn(
+                nodes, edges, fb, ebms[0].biases, ebms[0].weights
+            )
+
+        obs = _EnergyRecordingObserver()
+        _, stats = nrpt(
+            jax.random.key(1),
+            ebms,
+            progs,
+            states,
+            [],
+            n_rounds=self.n_rounds,
+            gibbs_steps_per_round=2,
+            observer=obs,
+            **kwargs,
+        )
+        # The regression only manifests when swaps actually happen.
+        assert int(jnp.sum(stats["accepted"])) > 0, "test needs accepted swaps"
+
+        ebm_unit = IsingEBM(
+            nodes, edges, ebms[0].biases, ebms[0].weights, jnp.array(1.0)
+        )
+        spec = progs[0].gibbs_spec
+        obs_states, obs_energies = stats["observations"]
+
+        for r in range(self.n_rounds):
+            for c in range(self.n_chains):
+                state_rc = [obs_states[b][r][c] for b in range(len(fb))]
+                expected = float(ebm_unit.energy(state_rc, spec))
+                recorded = float(obs_energies[r][c])
+                assert abs(recorded - expected) < 1e-3, (
+                    f"round {r} chain {c}: recorded {recorded}, state energy {expected}"
+                )
+
+    def test_fresh_energy_mode(self):
+        """Default mode: energies recomputed each round, permuted after swaps."""
+        self._run()
+
+    def test_cached_energy_mode(self):
+        """Delta-cached mode: running cache stays aligned through swaps."""
+        self._run(energy_delta_fn="ising")
