@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Jit-once NRPT round loop** — the Gibbs + DEO swap scan now lives in a
+  module-level `eqx.filter_jit` function, so the compilation cache persists
+  across `nrpt` calls. Templates already at β = 1 are reused without
+  rebasing, and `nrpt_adaptive` rebases once before the phase loop, so all
+  tuning phases plus production trace and compile **exactly once** (β arrays
+  and states are traced data). Verified by a trace-count regression test;
+  measured 1.80s → 0.54s (~3.3×) per `nrpt_adaptive` call on an 8-chain
+  48×48 Ising benchmark (CPU).
+
 - **Temperature-linear NRPT mode** — `nrpt` now accepts a *single* template
   `(ebm, program)` pair (plus an explicit `betas` array) instead of per-chain
   sequences. One base program is built at β = 1 and every interaction array

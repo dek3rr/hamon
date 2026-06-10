@@ -747,3 +747,56 @@ class TestTemperatureLinearMode:
                 1,
                 betas=betas,
             )
+
+
+class TestJitCacheReuse:
+    """Repeated nrpt calls with the same β=1 base pair must reuse the
+    compiled round loop instead of retracing."""
+
+    def test_repeated_calls_do_not_retrace(self):
+        from hamon.nrpt import _nrpt_rounds_trace_count
+
+        betas = jnp.array([0.5, 1.0, 1.5])
+        _, _, fb, ebms, progs = _make_ising(4, [0.5, 1.0, 1.5], coupling=0.5)
+        inits = _make_states(jax.random.key(0), ebms, fb, 3)
+        base_ebm = ebms[0].with_beta(jnp.asarray(1.0))
+        base_prog = progs[0].with_ebm(base_ebm)
+
+        before = _nrpt_rounds_trace_count[0]
+        nrpt(jax.random.key(1), base_ebm, base_prog, inits, [], 6, 1, betas=betas)
+        assert _nrpt_rounds_trace_count[0] == before + 1
+
+        # Same static structure, different betas values and key → cache hit.
+        nrpt(
+            jax.random.key(2),
+            base_ebm,
+            base_prog,
+            inits,
+            [],
+            6,
+            1,
+            betas=jnp.array([0.4, 0.9, 1.4]),
+        )
+        assert _nrpt_rounds_trace_count[0] == before + 1, "round loop retraced"
+
+    def test_adaptive_phases_compile_once(self):
+        from hamon.nrpt import _nrpt_rounds_trace_count
+
+        _, _, fb, ebms, progs = _make_ising(4, [0.5, 1.0, 1.5], coupling=0.5)
+        inits = _make_states(jax.random.key(3), ebms, fb, 3)
+
+        before = _nrpt_rounds_trace_count[0]
+        nrpt_adaptive(
+            jax.random.key(4),
+            ebm=ebms[-1],
+            program=progs[-1],
+            init_states=inits,
+            clamp_state=[],
+            n_rounds=10,  # == rounds_per_tune so production reuses the trace
+            gibbs_steps_per_round=1,
+            initial_betas=jnp.array([0.5, 1.0, 1.5]),
+            n_tune=3,
+            rounds_per_tune=10,
+        )
+        traces = _nrpt_rounds_trace_count[0] - before
+        assert traces == 1, f"expected 1 trace across 4 phases, got {traces}"
