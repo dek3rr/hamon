@@ -2,7 +2,7 @@
 
 ## Installation
 
-Hamon requires Python ≥ 3.10 and a working
+Hamon requires Python ≥ 3.11 and a working
 [JAX installation](https://jax.readthedocs.io/en/latest/installation.html).
 
 === "pip"

@@ -4,7 +4,7 @@ version = "0.2.0"
 description = "JAX-native thermal sampling for discrete energy-based models"
 readme = "README.md"
 license = "Apache-2.0"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [
     { name = "dek3rr" },
 ]
@@ -27,10 +27,10 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Physics",
@@ -39,7 +39,7 @@ classifiers = [
 
 dependencies = [
     "equinox>=0.11.2",
-    "jaxtyping>=0.2.23",
+    "jaxtyping>=0.3.10",
 ]
 
 [project.urls]
@@ -65,7 +65,7 @@ testing = [
     "pytest>=8.3",
     "nbmake>=1.5",
     "networkx>=2.6.3",
-    "optax>=0.2.4",
+    "optax>=0.2.8",
     "setuptools>=75.0",
 ]
 development = [
