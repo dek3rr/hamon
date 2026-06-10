@@ -355,18 +355,34 @@ def from_global_state(
 
     A list with one element per *blocks_to_extract*—each element is a PyTree
     with exactly ``len(block)`` nodes in its leading dimension.
-    """
-    all_sd_inds = []
-    all_sd_slices = []
-    for block in blocks_to_extract:
-        sd_inds, slices = get_node_locations(block, spec_from)
-        all_sd_inds.append(sd_inds)
-        all_sd_slices.append(slices)
 
-    return [
-        jax.tree.map(lambda x: jnp.take(x, sls, axis=0), global_state[_sd_ind])
-        for _sd_ind, sls in zip(all_sd_inds, all_sd_slices)
-    ]
+    Blocks whose nodes occupy a contiguous range of the global state (always
+    the case for blocks laid out by ``BlockSpec``) are extracted with a
+    static-offset slice instead of a gather, mirroring
+    [`hamon.scatter_block_to_global`][].
+    """
+    out = []
+    for block in blocks_to_extract:
+        node_sds = spec_from.node_shape_dtypes[block.node_type]
+        sd_ind = spec_from.sd_index_map[node_sds]
+        locs = np.array([spec_from.node_global_location_map[node][1] for node in block])
+
+        if locs.size and np.array_equal(locs, np.arange(locs[0], locs[0] + locs.size)):
+            start, length = int(locs[0]), int(locs.size)
+            out.append(
+                jax.tree.map(
+                    lambda x: jax.lax.dynamic_slice_in_dim(x, start, length, axis=0),
+                    global_state[sd_ind],
+                )
+            )
+        else:
+            positions = jnp.array(locs)
+            out.append(
+                jax.tree.map(
+                    lambda x: jnp.take(x, positions, axis=0), global_state[sd_ind]
+                )
+            )
+    return out
 
 
 def make_empty_block_state(
