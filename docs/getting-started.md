@@ -126,4 +126,4 @@ states, _, stats = nrpt_adaptive(
 
 - [**Concepts**](concepts.md) — how blocks, factors, and tempering fit together
 - [**Architecture**](architecture.md) — what Hamon optimizes under the hood
-- [**Examples**](examples/01_all_of_hamon.ipynb) — full worked notebooks
+- [**Examples**](examples/01_block_gibbs_sampling.ipynb) — full worked notebooks

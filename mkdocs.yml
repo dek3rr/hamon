@@ -97,14 +97,16 @@ nav:
     - Home: 'index.md'
     - Getting Started:
         - Installation: 'getting-started.md'
-        - 'examples/00_probabilistic_computing.ipynb'
+        - 'examples/00_discrete_probability_and_ebms.ipynb'
     - Concepts:
         - 'concepts.md'
         - Architecture: 'architecture.md'
     - Examples:
-        - 'examples/01_all_of_hamon.ipynb'
-        - 'examples/02_spin_models.ipynb'
-        - 'examples/03_parallel_tempering.ipynb'
+        - 'examples/01_block_gibbs_sampling.ipynb'
+        - 'examples/02_the_ising_model.ipynb'
+        - 'examples/03_building_custom_pgms.ipynb'
+        - 'examples/04_diagnosing_sample_quality.ipynb'
+        - 'examples/05_parallel_tempering.ipynb'
     - API Reference:
         - Graph Primitives:
             - 'api/pgm.md'
