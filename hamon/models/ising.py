@@ -150,9 +150,8 @@ def hinton_init(
     where $h_i$ is the bias of unit *i* and $\beta$ is the
     inverse-temperature scaling factor. See Hinton (2012) for a discussion of this initialization heuristic.
 
-    All blocks are sampled in parallel via `vmap` over a stacked index array,
-    so the number of XLA ops is O(1) in the number of blocks rather than O(n_blocks).
-    Blocks must all have the same size; empty blocks are rejected by `BlockSpec` upstream.
+    Each block is sampled with its own Bernoulli draw; blocks may have
+    different sizes.
 
     Arguments:
         key: the JAX PRNG key to use
@@ -372,7 +371,7 @@ def ising_sample(
         unnecessary) or if all biases are identical (model has no
         per-variable preference).
     """
-    import networkx as nx  # type: ignore[import-untyped]
+    import networkx as nx
 
     from hamon.nrpt import discover_chain_count, nrpt_adaptive
 

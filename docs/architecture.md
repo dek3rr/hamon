@@ -1,26 +1,32 @@
 # Architecture
 
 Hamon's internals are organized around one idea: **block-structured Gibbs
-sampling on padded, stacked PyTree states, compiled once via JAX**.
+sampling on concatenated PyTree states, compiled once via JAX**.
 
 ## The core abstraction
 
 A `BlockSamplingProgram` holds everything needed to run block Gibbs on a single
 model: the `BlockGibbsSpec` (which blocks to sample, which to clamp), the
 conditional samplers for each block, and the factors that define the energy.
+At construction the program pre-slices every interaction tensor per block,
+pre-zeroes padded interaction entries using the active mask, and precomputes
+each block's contiguous slice into the global state.
 
 The `BlockSpec` manages the mapping between block-local and global state arrays.
-Because JAX requires rectangular arrays, variable-size blocks are padded and
-stacked by structural group. This costs some wasted FLOPs but avoids Python-level
-loops over blocks, which would cause XLA compile times to scale linearly with
-block count.
+Per-node *interaction* data is padded to the maximum neighbour count so it is
+rectangular (with an `active` mask marking real entries), which costs some
+wasted FLOPs but avoids Python-level loops that would make XLA compile times
+scale with node count.
 
 ## State representation
 
-Global state is a list of arrays, one per structural group of blocks. Each array
-has shape `(n_blocks_in_group, max_block_size, ...)` with padding where needed.
-`BlockSpec` tracks the valid (non-padded) indices so that `block_state_to_global`
-and `from_global_state` can convert between representations without data loss.
+Global state is a list of arrays, one per distinct node structure (shape/dtype
+template). All blocks sharing a structure are **concatenated along the node
+axis**, each block occupying a contiguous range; `node_global_location_map`
+records every node's position. `block_state_to_global` and `from_global_state`
+convert between the per-block and concatenated representations, and because
+block ranges are contiguous these lower to static slices rather than
+gathers/scatters.
 
 Node identity matters: the same `SpinNode()` object must appear in both the EBM
 and the block definitions. Hamon enforces this through `init_factory`, which
@@ -52,6 +58,15 @@ so swap acceptance ratios reduce to
 \( \exp\bigl((\beta_{i+1} - \beta_i)(V^{(i+1)} - V^{(i)})\bigr) \)
 without recomputing energies at each temperature.
 
+Temperature linearity is exploited end-to-end: `nrpt` accepts a single
+template `(ebm, program)` pair, rebases it to \( \beta = 1 \), and scales the
+interaction arrays by each chain's \( \beta \) inside the vmapped kernel —
+no per-chain program construction and no per-chain copies of the weight
+tensors. The whole round loop lives in a module-level jitted function, so
+repeated calls with the same base pair (e.g. the tuning phases of
+`nrpt_adaptive`) compile exactly once; the \( \beta \) schedule is traced
+data and can change freely between phases.
+
 ## Energy caching
 
 When an `energy_delta_fn` is provided (e.g. from `make_ising_delta_fn`), Hamon
@@ -64,14 +79,17 @@ otherwise dominate each round.
 
 ## Index process tracking
 
-The index process tracks which chain index occupies which temperature level over
-time. Hamon uses a permutation-based representation: `index_state` is an array of
-shape `(n_chains, 2)` where column 0 is the current position in the ladder and
-column 1 is the direction of travel.
+The index process tracks which chain position each machine's state occupies
+over time. `index_state` is a dict of four `(n_chains,)` arrays:
+`machine_to_chain` (current ladder position per machine), `visited_top`
+(whether the machine has reached the coldest chain since its last completed
+trip), and `round_trips` / `restarts` counters.
 
 Because DEO swaps are disjoint transpositions, the swap permutation is
 self-inverse (`inv_perm == perm`), so updating the index state after a swap
-requires only a single gather — no `jnp.argsort`.
+requires only a single gather — no `jnp.argsort`. When
+`track_round_trips=False`, the update is omitted from the compiled program
+entirely.
 
 Round-trip counting and \( \Lambda \) estimation happen in `round_trip_summary`
 from the accumulated index state and rejection rates.

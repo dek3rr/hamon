@@ -296,6 +296,17 @@ def _batch_gather_with_k(x, *idx):
     ).reshape(batch_shape)
 
 
+def _accumulator_dtype(interactions) -> jnp.dtype:
+    """Accumulator dtype for conditional parameters: the result type of all
+    interaction weight dtypes, so float64 weights accumulate in float64
+    instead of being silently seeded with a float32 zero. Falls back to
+    float32 when no DiscreteEBMInteractions are present."""
+    w_dtypes = [
+        i.weights.dtype for i in interactions if isinstance(i, DiscreteEBMInteraction)
+    ]
+    return jnp.result_type(*w_dtypes) if w_dtypes else jnp.dtype(jnp.float32)
+
+
 def _split_states(states, n_spin):
     states_spin, states_cat = states[:n_spin], states[n_spin:]
 
@@ -337,7 +348,7 @@ class SpinGibbsConditional(BernoulliConditional):
         where the sum over $i$ is over all the `DiscreteEBMInteractions` seen by this function.
         """
 
-        gamma = jnp.zeros(output_sd.shape, dtype=jnp.float32)
+        gamma = jnp.zeros(output_sd.shape, dtype=_accumulator_dtype(interactions))
         for i, (interaction, active, state) in enumerate(
             zip(interactions, active_flags, states)
         ):
@@ -346,8 +357,10 @@ class SpinGibbsConditional(BernoulliConditional):
 
                 weights = _batch_gather(interaction.weights, *state_cat)
                 spin_prod = _spin_product(state_bin).astype(weights.dtype)
-                active = active.astype(weights.dtype)
-                gamma += jnp.sum(weights * active * spin_prod, axis=-1)
+                # Padded entries are pre-zeroed at program construction
+                # (BlockSamplingProgram masks interactions with the active
+                # flags), so no per-step active multiply is needed.
+                gamma += jnp.sum(weights * spin_prod, axis=-1)
             else:
                 raise RuntimeError("Unsupported interaction found")
         return gamma, sampler_state
@@ -382,7 +395,10 @@ class CategoricalGibbsConditional(SoftmaxConditional):
         where the sum over $i$ is over all the `DiscreteEBMInteractions` seen by this function.
         """
 
-        theta = jnp.zeros((*output_sd.shape, self.n_categories), dtype=jnp.float32)
+        theta = jnp.zeros(
+            (*output_sd.shape, self.n_categories),
+            dtype=_accumulator_dtype(interactions),
+        )
         for i, (interaction, active, state) in enumerate(
             zip(interactions, active_flags, states)
         ):
@@ -393,12 +409,9 @@ class CategoricalGibbsConditional(SoftmaxConditional):
                 spin_prod = jnp.expand_dims(_spin_product(state_bin), -1).astype(
                     weights.dtype
                 )
-                theta += jnp.sum(
-                    spin_prod
-                    * weights
-                    * jnp.expand_dims(active, -1).astype(weights.dtype),
-                    axis=-2,
-                )
+                # Padded entries are pre-zeroed at program construction; see
+                # SpinGibbsConditional.compute_parameters.
+                theta += jnp.sum(spin_prod * weights, axis=-2)
 
             else:
                 raise RuntimeError("Unsupported interaction found")

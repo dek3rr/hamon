@@ -112,6 +112,12 @@ Key features of the NRPT implementation:
 
 - **Vectorized swaps**: 1 energy evaluation per chain (not 4 per pair), all
   non-overlapping swaps execute simultaneously via permutation indexing
+- **Temperature-linear mode**: one β = 1 base program serves every chain;
+  interactions are scaled by each chain's β inside the kernel, so no
+  per-chain program construction and n_chains× less interaction memory
+- **Compile-once adaptive tuning**: the round loop is jitted at module level
+  and the β schedule is traced data, so all tuning phases reuse one
+  compiled executable
 - **Adaptive scheduling**: iteratively tunes β spacing to equalize rejection
   rates, minimizing the global communication barrier Λ
 - **Round trip tracking**: monitors the index process per machine, estimates
@@ -130,10 +136,13 @@ with static offsets (scatters only as a fallback for non-contiguous layouts)
 instead of rebuilding the full state tensor each iteration.
 
 **Energy evaluation skips unnecessary work.** Pre-built `BlockSpec` objects are
-passed through directly — no reconstruction on every `energy()` call.
+passed through directly — no reconstruction on every `energy()` call. Padded
+interaction entries are pre-zeroed at program construction, so samplers skip
+the per-step active-mask multiply.
 
 **Accumulator dtypes are explicit.** The moment accumulator pins its dtype at
-construction, avoiding silent float64 promotion on GPU.
+construction, and conditional samplers accumulate in the weights' dtype,
+avoiding silent promotion on GPU and seeding float64 sums with float32 zeros.
 
 ## Citing Hamon
 
@@ -145,7 +154,7 @@ If you use Hamon in your research, please cite:
     title        = {Hamon: JAX-Native Thermal Sampling for Discrete Energy-Based Models},
     year         = {2026},
     url          = {https://github.com/dek3rr/hamon},
-    version      = {0.2.0},
+    version      = {0.3.0},
     license      = {Apache-2.0},
 }
 ```

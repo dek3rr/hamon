@@ -11,5 +11,5 @@ repos:
     rev: v1.1.410
     hooks:
       - id: pyright
-        additional_dependencies: [equinox, jaxtyping]
+        additional_dependencies: [equinox, jaxtyping, networkx]
         files: hamon/
