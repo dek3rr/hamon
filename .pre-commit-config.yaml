@@ -1,6 +1,6 @@
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.12
+    rev: v0.15.16
     hooks:
       - id: ruff-check
         args: [--fix]
@@ -8,7 +8,7 @@ repos:
         args: [--line-length=88]
 
   - repo: https://github.com/RobertCraigie/pyright-python
-    rev: v1.1.409
+    rev: v1.1.410
     hooks:
       - id: pyright
         additional_dependencies: [equinox, jaxtyping]
