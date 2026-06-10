@@ -24,6 +24,12 @@ from hamon.pgm import AbstractNode
 class EdgePartition:
     """Pre-computed classification of edges relative to a block partition.
 
+    This is analysis/planning tooling: use it to inspect how much a given
+    block partition can save with boundary-only deltas (e.g. via
+    `boundary_ratio` and `savings_factor`) before building masks for
+    `ising_energy_delta`. It is not used by the sampling pipeline itself —
+    `make_ising_delta_fn` builds its own index arrays.
+
     For each block b, edges are classified as:
     - incident: at least one endpoint in b (needed for ΔE after updating b)
     - boundary: exactly one endpoint in b, one outside
@@ -143,36 +149,6 @@ def ising_energy_delta(
     )
 
     return -(bias_delta + coupling_delta)
-
-
-# ---------------------------------------------------------------------------
-# Cached energy tracker for NRPT
-# ---------------------------------------------------------------------------
-
-
-def init_energy_cache(
-    n_chains: int,
-    base_energies: jax.Array | None = None,
-) -> jax.Array:
-    """Initialize energy cache. If base_energies provided, use those."""
-    if base_energies is not None:
-        return base_energies
-    return jnp.zeros(n_chains, dtype=jnp.float32)
-
-
-def update_energy_cache(
-    cached_energies: jax.Array,
-    energy_deltas: jax.Array,
-    betas: jax.Array,
-) -> jax.Array:
-    """Update cached base energies with deltas.
-
-    cached_base_E[c] += delta_E[c] / betas[c]
-
-    The delta is the raw energy change (includes β factor from the EBM),
-    so we divide by β to get the base energy change.
-    """
-    return cached_energies + energy_deltas / betas
 
 
 # ---------------------------------------------------------------------------

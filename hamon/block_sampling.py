@@ -13,10 +13,10 @@ from jaxtyping import Array, Key, PyTree, Shaped
 from hamon.block_management import (
     Block,
     BlockSpec,
+    _block_layout,
     block_state_to_global,
     from_global_state,
     scatter_block_to_global,
-    get_node_locations,
     verify_block_state,
 )
 from hamon.interaction import InteractionGroup
@@ -322,25 +322,21 @@ class BlockSamplingProgram(eqx.Module):
         self.per_block_interaction_global_inds = per_block_interaction_global_inds
         self.per_block_interaction_global_slices = per_block_interaction_global_slices
 
-        # Precompute scatter indices and output SDs per free block.
+        # Precompute scatter indices and output SDs per free block. BlockSpec
+        # assigns each block a contiguous run of global indices, so the slice
+        # start is expected to always be static; _block_layout keeps a scatter
+        # fallback for any exotic layout.
         block_sd_inds = []
         block_positions = []
         block_output_sds = []
         block_slice_starts = []
         for block in gibbs_spec.free_blocks:
-            sd_ind, positions = get_node_locations(block, gibbs_spec)
+            sd_ind, start, locs = _block_layout(block, gibbs_spec)
             block_sd_inds.append(sd_ind)
-            block_positions.append(positions)
+            block_positions.append(jnp.array(locs))
+            block_slice_starts.append(start)
             template_sd = gibbs_spec.node_shape_struct[block.node_type]
             block_output_sds.append(_build_output_sd(block, template_sd))
-            # BlockSpec assigns each block a contiguous run of global indices,
-            # so this is expected to always produce a static start. The check
-            # keeps a scatter fallback for any exotic layout.
-            pos = np.asarray(positions)
-            if pos.size and np.array_equal(pos, np.arange(pos[0], pos[0] + pos.size)):
-                block_slice_starts.append(int(pos[0]))
-            else:
-                block_slice_starts.append(None)
         self._block_sd_inds = block_sd_inds
         self._block_positions = block_positions
         self._block_output_sds = block_output_sds

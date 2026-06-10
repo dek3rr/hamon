@@ -252,6 +252,33 @@ def block_state_to_global(
     return global_state
 
 
+def _block_layout(block: Block, spec: BlockSpec) -> tuple[int, int | None, np.ndarray]:
+    """Locate *block* inside the global state.
+
+    Returns ``(sd_index, contiguous_start, positions)``:
+
+    * *sd_index* — which entry of the global state list holds the block's
+      nodes;
+    * *contiguous_start* — the static start index when the positions form a
+      contiguous ascending range (a ``BlockSpec`` layout invariant for its own
+      blocks), or ``None`` for arbitrary node sets;
+    * *positions* — the per-node global positions as a numpy array.
+
+    A contiguous start lets reads and writes lower to static-offset
+    ``lax.dynamic_slice`` / ``dynamic_update_slice`` instead of
+    gathers/scatters, which XLA fuses far better. This is the single source
+    of truth for that check; ``scatter_block_to_global``,
+    ``from_global_state``, and ``BlockSamplingProgram`` all use it.
+    """
+    node_sds = spec.node_shape_dtypes[block.node_type]
+    sd_ind = spec.sd_index_map[node_sds]
+    locs = np.array([spec.node_global_location_map[node][1] for node in block])
+    start = None
+    if locs.size and np.array_equal(locs, np.arange(locs[0], locs[0] + locs.size)):
+        start = int(locs[0])
+    return sd_ind, start, locs
+
+
 def scatter_block_to_global(
     global_state: list[_GlobalState],
     new_block_state: _State,
@@ -287,13 +314,10 @@ def scatter_block_to_global(
     A new global state list with the positions belonging to ``block``
     replaced by ``new_block_state``.
     """
-    node_sds = spec.node_shape_dtypes[block.node_type]
-    sd_ind = spec.sd_index_map[node_sds]
-    locs = np.array([spec.node_global_location_map[node][1] for node in block])
+    sd_ind, start, locs = _block_layout(block, spec)
 
     new_global = list(global_state)  # shallow copy; only one slot changes
-    if locs.size and np.array_equal(locs, np.arange(locs[0], locs[0] + locs.size)):
-        start = int(locs[0])
+    if start is not None:
         new_global[sd_ind] = jax.tree.map(
             lambda g, s: jax.lax.dynamic_update_slice_in_dim(g, s, start, axis=0),
             global_state[sd_ind],
@@ -329,11 +353,8 @@ def get_node_locations(
     * *positions* is a 1D array with the indices each node
       occupies inside that particular PyTree.
     """
-    node_sds = spec.node_shape_dtypes[nodes.node_type]
-    sd_inds = spec.sd_index_map[node_sds]
-    global_locs = [spec.node_global_location_map[node][1] for node in nodes]
-    slices = jnp.array(global_locs)
-    return sd_inds, slices
+    sd_ind, _, locs = _block_layout(nodes, spec)
+    return sd_ind, jnp.array(locs)
 
 
 def from_global_state(
@@ -363,15 +384,15 @@ def from_global_state(
     """
     out = []
     for block in blocks_to_extract:
-        node_sds = spec_from.node_shape_dtypes[block.node_type]
-        sd_ind = spec_from.sd_index_map[node_sds]
-        locs = np.array([spec_from.node_global_location_map[node][1] for node in block])
+        sd_ind, start, locs = _block_layout(block, spec_from)
 
-        if locs.size and np.array_equal(locs, np.arange(locs[0], locs[0] + locs.size)):
-            start, length = int(locs[0]), int(locs.size)
+        if start is not None:
+            length = int(locs.size)
             out.append(
                 jax.tree.map(
-                    lambda x: jax.lax.dynamic_slice_in_dim(x, start, length, axis=0),
+                    lambda x, _s=start, _n=length: jax.lax.dynamic_slice_in_dim(
+                        x, _s, _n, axis=0
+                    ),
                     global_state[sd_ind],
                 )
             )
@@ -379,7 +400,8 @@ def from_global_state(
             positions = jnp.array(locs)
             out.append(
                 jax.tree.map(
-                    lambda x: jnp.take(x, positions, axis=0), global_state[sd_ind]
+                    lambda x, _p=positions: jnp.take(x, _p, axis=0),
+                    global_state[sd_ind],
                 )
             )
     return out
