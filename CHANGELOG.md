@@ -23,6 +23,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   imports the `jax_pmap_shmap_merge` config option removed in JAX 0.10.0 and
   fails at import
 - **CI test and example matrices now cover Python 3.11–3.14** (was 3.10–3.13)
+- **Block write-back uses contiguous slice updates instead of scatters** —
+  free blocks always occupy contiguous ranges of the global state (a
+  `BlockSpec` layout invariant), so the per-block write-back in the Gibbs
+  scan and in `scatter_block_to_global` now lowers to
+  `lax.dynamic_update_slice` with a precomputed static offset instead of a
+  gather-index scatter, which XLA fuses far better (the isolated op is ~30×
+  faster on CPU; scatters are disproportionately expensive on GPU).
+  Non-contiguous node sets keep the scatter fallback. Results are
+  bit-identical.
 
 ### Fixed
 

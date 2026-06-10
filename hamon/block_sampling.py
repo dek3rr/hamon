@@ -150,6 +150,11 @@ class BlockSamplingProgram(eqx.Module):
     - `_block_sd_inds`: precomputed sd_index for each free block (avoids recomputing inside scan)
     - `_block_positions`: precomputed node positions in global state for each free block (avoids recomputing inside scan)
     - `_block_output_sds`: precomputed output ShapeDtypeStruct pytree for each free block
+    - `_block_slice_starts`: static start index when the block occupies a contiguous
+        range of the global state (always the case for blocks laid out by `BlockSpec`),
+        or `None` to fall back to a gather-index scatter. A contiguous range lets the
+        write-back lower to `lax.dynamic_update_slice` instead of a scatter, which XLA
+        fuses far better.
     """
 
     def with_ebm(self, ebm) -> "BlockSamplingProgram":
@@ -174,6 +179,7 @@ class BlockSamplingProgram(eqx.Module):
     _block_sd_inds: list[int]
     _block_positions: list[Array]
     _block_output_sds: list[PyTree]
+    _block_slice_starts: list[int | None]
 
     def __init__(
         self,
@@ -303,15 +309,25 @@ class BlockSamplingProgram(eqx.Module):
         block_sd_inds = []
         block_positions = []
         block_output_sds = []
+        block_slice_starts = []
         for block in gibbs_spec.free_blocks:
             sd_ind, positions = get_node_locations(block, gibbs_spec)
             block_sd_inds.append(sd_ind)
             block_positions.append(positions)
             template_sd = gibbs_spec.node_shape_struct[block.node_type]
             block_output_sds.append(_build_output_sd(block, template_sd))
+            # BlockSpec assigns each block a contiguous run of global indices,
+            # so this is expected to always produce a static start. The check
+            # keeps a scatter fallback for any exotic layout.
+            pos = np.asarray(positions)
+            if pos.size and np.array_equal(pos, np.arange(pos[0], pos[0] + pos.size)):
+                block_slice_starts.append(int(pos[0]))
+            else:
+                block_slice_starts.append(None)
         self._block_sd_inds = block_sd_inds
         self._block_positions = block_positions
         self._block_output_sds = block_output_sds
+        self._block_slice_starts = block_slice_starts
 
 
 _State: TypeAlias = PyTree[Shaped[Array, "nodes ?*state"], "_State"]
@@ -486,6 +502,7 @@ def _run_blocks(
 
     block_sd_inds = program._block_sd_inds
     block_positions = program._block_positions
+    block_slice_starts = program._block_slice_starts
 
     def body_fn(carry, _key):
         state_free, sampler_state, global_state = carry
@@ -519,13 +536,25 @@ def _run_blocks(
             ]
             for i in new_states:
                 sd_ind = block_sd_inds[i]
-                positions = block_positions[i]
+                start = block_slice_starts[i]
                 new_global = list(global_state)
-                new_global[sd_ind] = jax.tree.map(
-                    lambda g, s: g.at[positions].set(s),
-                    global_state[sd_ind],
-                    new_states[i],
-                )
+                if start is not None:
+                    # Contiguous block: a static-offset dynamic_update_slice,
+                    # which XLA fuses far better than a gather-index scatter.
+                    new_global[sd_ind] = jax.tree.map(
+                        lambda g, s: jax.lax.dynamic_update_slice_in_dim(
+                            g, s, start, axis=0
+                        ),
+                        global_state[sd_ind],
+                        new_states[i],
+                    )
+                else:
+                    positions = block_positions[i]
+                    new_global[sd_ind] = jax.tree.map(
+                        lambda g, s: g.at[positions].set(s),
+                        global_state[sd_ind],
+                        new_states[i],
+                    )
                 global_state = new_global
 
         return (state_free, sampler_state, global_state), None

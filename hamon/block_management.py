@@ -14,6 +14,7 @@ from typing import (
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jaxtyping import Array, Int, PyTree, Shaped
 
 from .pgm import AbstractNode
@@ -262,9 +263,12 @@ def scatter_block_to_global(
 
     This is an incremental alternative to calling ``block_state_to_global``
     from scratch after every block update. Instead of rebuilding the full
-    concatenated global tensor, it writes only the positions that changed
-    using ``jnp.ndarray.at[...].set(...)``, which XLA lowers to a targeted
-    scatter.
+    concatenated global tensor, it writes only the positions that changed.
+    When the block occupies a contiguous range of the global state (always
+    the case for blocks laid out by ``BlockSpec``), the write lowers to
+    ``lax.dynamic_update_slice`` with a static offset, which XLA fuses far
+    better than a scatter; non-contiguous node sets fall back to
+    ``jnp.ndarray.at[...].set(...)``.
 
     Because the clamped blocks never change, carrying global state across
     scan iterations and calling this function after each block update avoids
@@ -283,13 +287,25 @@ def scatter_block_to_global(
     A new global state list with the positions belonging to ``block``
     replaced by ``new_block_state``.
     """
-    sd_ind, positions = get_node_locations(block, spec)
+    node_sds = spec.node_shape_dtypes[block.node_type]
+    sd_ind = spec.sd_index_map[node_sds]
+    locs = np.array([spec.node_global_location_map[node][1] for node in block])
+
     new_global = list(global_state)  # shallow copy; only one slot changes
-    new_global[sd_ind] = jax.tree.map(
-        lambda g, s: g.at[positions].set(s),
-        global_state[sd_ind],
-        new_block_state,
-    )
+    if locs.size and np.array_equal(locs, np.arange(locs[0], locs[0] + locs.size)):
+        start = int(locs[0])
+        new_global[sd_ind] = jax.tree.map(
+            lambda g, s: jax.lax.dynamic_update_slice_in_dim(g, s, start, axis=0),
+            global_state[sd_ind],
+            new_block_state,
+        )
+    else:
+        positions = jnp.array(locs)
+        new_global[sd_ind] = jax.tree.map(
+            lambda g, s: g.at[positions].set(s),
+            global_state[sd_ind],
+            new_block_state,
+        )
     return new_global
 
 
