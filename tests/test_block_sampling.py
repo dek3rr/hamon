@@ -362,6 +362,13 @@ class TestRunBlocksGlobalState(unittest.TestCase):
         for a, b in zip(returned_global, expected_global):
             self.assertTrue(jnp.allclose(a, b))
 
+    def test_block_slice_starts_precomputed(self):
+        """BlockSpec lays free blocks out contiguously, so every free block
+        gets a static slice start (the scatter fallback should be unused)."""
+        prog, _ = self._make_simple_program()
+        # Two 2-node blocks sharing one structural group → starts at 0 and 2.
+        self.assertEqual(prog._block_slice_starts, [0, 2])
+
 
 class TestPerBlockInteractionsOverride(unittest.TestCase):
     """Passing per_block_interactions to sample_single_block and _run_blocks

@@ -125,8 +125,9 @@ Key features of the NRPT implementation:
 instead of a Python loop. Compile time is constant regardless of chain count.
 
 **No redundant work in the sampler loop.** Global state is threaded through
-`lax.scan` as a carry. Block updates use targeted scatters instead of rebuilding
-the full state tensor each iteration.
+`lax.scan` as a carry. Block updates write back via contiguous slice updates
+with static offsets (scatters only as a fallback for non-contiguous layouts)
+instead of rebuilding the full state tensor each iteration.
 
 **Energy evaluation skips unnecessary work.** Pre-built `BlockSpec` objects are
 passed through directly — no reconstruction on every `energy()` call.

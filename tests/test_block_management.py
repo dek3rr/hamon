@@ -356,3 +356,59 @@ class TestBlockSpecOrdering(unittest.TestCase):
         self.assertEqual(len(gs1), len(gs2))
         for a, b in zip(gs1, gs2):
             self.assertTrue(jnp.array_equal(a, b))
+
+
+class TestScatterBlockToGlobal(unittest.TestCase):
+    """Both write-back paths (contiguous slice update and scatter fallback)
+    must agree with a reference positional scatter."""
+
+    def setUp(self):
+        self.sd = {Node1: jax.ShapeDtypeStruct((), jnp.float32)}
+        self.blocks = [
+            block_management.Block([Node1() for _ in range(4)]),
+            block_management.Block([Node1() for _ in range(3)]),
+        ]
+        self.spec = block_management.BlockSpec(self.blocks, self.sd)
+        self.global_state = [jax.random.normal(jax.random.key(0), (7,))]
+
+    def _reference(self, block, new_state):
+        sd_ind, positions = block_management.get_node_locations(block, self.spec)
+        return sd_ind, self.global_state[sd_ind].at[positions].set(new_state)
+
+    def test_contiguous_block(self):
+        """Blocks laid out by BlockSpec are contiguous → slice-update path."""
+        new_state = jnp.arange(3, dtype=jnp.float32) + 100.0
+        out = block_management.scatter_block_to_global(
+            self.global_state, new_state, self.blocks[1], self.spec
+        )
+        sd_ind, ref = self._reference(self.blocks[1], new_state)
+        self.assertTrue(jnp.array_equal(out[sd_ind], ref))
+        # positions outside the block are untouched
+        self.assertTrue(jnp.array_equal(out[sd_ind][:4], self.global_state[sd_ind][:4]))
+
+    def test_non_contiguous_block_falls_back(self):
+        """A block interleaving nodes from two spec blocks has non-contiguous
+        global positions and must take the scatter fallback."""
+        mixed = block_management.Block(
+            [self.blocks[0][0], self.blocks[1][0], self.blocks[0][1]]
+        )
+        _, positions = block_management.get_node_locations(mixed, self.spec)
+        pos = list(map(int, positions))
+        self.assertNotEqual(pos, list(range(pos[0], pos[0] + len(pos))))
+
+        new_state = jnp.array([7.0, 8.0, 9.0])
+        out = block_management.scatter_block_to_global(
+            self.global_state, new_state, mixed, self.spec
+        )
+        sd_ind, ref = self._reference(mixed, new_state)
+        self.assertTrue(jnp.array_equal(out[sd_ind], ref))
+
+    def test_single_node_block(self):
+        """A length-1 block is trivially contiguous."""
+        single = block_management.Block([self.blocks[0][2]])
+        new_state = jnp.array([42.0])
+        out = block_management.scatter_block_to_global(
+            self.global_state, new_state, single, self.spec
+        )
+        sd_ind, ref = self._reference(single, new_state)
+        self.assertTrue(jnp.array_equal(out[sd_ind], ref))
