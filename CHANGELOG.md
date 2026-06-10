@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   No behavioral change.
 - **Shared Ising-grid test fixture** — `tests/utils.make_ising_grid` replaces
   per-file copies of the lattice builder.
+- **One dispatch point for NRPT's template/factory routes** — the
+  template-vs-factory mode check existed three times (`nrpt_adaptive` twice,
+  `discover_chain_count` once) with duplicated phase/probe call sites. A new
+  internal `_ChainSource` owns the dispatch: `nrpt_adaptive` has a single
+  `_run_phase`, `discover_chain_count` a single probe call that forwards the
+  caller's route. Jit-cache behavior is preserved (the template route hands
+  back the identical β = 1 pair every phase). `nrpt_adaptive` also validates
+  `init_states` up front instead of failing later with a shape error.
 - `EdgePartition` documented as analysis/planning tooling (it is not part of
   the sampling pipeline).
 
