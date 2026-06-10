@@ -81,7 +81,11 @@ class SpinNode(AbstractNode):
 
 class CategoricalNode(AbstractNode):
     """A node that represents a random variable that may take on any one of K possible discrete states,
-    represented by a positive integer in (0, K]."""
+    represented by an integer in [0, K).
+
+    The default state dtype is ``uint8`` (see ``DEFAULT_NODE_SHAPE_DTYPES``),
+    which caps K at 256; pass a custom ``node_shape_dtypes`` mapping with a
+    wider integer dtype for larger category counts."""
 
     pass
 
