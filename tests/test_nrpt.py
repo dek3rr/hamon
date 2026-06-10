@@ -665,3 +665,85 @@ class TestObserverEnergyAlignment:
     def test_cached_energy_mode(self):
         """Delta-cached mode: running cache stays aligned through swaps."""
         self._run(energy_delta_fn="ising")
+
+
+# ---------------------------------------------------------------------------
+# Temperature-linear mode (single base program + per-chain β scaling)
+# ---------------------------------------------------------------------------
+
+
+class TestTemperatureLinearMode:
+    """nrpt with single template (ebm, program) objects must reproduce the
+    per-chain-programs path bit-for-bit for β-linear models."""
+
+    def _setup(self):
+        betas = [0.4, 0.8, 1.2, 1.6]
+        _, _, fb, ebms, progs = _make_ising(4, betas, coupling=0.5)
+        inits = _make_states(jax.random.key(2), ebms, fb, 4)
+        return jnp.array(betas), fb, ebms, progs, inits
+
+    def test_matches_per_chain_programs(self):
+        betas, fb, ebms, progs, inits = self._setup()
+        obs = NRPTStateObserver(chain_indices=(0, -1))
+
+        states_seq, stats_seq = nrpt(
+            jax.random.key(11),
+            ebms,
+            progs,
+            inits,
+            [],
+            41,
+            2,
+            betas=betas,
+            observer=obs,
+        )
+        # Template objects at an arbitrary β — rebased to β=1 internally.
+        states_lin, stats_lin = nrpt(
+            jax.random.key(11),
+            ebms[-1],
+            progs[-1],
+            inits,
+            [],
+            41,
+            2,
+            betas=betas,
+            observer=obs,
+        )
+
+        # Guard against a vacuous comparison: swaps must actually happen.
+        assert int(jnp.sum(stats_seq["accepted"])) > 0
+        assert jnp.array_equal(stats_seq["accepted"], stats_lin["accepted"])
+        assert jnp.array_equal(stats_seq["attempted"], stats_lin["attempted"])
+        assert jnp.array_equal(
+            stats_seq["index_state"]["round_trips"],
+            stats_lin["index_state"]["round_trips"],
+        )
+        for c in range(4):
+            for b in range(len(fb)):
+                assert jnp.array_equal(states_seq[c][b], states_lin[c][b])
+        for o_seq, o_lin in zip(stats_seq["observations"], stats_lin["observations"]):
+            assert jnp.array_equal(o_seq, o_lin)
+
+    def test_mixed_single_and_sequence_raises(self):
+        betas, fb, ebms, progs, inits = self._setup()
+        with pytest.raises(ValueError, match="both"):
+            nrpt(jax.random.key(0), ebms[-1], progs, inits, [], 5, 1, betas=betas)
+
+    def test_requires_betas(self):
+        betas, fb, ebms, progs, inits = self._setup()
+        with pytest.raises(ValueError, match="betas"):
+            nrpt(jax.random.key(0), ebms[-1], progs[-1], inits, [], 5, 1)
+
+    def test_init_states_length_mismatch_raises(self):
+        betas, fb, ebms, progs, inits = self._setup()
+        with pytest.raises(ValueError, match="init_states"):
+            nrpt(
+                jax.random.key(0),
+                ebms[-1],
+                progs[-1],
+                inits[:3],
+                [],
+                5,
+                1,
+                betas=betas,
+            )

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Temperature-linear NRPT mode** — `nrpt` now accepts a *single* template
+  `(ebm, program)` pair (plus an explicit `betas` array) instead of per-chain
+  sequences. One base program is built at β = 1 and every interaction array
+  is scaled by the chain's β inside the vmapped Gibbs kernel — valid for any
+  model whose interactions are linear in β (the `DiscreteEBMFactor` family),
+  consistent with the E_β = β·E_base assumption the swap math already makes.
+  This avoids constructing one program per chain and storing per-chain copies
+  of every interaction tensor (n_chains× less interaction memory).
+  `nrpt_adaptive` and `discover_chain_count` use this mode automatically on
+  their template (`ebm=`/`program=`) routes, eliminating all per-phase
+  EBM/program rebuilds during schedule tuning (~22% faster adaptive tuning
+  on CPU for an 8-chain 48×48 Ising benchmark). Results are bit-identical
+  to the per-chain-programs path. Explicit factory routes are unchanged.
+
 ### Breaking
 
 - **Minimum supported Python is now 3.11** (was 3.10). The JAX (≥ 0.9) and
