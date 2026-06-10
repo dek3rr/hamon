@@ -322,7 +322,9 @@ class AbstractNRPTObserver(eqx.Module):
 
         - `stacked_states`: Per-block arrays, each of shape ``(n_chains, ...)``.
           The cold chain (target) is at index ``-1``.
-        - `base_energies`: Shape ``(n_chains,)`` base energies (no β factor).
+        - `base_energies`: Shape ``(n_chains,)`` base energies (no β factor),
+          aligned with ``stacked_states`` — ``base_energies[c]`` is the energy
+          of the state at chain position ``c`` after this round's swaps.
         - `round_idx`: Zero-based round counter.
         - `carry`: Arbitrary pytree state threaded across rounds.
 

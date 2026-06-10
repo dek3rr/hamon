@@ -388,10 +388,7 @@ def nrpt(
         def _energy_cached(st_states, old_states, cached_bE):
             return cached_bE + _delta_fn(old_states, st_states)
 
-        def _permute_cached(bE, pm):
-            return bE[pm]
-
-        energy_compute, energy_permute = _energy_cached, _permute_cached
+        energy_compute = _energy_cached
     else:
 
         def _energy_fresh(st_states, old_states, cached_bE):
@@ -399,10 +396,7 @@ def nrpt(
                 ebm_ref, beta_ref, base_spec, st_states, clamp_state
             )
 
-        def _permute_noop(bE, pm):
-            return bE
-
-        energy_compute, energy_permute = _energy_fresh, _permute_noop
+        energy_compute = _energy_fresh
 
     # --- Observer strategy (present vs absent) --------------------------------
     if observer is not None:
@@ -442,7 +436,10 @@ def nrpt(
             do_odd,
             (new_states, carry.accepted, carry.attempted, k_swap, bE, carry.idx_state),
         )
-        bE = energy_permute(bE, pm)
+        # Keep energies aligned with the states the swap just permuted. The
+        # cached strategy needs this for the next round's deltas; observers
+        # need it in both modes, since they receive (states, energies) pairs.
+        bE = bE[pm]
 
         obs_carry, obs_out = observer_step(new_states, bE, round_idx, carry.obs_carry)
         return NRPTCarry(key, new_states, acc, att, idx_st, bE, obs_carry), obs_out

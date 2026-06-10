@@ -23,8 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   imports the `jax_pmap_shmap_merge` config option removed in JAX 0.10.0 and
   fails at import
 - **CI test and example matrices now cover Python 3.11–3.14** (was 3.10–3.13)
+
 ### Fixed
 
+- **NRPT observers received post-swap states paired with pre-swap energies** —
+  in the default (non-cached) energy mode, the base-energy vector was not
+  permuted after accepted swaps before being handed to the observer, so
+  `base_energies[c]` described the state that *used to* occupy chain `c`.
+  Energies are now permuted alongside the states in both energy modes.
 - **β₀ = 0 produced NaN base energies in NRPT, silently rejecting every swap** —
   `nrpt` recovered base energies by dividing the hottest chain's energy by β₀,
   which is 0/0 when the ladder is anchored at the reference distribution
