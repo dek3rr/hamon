@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Single source of truth for block layout** — the contiguity check and
+  node-position lookup that existed in three copies (`scatter_block_to_global`,
+  `from_global_state`, `BlockSamplingProgram.__init__`) now live in one
+  `_block_layout` helper; `get_node_locations` is reimplemented on top of it.
+  No behavioral change.
+- **Shared Ising-grid test fixture** — `tests/utils.make_ising_grid` replaces
+  per-file copies of the lattice builder.
+- `EdgePartition` documented as analysis/planning tooling (it is not part of
+  the sampling pipeline).
+
+### Removed
+
+- Dead `init_energy_cache` / `update_energy_cache` in `boundary_energy` —
+  never called by the library or tests, and their β-division convention
+  contradicted how `nrpt` actually consumes `energy_delta_fn`.
+
 ## [0.3.0] — 2026-06-10
 
 ### Added

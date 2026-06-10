@@ -13,40 +13,21 @@ import pytest
 
 from hamon import (
     AbstractNRPTObserver,
-    Block,
-    SpinNode,
     make_empty_block_state,
     make_ising_delta_fn,
     NRPTStateObserver,
 )
-from hamon.models import AbstractEBM, IsingEBM, IsingSamplingProgram, hinton_init
+from hamon.models import AbstractEBM, IsingEBM, hinton_init
 from hamon.nrpt import _compute_base_energies, _make_reference_ebm, nrpt, nrpt_adaptive
+
+from .utils import make_ising_grid
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-
-def _make_ising(L, betas, coupling=1.0):
-    """Build L×L 2D Ising with checkerboard blocking."""
-    grid = [[SpinNode() for _ in range(L)] for _ in range(L)]
-    nodes = [n for row in grid for n in row]
-    edges = []
-    for i in range(L):
-        for j in range(L):
-            if j + 1 < L:
-                edges.append((grid[i][j], grid[i][j + 1]))
-            if i + 1 < L:
-                edges.append((grid[i][j], grid[i + 1][j]))
-    biases = jnp.zeros(len(nodes))
-    weights = jnp.ones(len(edges)) * coupling
-    even = [grid[i][j] for i in range(L) for j in range(L) if (i + j) % 2 == 0]
-    odd = [grid[i][j] for i in range(L) for j in range(L) if (i + j) % 2 == 1]
-    free_blocks = [Block(even), Block(odd)]
-    ebms = [IsingEBM(nodes, edges, biases, weights, jnp.array(b)) for b in betas]
-    progs = [IsingSamplingProgram(e, free_blocks, []) for e in ebms]
-    return nodes, edges, free_blocks, ebms, progs
+_make_ising = make_ising_grid
 
 
 def _make_states(key, ebms, free_blocks, n_chains):
@@ -107,27 +88,12 @@ class TestVmapEnergies:
     def test_nonzero_biases(self):
         """Verify with non-trivial biases (not just coupling)."""
         L = 6
-        grid = [[SpinNode() for _ in range(L)] for _ in range(L)]
-        nodes = [n for row in grid for n in row]
-        edges = []
-        for i in range(L):
-            for j in range(L):
-                if j + 1 < L:
-                    edges.append((grid[i][j], grid[i][j + 1]))
-                if i + 1 < L:
-                    edges.append((grid[i][j], grid[i + 1][j]))
-
-        key = jax.random.key(7)
-        biases = jax.random.normal(key, (len(nodes),)) * 0.3
-        weights = jax.random.normal(jax.random.key(8), (len(edges),)) * 0.5
-
-        even = [grid[i][j] for i in range(L) for j in range(L) if (i + j) % 2 == 0]
-        odd = [grid[i][j] for i in range(L) for j in range(L) if (i + j) % 2 == 1]
-        fb = [Block(even), Block(odd)]
+        n_nodes, n_edges = L * L, 2 * L * (L - 1)
+        biases = jax.random.normal(jax.random.key(7), (n_nodes,)) * 0.3
+        weights = jax.random.normal(jax.random.key(8), (n_edges,)) * 0.5
 
         betas = [0.5, 1.0, 1.5, 2.0]
-        ebms = [IsingEBM(nodes, edges, biases, weights, jnp.array(b)) for b in betas]
-        progs = [IsingSamplingProgram(e, fb, []) for e in ebms]
+        _, _, fb, ebms, progs = _make_ising(L, betas, biases=biases, weights=weights)
         states = _make_states(jax.random.key(99), ebms, fb, 4)
 
         n_free = len(fb)

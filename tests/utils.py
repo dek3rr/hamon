@@ -12,7 +12,37 @@ from hamon.block_sampling import (
     sample_states,
 )
 from hamon.models.ebm import AbstractEBM
+from hamon.models.ising import IsingEBM, IsingSamplingProgram
 from hamon.pgm import DEFAULT_NODE_SHAPE_DTYPES, CategoricalNode, SpinNode
+
+
+def make_ising_grid(L, betas, coupling=1.0, biases=None, weights=None):
+    """L×L 2D Ising lattice with checkerboard blocking.
+
+    Builds one `IsingEBM` and `IsingSamplingProgram` per entry of *betas*,
+    all sharing the same nodes and free blocks.
+
+    Returns ``(nodes, edges, free_blocks, ebms, progs)``.
+    """
+    grid = [[SpinNode() for _ in range(L)] for _ in range(L)]
+    nodes = [n for row in grid for n in row]
+    edges = []
+    for i in range(L):
+        for j in range(L):
+            if j + 1 < L:
+                edges.append((grid[i][j], grid[i][j + 1]))
+            if i + 1 < L:
+                edges.append((grid[i][j], grid[i + 1][j]))
+    if biases is None:
+        biases = jnp.zeros(len(nodes))
+    if weights is None:
+        weights = jnp.ones(len(edges)) * coupling
+    even = [grid[i][j] for i in range(L) for j in range(L) if (i + j) % 2 == 0]
+    odd = [grid[i][j] for i in range(L) for j in range(L) if (i + j) % 2 == 1]
+    free_blocks = [Block(even), Block(odd)]
+    ebms = [IsingEBM(nodes, edges, biases, weights, jnp.array(b)) for b in betas]
+    progs = [IsingSamplingProgram(e, free_blocks, []) for e in ebms]
+    return nodes, edges, free_blocks, ebms, progs
 
 
 def generate_all_states_binary(num_binary: int) -> Array:
