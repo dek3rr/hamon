@@ -14,6 +14,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, Callable, NamedTuple
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -239,6 +240,182 @@ class NRPTCarry(NamedTuple):
     obs_carry: Any  # observer carry (None when no observer)
 
 
+# Incremented each time _nrpt_rounds is (re)traced. Test instrumentation for
+# verifying that repeated calls with identical static structure reuse the
+# compiled executable instead of retracing.
+_nrpt_rounds_trace_count = [0]
+
+
+@eqx.filter_jit
+def _nrpt_rounds(
+    key: jax.Array,
+    run_program: BlockSamplingProgram,
+    ebm_ref: AbstractEBM,
+    beta_ref: jax.Array,
+    base_pbi,
+    chain_data,
+    stacked_states: list,
+    clamp_state: list,
+    betas: jax.Array,
+    n_rounds: int,
+    gibbs_steps_per_round: int,
+    energy_delta_fn: Callable | None,
+    observer: AbstractNRPTObserver | None,
+) -> tuple[NRPTCarry, Any]:
+    """The jitted NRPT round loop: vmapped Gibbs sweeps + DEO swaps via scan.
+
+    Module-level and ``eqx.filter_jit``-decorated so the compilation cache
+    persists across calls: repeated invocations with the same program/observer
+    structure and array shapes (e.g. the tuning phases of ``nrpt_adaptive``)
+    reuse the compiled executable. Arrays — including ``betas`` — are traced
+    data, so schedule updates between phases do not retrigger compilation.
+    """
+    _nrpt_rounds_trace_count[0] += 1
+
+    n_chains = betas.shape[0]
+    n_free_blocks = len(stacked_states)
+    base_spec = run_program.gibbs_spec
+
+    # --- Vmapped Gibbs kernel -------------------------------------------------
+    null_ss = [None] * n_free_blocks
+
+    def _run_one(gibbs_key, state_free, pbi):
+        new_state, _, _ = _run_blocks(
+            gibbs_key,
+            run_program,
+            state_free,
+            clamp_state,
+            gibbs_steps_per_round,
+            null_ss,
+            per_block_interactions=pbi,
+        )
+        return new_state
+
+    if base_pbi is not None:
+        # Temperature-linear mode: one shared base program at β = 1; scale
+        # every interaction array by the chain's β inside the vmapped kernel.
+        # Scalar-times-array commutes with the slicing done at program
+        # construction, so for β-linear interactions this is bit-identical to
+        # building per-chain programs, without materializing n_chains copies
+        # of the weight tensors.
+        _base_pbi = base_pbi
+        chain_in_axes: object = 0
+
+        def _chain_step(gibbs_key, state_free, chain_input):
+            pbi_c = jax.tree.map(
+                lambda x: chain_input * x if isinstance(x, jax.Array) else x,
+                _base_pbi,
+            )
+            return _run_one(gibbs_key, state_free, pbi_c)
+    else:
+        chain_in_axes = _make_pbi_in_axes(chain_data)
+
+        def _chain_step(gibbs_key, state_free, chain_input):
+            return _run_one(gibbs_key, state_free, chain_input)
+
+    run_chains = jax.vmap(
+        _chain_step,
+        in_axes=(0, [0] * n_free_blocks, chain_in_axes),
+    )
+
+    # --- Swap setup -----------------------------------------------------------
+    n_pairs = n_chains - 1
+    even_pairs = jnp.arange(0, n_pairs, 2, dtype=jnp.int32)
+    odd_pairs = jnp.arange(1, n_pairs, 2, dtype=jnp.int32)
+    att_even = jnp.zeros(n_pairs, dtype=jnp.int32).at[even_pairs].set(1)
+    att_odd = jnp.zeros(n_pairs, dtype=jnp.int32).at[odd_pairs].set(1)
+    base_perm = jnp.arange(n_chains, dtype=jnp.int32)
+
+    swap_args = (betas, n_chains, n_pairs, n_free_blocks, base_perm)
+    do_even = _make_swap_branch(
+        even_pairs,
+        len(even_pairs),
+        att_even,
+        *swap_args,
+    )
+    do_odd = _make_swap_branch(
+        odd_pairs,
+        len(odd_pairs),
+        att_odd,
+        *swap_args,
+    )
+
+    # --- Energy strategy (cached vs recomputed) -------------------------------
+    if energy_delta_fn is not None:
+        _delta_fn = energy_delta_fn
+
+        def _energy_cached(st_states, old_states, cached_bE):
+            return cached_bE + _delta_fn(old_states, st_states)
+
+        energy_compute = _energy_cached
+    else:
+
+        def _energy_fresh(st_states, old_states, cached_bE):
+            return _compute_base_energies(
+                ebm_ref, beta_ref, base_spec, st_states, clamp_state
+            )
+
+        energy_compute = _energy_fresh
+
+    # --- Observer strategy (present vs absent) --------------------------------
+    if observer is not None:
+        observer_init, observer_step = observer.init, observer
+    else:
+
+        def _obs_init():
+            return None
+
+        def _obs_step(stacked_states, base_energies, round_idx, carry):
+            return carry, None
+
+        observer_init, observer_step = _obs_init, _obs_step
+
+    # --- Initial energy -------------------------------------------------------
+    base_E = _compute_base_energies(
+        ebm_ref,
+        beta_ref,
+        base_spec,
+        stacked_states,
+        clamp_state,
+    )
+
+    # --- Scan body ------------------------------------------------------------
+    def one_round(carry: NRPTCarry, round_idx):
+        key, k_gibbs, k_swap = jax.random.split(carry.key, 3)
+
+        old_states = carry.states
+        gibbs_keys = jax.random.split(k_gibbs, n_chains)
+        new_states = run_chains(gibbs_keys, carry.states, chain_data)
+
+        bE = energy_compute(new_states, old_states, carry.base_E)
+
+        new_states, acc, att, idx_st, pm = lax.cond(
+            (round_idx & 1) == 0,
+            do_even,
+            do_odd,
+            (new_states, carry.accepted, carry.attempted, k_swap, bE, carry.idx_state),
+        )
+        # Keep energies aligned with the states the swap just permuted. The
+        # cached strategy needs this for the next round's deltas; observers
+        # need it in both modes, since they receive (states, energies) pairs.
+        bE = bE[pm]
+
+        obs_carry, obs_out = observer_step(new_states, bE, round_idx, carry.obs_carry)
+        return NRPTCarry(key, new_states, acc, att, idx_st, bE, obs_carry), obs_out
+
+    init_carry = NRPTCarry(
+        key=key,
+        states=stacked_states,
+        accepted=jnp.zeros(n_pairs, dtype=jnp.int32),
+        attempted=jnp.zeros(n_pairs, dtype=jnp.int32),
+        idx_state=init_index_state(n_chains),
+        base_E=base_E,
+        obs_carry=observer_init(),
+    )
+
+    return lax.scan(one_round, init_carry, jnp.arange(n_rounds))
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -312,13 +489,20 @@ def nrpt(
             raise ValueError(
                 "len(init_states) must equal len(betas) in temperature-linear mode."
             )
-        base_ebm = ebms.with_beta(jnp.asarray(1.0))
-        run_program = programs.with_ebm(base_ebm)
+        beta_attr = getattr(ebms, "beta", None)
+        if beta_attr is not None and float(beta_attr) == 1.0:
+            # Already a β = 1 base pair. Reuse it as-is so repeated calls
+            # (e.g. nrpt_adaptive tuning phases) present identical static
+            # structure to the jit cache and skip retracing entirely.
+            base_ebm = ebms
+            run_program = programs
+        else:
+            base_ebm = ebms.with_beta(jnp.asarray(1.0))
+            run_program = programs.with_ebm(base_ebm)
         base_spec = run_program.gibbs_spec
         n_free_blocks = len(base_spec.free_blocks)
         base_pbi = run_program.per_block_interactions
         chain_data: object = betas
-        chain_in_axes: object = 0
         ebm_ref, beta_ref = base_ebm, jnp.asarray(1.0)
     elif isinstance(ebms, AbstractEBM) or isinstance(programs, BlockSamplingProgram):
         raise ValueError(
@@ -367,7 +551,6 @@ def nrpt(
             for b in range(n_free_blocks)
         ]
         chain_data = stacked_pbi
-        chain_in_axes = _make_pbi_in_axes(stacked_pbi)
         ebm_ref, beta_ref = _make_reference_ebm(ebms, betas)
 
     # --- Stack states ---------------------------------------------------------
@@ -376,152 +559,34 @@ def nrpt(
         jnp.stack([states[c][b] for c in range(n_chains)]) for b in range(n_free_blocks)
     ]
 
-    # --- Vmapped Gibbs kernel -------------------------------------------------
-    null_ss = [None] * n_free_blocks
-
-    def _run_one(gibbs_key, state_free, pbi):
-        new_state, _, _ = _run_blocks(
-            gibbs_key,
-            run_program,
-            state_free,
-            clamp_state,
-            gibbs_steps_per_round,
-            null_ss,
-            per_block_interactions=pbi,
-        )
-        return new_state
-
-    if base_pbi is not None:
-        # Temperature-linear mode: one shared base program at β = 1; scale
-        # every interaction array by the chain's β inside the vmapped kernel.
-        # Scalar-times-array commutes with the slicing done at program
-        # construction, so for β-linear interactions this is bit-identical to
-        # building per-chain programs, without materializing n_chains copies
-        # of the weight tensors.
-        _base_pbi = base_pbi
-
-        def _chain_step(gibbs_key, state_free, chain_input):
-            pbi_c = jax.tree.map(
-                lambda x: chain_input * x if isinstance(x, jax.Array) else x,
-                _base_pbi,
-            )
-            return _run_one(gibbs_key, state_free, pbi_c)
-    else:
-
-        def _chain_step(gibbs_key, state_free, chain_input):
-            return _run_one(gibbs_key, state_free, chain_input)
-
-    run_chains = jax.vmap(
-        _chain_step,
-        in_axes=(0, [0] * n_free_blocks, chain_in_axes),
-    )
-
-    # --- Swap setup -----------------------------------------------------------
-    n_pairs = n_chains - 1
-    even_pairs = jnp.arange(0, n_pairs, 2, dtype=jnp.int32)
-    odd_pairs = jnp.arange(1, n_pairs, 2, dtype=jnp.int32)
-    att_even = jnp.zeros(n_pairs, dtype=jnp.int32).at[even_pairs].set(1)
-    att_odd = jnp.zeros(n_pairs, dtype=jnp.int32).at[odd_pairs].set(1)
-    base_perm = jnp.arange(n_chains, dtype=jnp.int32)
-
-    accepted = jnp.zeros(n_pairs, dtype=jnp.int32)
-    attempted = jnp.zeros(n_pairs, dtype=jnp.int32)
-    idx_state = init_index_state(n_chains)
-
-    use_cached = energy_delta_fn is not None
-
-    swap_args = (betas, n_chains, n_pairs, n_free_blocks, base_perm)
-    do_even = _make_swap_branch(
-        even_pairs,
-        len(even_pairs),
-        att_even,
-        *swap_args,
-    )
-    do_odd = _make_swap_branch(
-        odd_pairs,
-        len(odd_pairs),
-        att_odd,
-        *swap_args,
-    )
-
-    # --- Energy strategy (cached vs recomputed) -------------------------------
-    if use_cached:
-        _delta_fn = energy_delta_fn
-
-        def _energy_cached(st_states, old_states, cached_bE):
-            return cached_bE + _delta_fn(old_states, st_states)
-
-        energy_compute = _energy_cached
-    else:
-
-        def _energy_fresh(st_states, old_states, cached_bE):
-            return _compute_base_energies(
-                ebm_ref, beta_ref, base_spec, st_states, clamp_state
-            )
-
-        energy_compute = _energy_fresh
-
-    # --- Observer strategy (present vs absent) --------------------------------
-    if observer is not None:
-        observer_init, observer_step = observer.init, observer
-    else:
-
-        def _obs_init():
-            return None
-
-        def _obs_step(stacked_states, base_energies, round_idx, carry):
-            return carry, None
-
-        observer_init, observer_step = _obs_init, _obs_step
-
-    # --- Initial energy -------------------------------------------------------
-    base_E = _compute_base_energies(
-        ebm_ref,
-        beta_ref,
-        base_spec,
-        stacked_states,
-        clamp_state,
-    )
-
-    # --- Scan body ------------------------------------------------------------
-    def one_round(carry: NRPTCarry, round_idx):
-        key, k_gibbs, k_swap = jax.random.split(carry.key, 3)
-
-        old_states = carry.states
-        gibbs_keys = jax.random.split(k_gibbs, n_chains)
-        new_states = run_chains(gibbs_keys, carry.states, chain_data)
-
-        bE = energy_compute(new_states, old_states, carry.base_E)
-
-        new_states, acc, att, idx_st, pm = lax.cond(
-            (round_idx & 1) == 0,
-            do_even,
-            do_odd,
-            (new_states, carry.accepted, carry.attempted, k_swap, bE, carry.idx_state),
-        )
-        # Keep energies aligned with the states the swap just permuted. The
-        # cached strategy needs this for the next round's deltas; observers
-        # need it in both modes, since they receive (states, energies) pairs.
-        bE = bE[pm]
-
-        obs_carry, obs_out = observer_step(new_states, bE, round_idx, carry.obs_carry)
-        return NRPTCarry(key, new_states, acc, att, idx_st, bE, obs_carry), obs_out
-
     # --- Run ------------------------------------------------------------------
-    init_carry = NRPTCarry(
-        key=key,
-        states=stacked_states,
-        accepted=accepted,
-        attempted=attempted,
-        idx_state=idx_state,
-        base_E=base_E,
-        obs_carry=observer_init(),
-    )
-
+    n_pairs = n_chains - 1
     if n_rounds > 0:
-        final, observations = lax.scan(one_round, init_carry, jnp.arange(n_rounds))
+        final, observations = _nrpt_rounds(
+            key,
+            run_program,
+            ebm_ref,
+            beta_ref,
+            base_pbi,
+            chain_data,
+            stacked_states,
+            clamp_state,
+            betas,
+            n_rounds,
+            gibbs_steps_per_round,
+            energy_delta_fn,
+            observer,
+        )
     else:
-        final = init_carry
+        final = NRPTCarry(
+            key=key,
+            states=stacked_states,
+            accepted=jnp.zeros(n_pairs, dtype=jnp.int32),
+            attempted=jnp.zeros(n_pairs, dtype=jnp.int32),
+            idx_state=init_index_state(n_chains),
+            base_E=jnp.zeros(n_chains),
+            obs_carry=None,
+        )
         observations = None
 
     # --- Unstack --------------------------------------------------------------
@@ -607,7 +672,11 @@ def nrpt_adaptive(
         and ebm is not None
         and program is not None
     ):
-        template_ebm, template_program = ebm, program
+        # Rebase to β = 1 once, outside the phase loop: every phase then hands
+        # nrpt the identical base pair, so the jitted round loop compiles once
+        # and later phases (same shapes, new betas) reuse the executable.
+        template_ebm = ebm.with_beta(jnp.asarray(1.0))
+        template_program = program.with_ebm(template_ebm)
 
         def _run_phase(
             phase_key, phase_betas, phase_states, rounds, phase_observer=None
