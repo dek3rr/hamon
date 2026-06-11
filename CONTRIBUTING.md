@@ -45,6 +45,18 @@ pytest -v -m "not slow" tests/
 pytest -v tests/
 ```
 
+On a machine with a CUDA jax install, prefer running the suite on CPU:
+
+```bash
+JAX_PLATFORMS=cpu pytest -v -m "not slow" tests/
+```
+
+The tests use tiny models, so GPU runs are dominated by XLA compilation and
+per-kernel dispatch overhead, not compute — CPU finishes the suite several
+times faster. (`tests/conftest.py` enables a persistent compilation cache on
+GPU backends, which recovers part of that, but CPU is still the fast path
+for test iteration. The GPU pays off on real workloads, not unit tests.)
+
 ## Branching
 
 - `main` — stable, always passing CI
