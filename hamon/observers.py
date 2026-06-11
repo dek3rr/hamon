@@ -368,3 +368,98 @@ class NRPTStateObserver(AbstractNRPTObserver):
     ) -> tuple[None, list[Array]]:
         idx = jnp.array(self.chain_indices)
         return None, [s[idx] for s in stacked_states]
+
+
+def nrpt_node_samples(
+    observations: list[Array],
+    program: "BlockSamplingProgram",
+    nodes: Sequence[AbstractNode],
+    chain_index: int = 0,
+) -> Array:
+    """Reorder NRPT observer output into node order.
+
+    ``stats["observations"]`` from [`hamon.nrpt`][] with an
+    [`hamon.NRPTStateObserver`][] is a list of per-free-block arrays of shape
+    ``(n_rounds, len(chain_indices), block_len, ...)`` — block-local layout,
+    in free-block order. Assembling per-node samples from that requires
+    concatenating blocks and inverting the block→node permutation, which is
+    easy to get silently wrong (a forgotten inversion produces
+    plausible-looking but scrambled samples). This helper does it once,
+    correctly:
+
+    ```python
+    obs = NRPTStateObserver(chain_indices=(-1,))
+    states, stats = nrpt(..., observer=obs)
+    samples = nrpt_node_samples(stats["observations"], program, nodes)
+    # samples[r, i] is the state of nodes[i] at round r — guaranteed.
+    ```
+
+    **Arguments:**
+
+    - `observations`: ``stats["observations"]`` — one array per free block.
+    - `program`: The sampling program the observations came from (any of the
+      per-chain programs, or the template program in temperature-linear mode;
+      only its ``gibbs_spec`` is used).
+    - `nodes`: The nodes, in the order you want the output columns. All must
+      share one node type and belong to free (not clamped) blocks.
+    - `chain_index`: Which entry of the observer's ``chain_indices`` tuple to
+      extract (default 0). Note this indexes the *recorded* chains, not the
+      temperature ladder: for ``NRPTStateObserver(chain_indices=(0, -1))``,
+      the cold chain is ``chain_index=1``.
+
+    **Returns:**
+
+    Array of shape ``(n_rounds, len(nodes), ...)`` with column ``i``
+    holding the state of ``nodes[i]``.
+    """
+    spec = program.gibbs_spec
+    free_blocks = spec.free_blocks
+    if len(observations) != len(free_blocks):
+        raise ValueError(
+            f"Expected one observation array per free block "
+            f"({len(free_blocks)}), got {len(observations)}."
+        )
+    if not nodes:
+        raise ValueError("nodes must be non-empty.")
+
+    node_type = type(nodes[0])
+    for node in nodes:
+        if type(node) is not node_type:
+            raise ValueError(
+                "All nodes must share one node type; mixed-type extraction "
+                "is ambiguous because blocks of different types live in "
+                "different state arrays."
+            )
+
+    # Concatenate the observations of free blocks matching the node type, in
+    # free-block order. Free blocks precede clamped blocks in the BlockSpec
+    # layout, so this concatenation reproduces the global ordering of the
+    # node type's structure group and node_global_location_map positions
+    # index into it directly.
+    same_type = [
+        obs
+        for obs, block in zip(observations, free_blocks)
+        if block.node_type is node_type
+    ]
+    if not same_type:
+        raise ValueError(f"No free blocks of node type {node_type.__name__}.")
+    concat = jnp.concatenate(same_type, axis=2)
+    n_free_of_type = concat.shape[2]
+
+    positions = []
+    for node in nodes:
+        loc = spec.node_global_location_map.get(node)
+        if loc is None:
+            raise ValueError(
+                "Node not found in the program's BlockSpec; samples can only "
+                "be extracted for nodes that belong to this program."
+            )
+        if loc[1] >= n_free_of_type:
+            raise ValueError(
+                "Node belongs to a clamped block; only free-block states are "
+                "observed by NRPT observers."
+            )
+        positions.append(loc[1])
+
+    per_chain = concat[:, chain_index]
+    return jnp.take(per_chain, jnp.array(positions), axis=1)

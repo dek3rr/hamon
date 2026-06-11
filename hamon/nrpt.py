@@ -11,6 +11,7 @@ rectangular block partitions.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from typing import Any, Callable, NamedTuple
 
@@ -28,6 +29,8 @@ from hamon.round_trips import (
     update_index_state,
     round_trip_summary,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -518,7 +521,14 @@ def nrpt(
     Chains are ordered by ascending β: index 0 is the **hottest** chain
     (lowest β, closest to the reference distribution) and index −1 is the
     **coldest** chain (highest β, the target distribution you want to
-    sample from).  The returned ``states`` list preserves this ordering.
+    sample from).  The returned ``states`` list preserves this ordering,
+    and ``betas`` must be sorted ascending (validated).
+
+    ``init_states`` may be either a sequence of per-chain block-state
+    lists, or a single block-state list whose arrays carry a leading
+    ``(n_chains, ...)`` axis — e.g. straight from
+    ``hinton_init(key, model, blocks, (n_chains,))`` — avoiding the
+    per-chain list/restack dance.
     A hottest chain at exactly β = 0 (sampling the reference distribution)
     is supported; base energies are computed from a β = 1 copy of the EBM
     when ``with_beta()`` is available, falling back to the coldest chain.
@@ -540,6 +550,12 @@ def nrpt(
     # --- Validation and mode selection -----------------------------------------
     clamp_state = clamp_state or []
 
+    # init_states may be a sequence of per-chain block-state lists, or a
+    # single block-state list of stacked (n_chains, ...) arrays (e.g. from
+    # hinton_init with batch_shape=(n_chains,)). Per-chain entries are always
+    # lists, so the formats are unambiguous.
+    stacked_init = bool(init_states) and not isinstance(init_states[0], (list, tuple))
+
     base_pbi = None  # set in temperature-linear mode only
     if isinstance(ebms, AbstractEBM) and isinstance(programs, BlockSamplingProgram):
         if betas is None:
@@ -549,7 +565,7 @@ def nrpt(
             )
         betas = jnp.asarray(betas)
         n_chains = len(betas)
-        if len(init_states) != n_chains:
+        if not stacked_init and len(init_states) != n_chains:
             raise ValueError(
                 "len(init_states) must equal len(betas) in temperature-linear mode."
             )
@@ -574,10 +590,12 @@ def nrpt(
             "both as single template objects (temperature-linear mode)."
         )
     else:
-        if not (len(ebms) == len(programs) == len(init_states)):
+        if not stacked_init and not (len(ebms) == len(programs) == len(init_states)):
             raise ValueError(
                 "ebms, programs, and init_states must have the same length."
             )
+        if len(ebms) != len(programs):
+            raise ValueError("ebms and programs must have the same length.")
 
         base_spec = programs[0].gibbs_spec
         n_free_blocks = len(base_spec.free_blocks)
@@ -617,11 +635,44 @@ def nrpt(
         chain_data = stacked_pbi
         ebm_ref, beta_ref = _make_reference_ebm(ebms, betas)
 
+    # --- Beta ladder validation ------------------------------------------------
+    # Everything downstream — adjacent-pair DEO swaps, the cold-chain
+    # convention (states[-1]), the round-trip diagnostics — assumes the
+    # ladder is sorted hottest to coldest. A shuffled or descending ladder
+    # runs without error but silently hands back the wrong chains.
+    betas_np = np.asarray(betas)
+    if betas_np.ndim != 1 or betas_np.size != n_chains:
+        raise ValueError(
+            f"betas must be a 1D array with one entry per chain "
+            f"(got shape {betas_np.shape} for {n_chains} chains)."
+        )
+    if np.any(np.diff(betas_np) < 0):
+        raise ValueError(
+            "betas must be in ascending order (hottest chain first, coldest "
+            "chain last). Sort the ladder — and the matching ebms/programs/"
+            "init_states — before calling nrpt."
+        )
+
     # --- Stack states ---------------------------------------------------------
-    states = [list(s) for s in init_states]
-    stacked_states = [
-        jnp.stack([states[c][b] for c in range(n_chains)]) for b in range(n_free_blocks)
-    ]
+    if stacked_init:
+        stacked_states = list(init_states)
+        if len(stacked_states) != n_free_blocks:
+            raise ValueError(
+                f"Stacked init_states must have one entry per free block "
+                f"({n_free_blocks}), got {len(stacked_states)}."
+            )
+        for leaf in jax.tree.leaves(stacked_states):
+            if leaf.shape[0] != n_chains:
+                raise ValueError(
+                    f"Stacked init_states leaves must have leading dimension "
+                    f"n_chains={n_chains}, got {leaf.shape}."
+                )
+    else:
+        states = [list(s) for s in init_states]
+        stacked_states = [
+            jnp.stack([states[c][b] for c in range(n_chains)])
+            for b in range(n_free_blocks)
+        ]
 
     # --- Run ------------------------------------------------------------------
     n_pairs = n_chains - 1
@@ -708,20 +759,28 @@ def nrpt_adaptive(
     ebm: AbstractEBM | None = None,
     program: BlockSamplingProgram | None = None,
     observer: AbstractNRPTObserver | None = None,
+    tune_tol: float | None = None,
 ) -> tuple[list, dict]:
     """NRPT with iterative schedule optimization (Algorithm 4).
 
     Runs n_tune adaptation phases, each of rounds_per_tune rounds, updating
     the β schedule after each phase. Then runs the final n_rounds production
-    phase with the optimized schedule.
+    phase with the optimized schedule. Each phase logs one INFO line
+    (Λ, mean acceptance, schedule movement) so long runs are not silent.
 
     Instead of providing ``ebm_factory`` and ``program_factory``, you can pass
     a template ``ebm`` and ``program`` and the factories will be built
     internally using ``ebm.with_beta()`` and ``program.with_ebm()``.
 
+    When ``tune_tol`` is set, tuning stops early once the schedule update
+    moves every β by less than ``tune_tol`` — remaining phases are skipped
+    and production starts immediately. The default (``None``) always runs
+    all ``n_tune`` phases.
+
     Returns ``(states, stats)`` where stats includes tuning history in
-    ``stats["tuning_history"]``.  States are ordered by ascending β — the
-    **cold chain** (target distribution) is ``states[-1]``.
+    ``stats["tuning_history"]`` (each entry records ``max_beta_shift``).
+    States are ordered by ascending β — the **cold chain** (target
+    distribution) is ``states[-1]``.
     """
     if clamp_state is None:
         clamp_state = []
@@ -761,15 +820,37 @@ def nrpt_adaptive(
         betas = optimize_schedule(stats["rejection_rates"], betas)
         current_states = states
 
+        max_beta_shift = float(jnp.max(jnp.abs(betas - old_betas)))
+        phase_lambda = float(jnp.sum(stats["rejection_rates"]))
         tuning_history.append(
             {
                 "iteration": tune_iter,
                 "betas": old_betas,
                 "rejection_rates": stats["rejection_rates"],
                 "acceptance_rate": stats["acceptance_rate"],
-                "Lambda": float(jnp.sum(stats["rejection_rates"])),
+                "Lambda": phase_lambda,
+                "max_beta_shift": max_beta_shift,
             }
         )
+        logger.info(
+            "nrpt_adaptive tune %d/%d: Lambda=%.3f mean_acceptance=%.3f "
+            "max|dbeta|=%.4g",
+            tune_iter + 1,
+            n_tune,
+            phase_lambda,
+            float(jnp.mean(stats["acceptance_rate"])),
+            max_beta_shift,
+        )
+
+        if tune_tol is not None and max_beta_shift < tune_tol:
+            logger.info(
+                "nrpt_adaptive: schedule converged after %d phase(s) "
+                "(max|dbeta|=%.4g < tune_tol=%.4g); skipping remaining tuning",
+                tune_iter + 1,
+                max_beta_shift,
+                tune_tol,
+            )
+            break
 
     # Production run
     key, subkey = jax.random.split(key)
