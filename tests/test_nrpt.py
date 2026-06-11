@@ -13,6 +13,7 @@ import pytest
 
 from hamon import (
     AbstractNRPTObserver,
+    nrpt_node_samples,
     make_empty_block_state,
     make_ising_delta_fn,
     NRPTStateObserver,
