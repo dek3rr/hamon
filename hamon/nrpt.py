@@ -79,6 +79,19 @@ def _make_pbi_in_axes(stacked_pbi):
     )
 
 
+def _interaction_float_dtype(pbi) -> jnp.dtype:
+    """The dtype the Gibbs kernel computes in: the result type of every
+    floating-point interaction array. β values are cast to this so that
+    enabling x64 in the host application does not promote a float32 model
+    to float64 on device."""
+    dtypes = [
+        x.dtype
+        for x in jax.tree.leaves(pbi)
+        if isinstance(x, jax.Array) and jnp.issubdtype(x.dtype, jnp.floating)
+    ]
+    return jnp.result_type(*dtypes) if dtypes else jnp.dtype(jnp.float32)
+
+
 # ---------------------------------------------------------------------------
 # Core: energy computation
 # ---------------------------------------------------------------------------
@@ -158,7 +171,7 @@ def _vectorized_swap(
         base_energies[i_idx] - base_energies[j_idx]
     )
     accept_probs = jnp.exp(jnp.minimum(0.0, log_r))
-    u = jax.random.uniform(key, shape=(n_active,))
+    u = jax.random.uniform(key, shape=(n_active,), dtype=accept_probs.dtype)
     accepted = u < accept_probs
 
     perm = base_perm
@@ -225,9 +238,14 @@ def _make_swap_branch(
 
 
 def optimize_schedule(rejection_rates: jax.Array, betas: jax.Array) -> jax.Array:
-    """Equalize per-pair rejection rates by redistributing β values."""
-    cum = jnp.concatenate([jnp.array([0.0]), jnp.cumsum(rejection_rates)])
-    target = jnp.linspace(0.0, cum[-1], len(betas))
+    """Equalize per-pair rejection rates by redistributing β values.
+
+    The result keeps the dtype of ``betas`` so repeated tuning phases do not
+    drift to float64 when x64 is enabled."""
+    betas = jnp.asarray(betas)
+    rej = jnp.asarray(rejection_rates, dtype=betas.dtype)
+    cum = jnp.concatenate([jnp.zeros(1, dtype=betas.dtype), jnp.cumsum(rej)])
+    target = jnp.linspace(0.0, cum[-1], len(betas), dtype=betas.dtype)
     new = jnp.interp(target, cum, betas)
     return new.at[0].set(betas[0]).at[-1].set(betas[-1])
 
@@ -507,8 +525,10 @@ def nrpt(
         base_spec = run_program.gibbs_spec
         n_free_blocks = len(base_spec.free_blocks)
         base_pbi = run_program.per_block_interactions
+        compute_dtype = _interaction_float_dtype(base_pbi)
+        betas = betas.astype(compute_dtype)
         chain_data: object = betas
-        ebm_ref, beta_ref = base_ebm, jnp.asarray(1.0)
+        ebm_ref, beta_ref = base_ebm, jnp.asarray(1.0, dtype=compute_dtype)
     elif isinstance(ebms, AbstractEBM) or isinstance(programs, BlockSamplingProgram):
         raise ValueError(
             "Pass ebms and programs either both as per-chain sequences, or "
@@ -556,7 +576,10 @@ def nrpt(
             for b in range(n_free_blocks)
         ]
         chain_data = stacked_pbi
+        compute_dtype = _interaction_float_dtype(stacked_pbi)
+        betas = jnp.asarray(betas).astype(compute_dtype)
         ebm_ref, beta_ref = _make_reference_ebm(ebms, betas)
+        beta_ref = jnp.asarray(beta_ref, dtype=compute_dtype)
 
     # --- Stack states ---------------------------------------------------------
     states = [list(s) for s in init_states]
@@ -590,7 +613,7 @@ def nrpt(
             accepted=jnp.zeros(n_pairs, dtype=jnp.int32),
             attempted=jnp.zeros(n_pairs, dtype=jnp.int32),
             idx_state=init_index_state(n_chains),
-            base_E=jnp.zeros(n_chains),
+            base_E=jnp.zeros(n_chains, dtype=compute_dtype),
             obs_carry=None,
         )
         observations = None
@@ -599,8 +622,13 @@ def nrpt(
     states_out = [
         [final.states[b][c] for b in range(n_free_blocks)] for c in range(n_chains)
     ]
+    # Rates are reported in the model's compute dtype; the plain int/int
+    # division would yield float64 under x64.
     acceptance_rate = jnp.where(
-        final.attempted > 0, final.accepted / final.attempted, 0.0
+        final.attempted > 0,
+        final.accepted.astype(betas.dtype)
+        / jnp.maximum(final.attempted, 1).astype(betas.dtype),
+        0.0,
     )
     rejection_rates = 1.0 - acceptance_rate
 

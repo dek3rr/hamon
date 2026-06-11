@@ -7,7 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Float32 models stay float32 under x64** — enabling `jax_enable_x64` in the
+  host application (common when hamon is mixed with double-precision
+  analytics) used to promote the entire device sampling loop to float64
+  through hamon's internal scalars: `IsingEBM`'s β, the `jnp.array(0.0)`
+  energy seed in `AbstractFactorizedEBM.energy`, the β ladder and reference-β
+  scalars in `nrpt`, and the round-trip diagnostics. β values are now cast to
+  the float dtype of the interaction weights, so the model's parameters alone
+  decide the compute precision; pass float64 weights to opt in to
+  double-precision sampling. Verified by `tests/test_dtype_preservation.py`,
+  which runs NRPT under x64 with strict dtype promotion.
+
 ### Changed
+
+- **Persistent XLA compilation cache in the test suite** (GPU backends only) —
+  the suite compiles hundreds of small programs, and on GPU compilation
+  dominates wall time; with a warm cache (`~/.cache/jax`) GPU runs are ~3×
+  faster and beat CPU. Set `JAX_COMPILATION_CACHE_DIR` to override.
 
 - **Single source of truth for block layout** — the contiguity check and
   node-position lookup that existed in three copies (`scatter_block_to_global`,

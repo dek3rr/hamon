@@ -98,10 +98,13 @@ class AbstractFactorizedEBM(AbstractEBM):
 
         global_state = block_state_to_global(state, block_spec)
 
-        energy = jnp.array(0.0)
+        # Accumulate in the factors' own dtype: seeding with jnp.array(0.0)
+        # would promote float32 factor energies to float64 under x64.
+        energy = None
         for factor in self.factors:
-            energy += factor.energy(global_state, block_spec)
-        return energy
+            factor_energy = factor.energy(global_state, block_spec)
+            energy = factor_energy if energy is None else energy + factor_energy
+        return jnp.array(0.0) if energy is None else energy
 
     @property
     @abc.abstractmethod

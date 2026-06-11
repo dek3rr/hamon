@@ -65,6 +65,13 @@ class IsingEBM(AbstractFactorizedEBM):
         super().__init__(sd_map)
         self.nodes = nodes
         self.edges = edges
+        # β must match the float dtype of the parameters it scales: a strong
+        # float64 β (e.g. jnp.array(1.0) with x64 enabled in the host
+        # application) would otherwise promote every β·W interaction tensor —
+        # and with it the whole device sampling loop — to float64.
+        param_dtype = jnp.result_type(biases, weights)
+        if jnp.issubdtype(param_dtype, jnp.floating):
+            beta = jnp.asarray(beta, dtype=param_dtype)
         self.beta = beta
         self.weights = weights
         self.biases = biases

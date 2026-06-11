@@ -114,7 +114,9 @@ def estimate_global_barrier(
 
 def predict_optimal_round_trip_rate(Lambda: float | jax.Array) -> jax.Array:
     """τ̄ = 1/(2+2Λ) — the asymptotic optimal for NRPT (Theorem 3)."""
-    return jnp.array(1.0) / (2.0 + 2.0 * jnp.asarray(Lambda))
+    # Weak-typed scalars keep the result in Λ's dtype (a strong jnp.array(1.0)
+    # would promote a float32 Λ to float64 under x64).
+    return 1.0 / (2.0 + 2.0 * jnp.asarray(Lambda))
 
 
 def empirical_round_trip_rate(
@@ -153,7 +155,9 @@ def round_trip_summary(
     """
     Lambda = estimate_global_barrier(rejection_rates)
     tau_pred = predict_optimal_round_trip_rate(Lambda)
-    tau_obs = empirical_round_trip_rate(index_state, n_rounds)
+    # int/int division in the empirical rate follows the x64 default dtype;
+    # align it with the rejection-rate dtype the rest of the summary uses.
+    tau_obs = empirical_round_trip_rate(index_state, n_rounds).astype(tau_pred.dtype)
     lambda_profile = estimate_local_barrier(rejection_rates, betas)
 
     return {
