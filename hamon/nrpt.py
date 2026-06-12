@@ -11,6 +11,7 @@ rectangular block partitions.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from typing import Any, Callable, NamedTuple
 
@@ -28,6 +29,8 @@ from hamon.round_trips import (
     update_index_state,
     round_trip_summary,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +64,65 @@ def _resolve_factories(
         return ebm_factory, program_factory
     else:
         raise ValueError("Provide both ebm_factory and program_factory, or neither.")
+
+
+class _ChainSource:
+    """Uniform producer of per-chain EBM/program arguments for the template
+    and factory routes of ``nrpt_adaptive`` and ``discover_chain_count``.
+
+    Template route (single ``ebm`` + ``program``, no factories):
+    ``nrpt_args`` returns the same β = 1 base pair on every call, so nrpt's
+    temperature-linear mode presents identical static structure to the jit
+    cache and per-chain programs are never constructed. Factory route:
+    ``nrpt_args`` materializes per-chain sequences via the user factories.
+    """
+
+    def __init__(
+        self,
+        ebm_factory: Callable | None,
+        program_factory: Callable | None,
+        ebm: AbstractEBM | None,
+        program: BlockSamplingProgram | None,
+    ):
+        self.template_mode = (
+            ebm_factory is None
+            and program_factory is None
+            and ebm is not None
+            and program is not None
+        )
+        if self.template_mode:
+            assert ebm is not None and program is not None
+            # Rebase to β = 1 once; every later nrpt_args call hands back the
+            # identical pair so the jitted round loop compiles exactly once.
+            self._base_ebm = ebm.with_beta(jnp.asarray(1.0))
+            self._base_program = program.with_ebm(self._base_ebm)
+            self._template_program = program
+        # Factories exist in both routes; the template route still uses them
+        # for the cheap per-chain EBM list handed to init factories.
+        self._make_ebms, self._make_programs = _resolve_factories(
+            ebm_factory, program_factory, ebm, program
+        )
+
+    def nrpt_args(self, betas):
+        """``(ebms, programs)`` arguments for ``nrpt`` at this β schedule."""
+        if self.template_mode:
+            return self._base_ebm, self._base_program
+        ebms = self._make_ebms(betas)
+        return ebms, self._make_programs(ebms)
+
+    def ebms_for_init(self, betas):
+        """Per-chain EBM list for init factories (cheap, no program builds)."""
+        return self._make_ebms(betas)
+
+    def programs_for_init(self, n_chains: int, ebms):
+        """Per-chain program list for init factories.
+
+        The template route returns the template program repeated (identical
+        ``gibbs_spec``) instead of constructing ``n_chains`` programs.
+        """
+        if self.template_mode:
+            return [self._template_program] * n_chains
+        return self._make_programs(ebms)
 
 
 def _stack_pbi_across_chains(interaction_list: list) -> object:
@@ -477,7 +539,14 @@ def nrpt(
     Chains are ordered by ascending β: index 0 is the **hottest** chain
     (lowest β, closest to the reference distribution) and index −1 is the
     **coldest** chain (highest β, the target distribution you want to
-    sample from).  The returned ``states`` list preserves this ordering.
+    sample from).  The returned ``states`` list preserves this ordering,
+    and ``betas`` must be sorted ascending (validated).
+
+    ``init_states`` may be either a sequence of per-chain block-state
+    lists, or a single block-state list whose arrays carry a leading
+    ``(n_chains, ...)`` axis — e.g. straight from
+    ``hinton_init(key, model, blocks, (n_chains,))`` — avoiding the
+    per-chain list/restack dance.
     A hottest chain at exactly β = 0 (sampling the reference distribution)
     is supported; base energies are computed from a β = 1 copy of the EBM
     when ``with_beta()`` is available, falling back to the coldest chain.
@@ -499,6 +568,12 @@ def nrpt(
     # --- Validation and mode selection -----------------------------------------
     clamp_state = clamp_state or []
 
+    # init_states may be a sequence of per-chain block-state lists, or a
+    # single block-state list of stacked (n_chains, ...) arrays (e.g. from
+    # hinton_init with batch_shape=(n_chains,)). Per-chain entries are always
+    # lists, so the formats are unambiguous.
+    stacked_init = bool(init_states) and not isinstance(init_states[0], (list, tuple))
+
     base_pbi = None  # set in temperature-linear mode only
     if isinstance(ebms, AbstractEBM) and isinstance(programs, BlockSamplingProgram):
         if betas is None:
@@ -508,7 +583,7 @@ def nrpt(
             )
         betas = jnp.asarray(betas)
         n_chains = len(betas)
-        if len(init_states) != n_chains:
+        if not stacked_init and len(init_states) != n_chains:
             raise ValueError(
                 "len(init_states) must equal len(betas) in temperature-linear mode."
             )
@@ -535,10 +610,12 @@ def nrpt(
             "both as single template objects (temperature-linear mode)."
         )
     else:
-        if not (len(ebms) == len(programs) == len(init_states)):
+        if not stacked_init and not (len(ebms) == len(programs) == len(init_states)):
             raise ValueError(
                 "ebms, programs, and init_states must have the same length."
             )
+        if len(ebms) != len(programs):
+            raise ValueError("ebms and programs must have the same length.")
 
         base_spec = programs[0].gibbs_spec
         n_free_blocks = len(base_spec.free_blocks)
@@ -581,11 +658,44 @@ def nrpt(
         ebm_ref, beta_ref = _make_reference_ebm(ebms, betas)
         beta_ref = jnp.asarray(beta_ref, dtype=compute_dtype)
 
+    # --- Beta ladder validation ------------------------------------------------
+    # Everything downstream — adjacent-pair DEO swaps, the cold-chain
+    # convention (states[-1]), the round-trip diagnostics — assumes the
+    # ladder is sorted hottest to coldest. A shuffled or descending ladder
+    # runs without error but silently hands back the wrong chains.
+    betas_np = np.asarray(betas)
+    if betas_np.ndim != 1 or betas_np.size != n_chains:
+        raise ValueError(
+            f"betas must be a 1D array with one entry per chain "
+            f"(got shape {betas_np.shape} for {n_chains} chains)."
+        )
+    if np.any(np.diff(betas_np) < 0):
+        raise ValueError(
+            "betas must be in ascending order (hottest chain first, coldest "
+            "chain last). Sort the ladder — and the matching ebms/programs/"
+            "init_states — before calling nrpt."
+        )
+
     # --- Stack states ---------------------------------------------------------
-    states = [list(s) for s in init_states]
-    stacked_states = [
-        jnp.stack([states[c][b] for c in range(n_chains)]) for b in range(n_free_blocks)
-    ]
+    if stacked_init:
+        stacked_states = list(init_states)
+        if len(stacked_states) != n_free_blocks:
+            raise ValueError(
+                f"Stacked init_states must have one entry per free block "
+                f"({n_free_blocks}), got {len(stacked_states)}."
+            )
+        for leaf in jax.tree.leaves(stacked_states):
+            if leaf.shape[0] != n_chains:
+                raise ValueError(
+                    f"Stacked init_states leaves must have leading dimension "
+                    f"n_chains={n_chains}, got {leaf.shape}."
+                )
+    else:
+        states = [list(s) for s in init_states]
+        stacked_states = [
+            jnp.stack([states[c][b] for c in range(n_chains)])
+            for b in range(n_free_blocks)
+        ]
 
     # --- Run ------------------------------------------------------------------
     n_pairs = n_chains - 1
@@ -677,78 +787,55 @@ def nrpt_adaptive(
     ebm: AbstractEBM | None = None,
     program: BlockSamplingProgram | None = None,
     observer: AbstractNRPTObserver | None = None,
+    tune_tol: float | None = None,
 ) -> tuple[list, dict]:
     """NRPT with iterative schedule optimization (Algorithm 4).
 
     Runs n_tune adaptation phases, each of rounds_per_tune rounds, updating
     the β schedule after each phase. Then runs the final n_rounds production
-    phase with the optimized schedule.
+    phase with the optimized schedule. Each phase logs one INFO line
+    (Λ, mean acceptance, schedule movement) so long runs are not silent.
 
     Instead of providing ``ebm_factory`` and ``program_factory``, you can pass
     a template ``ebm`` and ``program`` and the factories will be built
     internally using ``ebm.with_beta()`` and ``program.with_ebm()``.
 
+    When ``tune_tol`` is set, tuning stops early once the schedule update
+    moves every β by less than ``tune_tol`` — remaining phases are skipped
+    and production starts immediately. The default (``None``) always runs
+    all ``n_tune`` phases.
+
     Returns ``(states, stats)`` where stats includes tuning history in
-    ``stats["tuning_history"]``.  States are ordered by ascending β — the
-    **cold chain** (target distribution) is ``states[-1]``.
+    ``stats["tuning_history"]`` (each entry records ``max_beta_shift``).
+    States are ordered by ascending β — the **cold chain** (target
+    distribution) is ``states[-1]``.
     """
-    # Template route: hand the single (ebm, program) pair straight to nrpt's
-    # temperature-linear mode. No per-phase EBM/program rebuilds — only the
-    # betas array changes between tuning phases.
     if clamp_state is None:
         clamp_state = []
     if initial_betas is None:
         raise ValueError("initial_betas is required.")
+    if not init_states:
+        raise ValueError("init_states is required (one initial state per chain).")
 
-    if (
-        ebm_factory is None
-        and program_factory is None
-        and ebm is not None
-        and program is not None
-    ):
-        # Rebase to β = 1 once, outside the phase loop: every phase then hands
-        # nrpt the identical base pair, so the jitted round loop compiles once
-        # and later phases (same shapes, new betas) reuse the executable.
-        template_ebm = ebm.with_beta(jnp.asarray(1.0))
-        template_program = program.with_ebm(template_ebm)
+    # The template route hands nrpt the same β = 1 base pair every phase
+    # (temperature-linear mode, jit cache reuse); the factory route builds
+    # per-chain sequences per phase. _ChainSource hides the difference.
+    source = _ChainSource(ebm_factory, program_factory, ebm, program)
 
-        def _run_phase(
-            phase_key, phase_betas, phase_states, rounds, phase_observer=None
-        ):
-            return nrpt(
-                phase_key,
-                template_ebm,
-                template_program,
-                phase_states,
-                clamp_state,
-                rounds,
-                gibbs_steps_per_round,
-                betas=phase_betas,
-                track_round_trips=track_round_trips,
-                observer=phase_observer,
-            )
-    else:
-        _make_ebms, _make_programs = _resolve_factories(
-            ebm_factory, program_factory, ebm, program
+    def _run_phase(phase_key, phase_betas, phase_states, rounds, phase_observer=None):
+        chain_ebms, chain_programs = source.nrpt_args(phase_betas)
+        return nrpt(
+            phase_key,
+            chain_ebms,
+            chain_programs,
+            phase_states,
+            clamp_state,
+            rounds,
+            gibbs_steps_per_round,
+            betas=phase_betas,
+            track_round_trips=track_round_trips,
+            observer=phase_observer,
         )
-
-        def _run_phase(
-            phase_key, phase_betas, phase_states, rounds, phase_observer=None
-        ):
-            chain_ebms = _make_ebms(phase_betas)
-            chain_programs = _make_programs(chain_ebms)
-            return nrpt(
-                phase_key,
-                chain_ebms,
-                chain_programs,
-                phase_states,
-                clamp_state,
-                rounds,
-                gibbs_steps_per_round,
-                betas=phase_betas,
-                track_round_trips=track_round_trips,
-                observer=phase_observer,
-            )
 
     betas = initial_betas
     current_states = init_states
@@ -761,15 +848,37 @@ def nrpt_adaptive(
         betas = optimize_schedule(stats["rejection_rates"], betas)
         current_states = states
 
+        max_beta_shift = float(jnp.max(jnp.abs(betas - old_betas)))
+        phase_lambda = float(jnp.sum(stats["rejection_rates"]))
         tuning_history.append(
             {
                 "iteration": tune_iter,
                 "betas": old_betas,
                 "rejection_rates": stats["rejection_rates"],
                 "acceptance_rate": stats["acceptance_rate"],
-                "Lambda": float(jnp.sum(stats["rejection_rates"])),
+                "Lambda": phase_lambda,
+                "max_beta_shift": max_beta_shift,
             }
         )
+        logger.info(
+            "nrpt_adaptive tune %d/%d: Lambda=%.3f mean_acceptance=%.3f "
+            "max|dbeta|=%.4g",
+            tune_iter + 1,
+            n_tune,
+            phase_lambda,
+            float(jnp.mean(stats["acceptance_rate"])),
+            max_beta_shift,
+        )
+
+        if tune_tol is not None and max_beta_shift < tune_tol:
+            logger.info(
+                "nrpt_adaptive: schedule converged after %d phase(s) "
+                "(max|dbeta|=%.4g < tune_tol=%.4g); skipping remaining tuning",
+                tune_iter + 1,
+                max_beta_shift,
+                tune_tol,
+            )
+            break
 
     # Production run
     key, subkey = jax.random.split(key)
@@ -858,9 +967,7 @@ def discover_chain_count(
             converged_reason: "chain_count" | "lambda_stable" | "no_progress" | "max_iters"
             history: list of per-iteration dicts
     """
-    _make_ebms, _make_programs = _resolve_factories(
-        ebm_factory, program_factory, ebm, program
-    )
+    source = _ChainSource(ebm_factory, program_factory, ebm, program)
 
     if init_factory is None:
         raise ValueError("init_factory is required.")
@@ -877,23 +984,15 @@ def discover_chain_count(
     stable_count = 0
     converged_reason = "max_iters"
 
-    # Template route: probes run through nrpt's temperature-linear mode, so
-    # per-chain programs are never constructed. init_factory still receives a
-    # programs list for free-block extraction; in template mode every entry
-    # is the template program (identical gibbs_spec).
-    template_mode = (
-        ebm_factory is None
-        and program_factory is None
-        and ebm is not None
-        and program is not None
-    )
-
     for iteration in range(max_iters):
         betas = jnp.linspace(beta_range[0], beta_range[1], n_current)
 
         key, k_probe = jax.random.split(key)
-        ebms = _make_ebms(betas)
-        programs = [program] * n_current if template_mode else _make_programs(ebms)
+        # init_factory receives a programs list for free-block extraction; on
+        # the template route every entry is the template program (identical
+        # gibbs_spec) and no per-chain programs are constructed.
+        ebms = source.ebms_for_init(betas)
+        programs = source.programs_for_init(n_current, ebms)
         inits = init_factory(n_current, ebms, programs)
 
         # Early iterations: cheap probes. Final: full budget.
@@ -901,32 +1000,22 @@ def discover_chain_count(
         probe_tune = max(2, n_tune_per_probe // 2) if is_early else n_tune_per_probe
         probe_rounds = max(50, rounds_per_probe // 3) if is_early else rounds_per_probe
 
-        if template_mode:
-            _, stats = nrpt_adaptive(
-                k_probe,
-                ebm=ebm,
-                program=program,
-                init_states=inits,
-                clamp_state=clamp_state,
-                n_rounds=probe_rounds,
-                gibbs_steps_per_round=gibbs_steps_per_round,
-                initial_betas=betas,
-                n_tune=probe_tune,
-                rounds_per_tune=probe_rounds,
-            )
-        else:
-            _, stats = nrpt_adaptive(
-                k_probe,
-                _make_ebms,
-                _make_programs,
-                inits,
-                clamp_state,
-                n_rounds=probe_rounds,
-                gibbs_steps_per_round=gibbs_steps_per_round,
-                initial_betas=betas,
-                n_tune=probe_tune,
-                rounds_per_tune=probe_rounds,
-            )
+        # Forward whichever route the caller used; nrpt_adaptive re-dispatches
+        # through its own _ChainSource.
+        _, stats = nrpt_adaptive(
+            k_probe,
+            ebm_factory,
+            program_factory,
+            inits,
+            clamp_state,
+            n_rounds=probe_rounds,
+            gibbs_steps_per_round=gibbs_steps_per_round,
+            initial_betas=betas,
+            n_tune=probe_tune,
+            rounds_per_tune=probe_rounds,
+            ebm=ebm,
+            program=program,
+        )
 
         lambda_raw = float(jnp.sum(stats["rejection_rates"]))
         lambda_max = max(lambda_max, lambda_raw)
