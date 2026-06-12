@@ -13,16 +13,10 @@ import numpy as np
 import pytest
 
 import hamon.device as device_mod
-
-# hamon/__init__.py re-exports the nrpt *function* under the name hamon.nrpt,
-# shadowing the module attribute — go through importlib for the real module.
-nrpt_mod = importlib.import_module("hamon.nrpt")
-
 from hamon.block_sampling import SamplingSchedule, sample_states
 from hamon.device import (
     DEFAULT_DEVICE_THRESHOLD,
     accelerator_device,
-    cpu_device,
     device_threshold,
     resolve_device,
     resolve_entry_device,
@@ -33,6 +27,10 @@ from hamon.models.ising import hinton_init
 from hamon.nrpt import nrpt, nrpt_adaptive
 
 from .utils import make_ising_grid
+
+# hamon/__init__.py re-exports the nrpt *function* under the name hamon.nrpt,
+# shadowing the module attribute — go through importlib for the real module.
+nrpt_mod = importlib.import_module("hamon.nrpt")
 
 CPU = jax.devices("cpu")[0]
 

@@ -23,11 +23,21 @@ under ``jax.default_device``; outputs come back committed to that device.
 from __future__ import annotations
 
 import os
-from typing import Any, Union
+from typing import TYPE_CHECKING, Any, TypeVar, Union
 
 import jax
+import jax.core
 
-DeviceLike = Union[str, jax.Device, None]
+if TYPE_CHECKING:
+    # jax.Device is a runtime alias into the pybind11 extension; type
+    # checkers cannot use it in type expressions, so signatures treat it
+    # as Any.
+    JaxDevice = Any
+else:
+    JaxDevice = jax.Device
+
+DeviceLike = Union[str, JaxDevice, None]
+_T = TypeVar("_T")
 
 # Steady-state crossover measured on an RTX 5080 (benchmarks/device_crossover.py,
 # jax 0.10.1): every sweep point at score <= 2048 ran faster on CPU and every
@@ -42,12 +52,12 @@ _THRESHOLD_ENV = "HAMON_DEVICE_THRESHOLD"
 _DEVICE_ENV = "HAMON_DEVICE"
 
 
-def cpu_device() -> jax.Device:
+def cpu_device() -> JaxDevice:
     """The first CPU device (always present)."""
     return jax.devices("cpu")[0]
 
 
-def accelerator_device() -> "jax.Device | None":
+def accelerator_device() -> JaxDevice | None:
     """The first visible GPU, else the first TPU, else None. Never raises."""
     for platform in ("gpu", "tpu"):
         try:
@@ -82,9 +92,7 @@ def device_threshold(threshold: "float | None" = None) -> float:
 
 
 def _contains_tracer(trees: Any) -> bool:
-    return any(
-        isinstance(leaf, jax.core.Tracer) for leaf in jax.tree.leaves(trees)
-    )
+    return any(isinstance(leaf, jax.core.Tracer) for leaf in jax.tree.leaves(trees))
 
 
 def resolve_device(
@@ -92,7 +100,7 @@ def resolve_device(
     *,
     score: "int | None" = None,
     threshold: "float | None" = None,
-) -> "jax.Device | None":
+) -> JaxDevice | None:
     """Resolve a device spec into a concrete ``jax.Device`` or ``None``.
 
     ``None`` means "leave placement alone" and is what ``"auto"`` resolves to
@@ -107,9 +115,7 @@ def resolve_device(
     if isinstance(device, jax.Device):
         return device
     if not isinstance(device, str):
-        raise TypeError(
-            f"device must be a str, jax.Device, or None; got {type(device).__name__}"
-        )
+        raise TypeError(f"device must be a str, jax.Device, or None; got {type(device).__name__}")
 
     spec = device.lower()
     if spec == "auto":
@@ -137,8 +143,7 @@ def resolve_device(
                 f"hiding the device."
             ) from None
     raise ValueError(
-        f"Unrecognized device spec {device!r}; expected 'auto', 'cpu', 'gpu', "
-        f"'tpu', a jax.Device, or None."
+        f"Unrecognized device spec {device!r}; expected 'auto', 'cpu', 'gpu', 'tpu', a jax.Device, or None."
     )
 
 
@@ -148,7 +153,7 @@ def resolve_entry_device(
     n_chains: int,
     n_nodes: int,
     arrays: Any = (),
-) -> "jax.Device | None":
+) -> JaxDevice | None:
     """Entry-point resolution: heuristic score plus a tracer guard.
 
     When any entry array is a tracer the caller is already inside a
@@ -159,14 +164,14 @@ def resolve_entry_device(
     return resolve_device(device, score=work_score(n_chains, n_nodes))
 
 
-def _on_device(x: jax.Array, device: jax.Device) -> bool:
+def _on_device(x: jax.Array, device: JaxDevice) -> bool:
     try:
         return x.committed and x.devices() == {device}
     except (AttributeError, ValueError):
         return False
 
 
-def tree_device_put(tree: Any, device: "jax.Device | None") -> Any:
+def tree_device_put(tree: _T, device: JaxDevice | None) -> _T:
     """Commit every ``jax.Array`` leaf of ``tree`` to ``device``.
 
     Non-array leaves (blocks, nodes, samplers, specs) pass through with object
