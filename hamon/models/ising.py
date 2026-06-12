@@ -1,5 +1,6 @@
 # Modified from the original thrml library (https://github.com/Extropic-AI/thrml)
 
+import contextlib
 import logging
 
 import equinox as eqx
@@ -7,6 +8,14 @@ import jax
 from jax import numpy as jnp
 from jaxtyping import Array, Bool, Key, Shaped
 
+from hamon.device import (
+    DeviceLike,
+    free_node_count,
+    resolve_device,
+    resolve_entry_device,
+    tree_device_put,
+    work_score,
+)
 from hamon.block_sampling import (
     Block,
     BlockGibbsSpec,
@@ -195,6 +204,8 @@ def estimate_moments(
     schedule: SamplingSchedule,
     init_state: list[Array],
     clamped_data: list[Array],
+    *,
+    device: DeviceLike = "auto",
 ):
     """
     Estimates the first and second moments of an Ising model Boltzmann distribution via sampling.
@@ -222,7 +233,8 @@ def estimate_moments(
     init_mem = observer.init()
 
     moments, _ = sample_with_observation(
-        key, program, schedule, init_state, clamped_data, init_mem, observer
+        key, program, schedule, init_state, clamped_data, init_mem, observer,
+        device=device,
     )
 
     if first_moment_nodes:
@@ -246,6 +258,8 @@ def estimate_kl_grad(
     conditioning_values: list[Array],
     init_state_positive: list[Array],
     init_state_negative: list[Array],
+    *,
+    device: DeviceLike = "auto",
 ) -> tuple:
     r"""
     Estimate the KL-gradients of an Ising model with respect to its weights and biases.
@@ -279,54 +293,92 @@ def estimate_kl_grad(
     Returns:
         the weight gradients and the bias gradients
     """
-    key_pos, key_neg = jax.random.split(key, 2)
-
-    cond_batched_pos = jax.tree.map(
-        lambda x: jnp.broadcast_to(x, (data[0].shape[0], *x.shape)), conditioning_values
-    )
-
     n_chains_pos, batch_size = init_state_positive[0].shape[:2]
-    keys_pos = jax.random.split(key_pos, (n_chains_pos, batch_size))
+    n_chains_neg = init_state_negative[0].shape[0]
 
-    moms_b_pos, moms_w_pos = jax.vmap(
-        lambda k_out, i_out: jax.vmap(
-            lambda k, i, c: estimate_moments(
+    dev = resolve_entry_device(
+        device,
+        n_chains=n_chains_pos * batch_size + n_chains_neg,
+        n_nodes=free_node_count(training_spec.program_negative),
+        arrays=(
+            data,
+            conditioning_values,
+            init_state_positive,
+            init_state_negative,
+            key,
+        ),
+    )
+    if dev is not None:
+        (
+            key,
+            training_spec,
+            data,
+            conditioning_values,
+            init_state_positive,
+            init_state_negative,
+        ) = tree_device_put(
+            (
+                key,
+                training_spec,
+                data,
+                conditioning_values,
+                init_state_positive,
+                init_state_negative,
+            ),
+            dev,
+        )
+    device_ctx = jax.default_device(dev) if dev is not None else contextlib.nullcontext()
+
+    with device_ctx:
+        key_pos, key_neg = jax.random.split(key, 2)
+
+        cond_batched_pos = jax.tree.map(
+            lambda x: jnp.broadcast_to(x, (data[0].shape[0], *x.shape)),
+            conditioning_values,
+        )
+
+        keys_pos = jax.random.split(key_pos, (n_chains_pos, batch_size))
+
+        # The vmapped estimate_moments calls see tracers, so their own "auto"
+        # routing is a no-op — placement is governed by this context.
+        moms_b_pos, moms_w_pos = jax.vmap(
+            lambda k_out, i_out: jax.vmap(
+                lambda k, i, c: estimate_moments(
+                    k,
+                    bias_nodes,
+                    weight_edges,
+                    training_spec.program_positive,
+                    training_spec.schedule_positive,
+                    i,
+                    c,
+                )
+            )(k_out, i_out, data + cond_batched_pos)
+        )(keys_pos, init_state_positive)
+
+        keys_neg = jax.random.split(key_neg, n_chains_neg)
+
+        moms_b_neg, moms_w_neg = jax.vmap(
+            lambda k, i: estimate_moments(
                 k,
                 bias_nodes,
                 weight_edges,
-                training_spec.program_positive,
-                training_spec.schedule_positive,
+                training_spec.program_negative,
+                training_spec.schedule_negative,
                 i,
-                c,
+                conditioning_values,
             )
-        )(k_out, i_out, data + cond_batched_pos)
-    )(keys_pos, init_state_positive)
+        )(keys_neg, init_state_negative)
 
-    n_chains_neg = init_state_negative[0].shape[0]
-    keys_neg = jax.random.split(key_neg, n_chains_neg)
-
-    moms_b_neg, moms_w_neg = jax.vmap(
-        lambda k, i: estimate_moments(
-            k,
-            bias_nodes,
-            weight_edges,
-            training_spec.program_negative,
-            training_spec.schedule_negative,
-            i,
-            conditioning_values,
+        float_type = training_spec.ebm.beta.dtype
+        grad_b = -training_spec.ebm.beta * (
+            jnp.mean(moms_b_pos, axis=(0, 1), dtype=float_type)
+            - jnp.mean(moms_b_neg, axis=0, dtype=float_type)
         )
-    )(keys_neg, init_state_negative)
-
-    float_type = training_spec.ebm.beta.dtype
-    grad_b = -training_spec.ebm.beta * (
-        jnp.mean(moms_b_pos, axis=(0, 1), dtype=float_type)
-        - jnp.mean(moms_b_neg, axis=0, dtype=float_type)
-    )
-    grad_w = -training_spec.ebm.beta * (
-        jnp.mean(moms_w_pos, axis=(0, 1), dtype=float_type)
-        - jnp.mean(moms_w_neg, axis=0, dtype=float_type)
-    )
-    return grad_w, grad_b, (moms_b_pos, moms_w_pos), (moms_b_neg, moms_w_neg)
+        grad_w = -training_spec.ebm.beta * (
+            jnp.mean(moms_w_pos, axis=(0, 1), dtype=float_type)
+            - jnp.mean(moms_w_neg, axis=0, dtype=float_type)
+        )
+        return grad_w, grad_b, (moms_b_pos, moms_w_pos), (moms_b_neg, moms_w_neg)
 
 
 def ising_sample(
@@ -341,6 +393,7 @@ def ising_sample(
     steps_per_sample: int = 1,
     gibbs_steps_per_round: int = 1,
     target_acceptance: float = 0.6,
+    device: DeviceLike = "auto",
 ) -> tuple[Bool[Array, "n_samples n"], dict]:
     r"""Sample from an Ising model Boltzmann distribution via NRPT.
 
@@ -364,13 +417,20 @@ def ising_sample(
         gibbs_steps_per_round: Gibbs sweeps between NRPT swap attempts.
         target_acceptance: desired per-pair swap acceptance rate for
             chain-count discovery.
+        device: where to run — ``"auto"`` (default; small workloads on CPU,
+            large on a visible accelerator), ``"cpu"``/``"gpu"``, a concrete
+            ``jax.Device``, or ``None`` to leave placement untouched. Under
+            ``"auto"`` the device is re-resolved once after chain-count
+            discovery, so cheap discovery probes may run on CPU while a large
+            production run lands on the accelerator.
 
     Returns:
         A tuple ``(samples, diagnostics)`` where *samples* is a boolean
         array of shape ``(n_samples, n)`` (``True`` = spin up) and
         *diagnostics* is a dict with keys ``n_chains``, ``betas``,
         ``Lambda``, ``converged_reason``, ``acceptance_rate``,
-        ``mean_spins`` (average number of +1 spins per sample), and
+        ``mean_spins`` (average number of +1 spins per sample), ``device``
+        (the resolved production device, or None), and
         ``round_trip_diagnostics``.
 
     Warns:
@@ -431,6 +491,12 @@ def ising_sample(
         keys = jax.random.split(k_init, n_chains)
         return [hinton_init(keys[c], ebms[0], fb, ()) for c in range(n_chains)]
 
+    # Device routing, stage 1: discovery probes start at 8 chains
+    # (discover_chain_count's initial_n default).
+    dev = resolve_entry_device(
+        device, n_chains=8, n_nodes=n, arrays=(biases, weights, key)
+    )
+
     discovery = discover_chain_count(
         k_disc,
         ebm=ebm,
@@ -439,11 +505,19 @@ def ising_sample(
         beta_range=(0.0, float(beta)),
         gibbs_steps_per_round=gibbs_steps_per_round,
         target_acceptance=target_acceptance,
+        device=dev,
     )
 
     # --- adaptive NRPT ---
     betas = discovery["betas"]
     n_chains = len(betas)
+
+    # Device routing, stage 2: re-resolve with the discovered chain count. The
+    # chain-count change forces a recompile anyway, so this is the one place
+    # routing may legitimately switch devices (cheap CPU probes, accelerator
+    # production).
+    if dev is not None and isinstance(device, str) and device.lower() == "auto":
+        dev = resolve_device("auto", score=work_score(n_chains, n))
 
     init_ebms = [ebm.with_beta(jnp.array(float(b))) for b in betas]
     init_progs = [program.with_ebm(e) for e in init_ebms]
@@ -460,13 +534,16 @@ def ising_sample(
         initial_betas=betas,
         n_tune=5,
         rounds_per_tune=200,
+        device=dev,
     )
 
     # --- sample from cold chain (last index = highest beta) ---
     cold_state = warm_states[-1]
     schedule = SamplingSchedule(n_warmup, n_samples, steps_per_sample)
     obs_block = Block(nodes)
-    raw_samples = sample_states(k_samp, program, schedule, cold_state, [], [obs_block])
+    raw_samples = sample_states(
+        k_samp, program, schedule, cold_state, [], [obs_block], device=dev
+    )
     samples = raw_samples[0]  # (n_samples, n)
 
     mean_spins = float(jnp.mean(jnp.sum(samples, axis=1).astype(jnp.float32)))
@@ -478,6 +555,7 @@ def ising_sample(
         "converged_reason": discovery["converged_reason"],
         "acceptance_rate": nrpt_stats["acceptance_rate"],
         "mean_spins": mean_spins,
+        "device": str(dev) if dev is not None else None,
     }
     if "round_trip_diagnostics" in nrpt_stats:
         diagnostics["round_trip_diagnostics"] = nrpt_stats["round_trip_diagnostics"]

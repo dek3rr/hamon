@@ -1,5 +1,6 @@
 # Modified from the original thrml library (https://github.com/Extropic-AI/thrml)
 
+import contextlib
 import dataclasses
 from collections import defaultdict
 from typing import Mapping, Sequence, Type, TypeAlias
@@ -18,6 +19,12 @@ from hamon.block_management import (
     from_global_state,
     scatter_block_to_global,
     verify_block_state,
+)
+from hamon.device import (
+    DeviceLike,
+    free_node_count,
+    resolve_entry_device,
+    tree_device_put,
 )
 from hamon.interaction import InteractionGroup
 from hamon.pgm import DEFAULT_NODE_SHAPE_DTYPES, AbstractNode
@@ -616,6 +623,8 @@ def sample_with_observation(
     state_clamp: list[_State],
     observation_carry_init: ObserveCarry,
     f_observe: AbstractObserver,
+    *,
+    device: DeviceLike = "auto",
 ) -> tuple[ObserveCarry, list[PyTree[Shaped[Array, "n_samples nodes ?*state"]]]]:
     """Run the full chain and call an Observer after every recorded sample.
 
@@ -628,73 +637,105 @@ def sample_with_observation(
     - `state_clamp`: Clamped-block state.
     - `observation_carry_init`: Initial carry handed to `f_observe`.
     - `f_observe`: Observer instance.
+    - `device`: Where to run — `"auto"` (default; small workloads on CPU, large
+        on a visible accelerator), `"cpu"`/`"gpu"`, a concrete `jax.Device`, or
+        `None` to leave placement untouched. See `hamon.device`. A no-op when
+        called inside jit/vmap/grad.
 
     **Returns:**
 
     - Tuple `(final_observer_carry, samples)` where `samples` is a PyTree whose
         leading axis has size `schedule.n_samples`.
     """
-    sampler_states = [s.init() for s in program.samplers]
-
-    key, subkey = jax.random.split(key)
-    warmup_state, warmup_sampler_states, warmup_global = _run_blocks(
-        subkey,
-        program,
-        init_chain_state,
-        state_clamp,
-        schedule.n_warmup,
-        sampler_states,
+    dev = resolve_entry_device(
+        device,
+        n_chains=1,
+        n_nodes=free_node_count(program),
+        arrays=(init_chain_state, state_clamp, observation_carry_init, key),
     )
-    mem, warmup_observation = f_observe(
-        program,
-        warmup_state,
-        state_clamp,
-        observation_carry_init,
-        jnp.array(0),
-        warmup_global,
-    )
-
-    if schedule.n_samples <= 1:
-        warmup_observation = jax.tree.map(lambda x: x[None], warmup_observation)
-        return mem, warmup_observation
-
-    def body_fn(carry, input):
-        (prev_state, prev_sampler_state), _mem = carry
-
-        _key, i = input
-
-        new_state, new_sampler_state, new_global = _run_blocks(
-            _key,
+    if dev is not None:
+        (
+            key,
             program,
-            prev_state,
+            init_chain_state,
             state_clamp,
-            schedule.steps_per_sample,
-            prev_sampler_state,
+            observation_carry_init,
+            f_observe,
+        ) = tree_device_put(
+            (
+                key,
+                program,
+                init_chain_state,
+                state_clamp,
+                observation_carry_init,
+                f_observe,
+            ),
+            dev,
         )
-        _mem, observe_out = f_observe(
-            program, new_state, state_clamp, _mem, i, new_global
+    device_ctx = jax.default_device(dev) if dev is not None else contextlib.nullcontext()
+
+    with device_ctx:
+        sampler_states = [s.init() for s in program.samplers]
+
+        key, subkey = jax.random.split(key)
+        warmup_state, warmup_sampler_states, warmup_global = _run_blocks(
+            subkey,
+            program,
+            init_chain_state,
+            state_clamp,
+            schedule.n_warmup,
+            sampler_states,
         )
-        new_carry = ((new_state, new_sampler_state), _mem)
-        return new_carry, observe_out
+        mem, warmup_observation = f_observe(
+            program,
+            warmup_state,
+            state_clamp,
+            observation_carry_init,
+            jnp.array(0),
+            warmup_global,
+        )
 
-    keys = jax.random.split(key, schedule.n_samples - 1)
-    outer_iters = jnp.arange(1, schedule.n_samples)
+        if schedule.n_samples <= 1:
+            warmup_observation = jax.tree.map(lambda x: x[None], warmup_observation)
+            return mem, warmup_observation
 
-    inputs = (keys, outer_iters)
+        def body_fn(carry, input):
+            (prev_state, prev_sampler_state), _mem = carry
 
-    (_, mem_out), observed_results = jax.lax.scan(
-        body_fn, ((warmup_state, warmup_sampler_states), mem), inputs
-    )
+            _key, i = input
 
-    # need to prepend the first observation from the warmup
-    def prepend_warmup_observation(_warmup, _rest):
-        return jnp.concatenate([_warmup[None], _rest], axis=0)
+            new_state, new_sampler_state, new_global = _run_blocks(
+                _key,
+                program,
+                prev_state,
+                state_clamp,
+                schedule.steps_per_sample,
+                prev_sampler_state,
+            )
+            _mem, observe_out = f_observe(
+                program, new_state, state_clamp, _mem, i, new_global
+            )
+            new_carry = ((new_state, new_sampler_state), _mem)
+            return new_carry, observe_out
 
-    observed_results = jax.tree.map(
-        prepend_warmup_observation, warmup_observation, observed_results
-    )
+        keys = jax.random.split(key, schedule.n_samples - 1)
+        outer_iters = jnp.arange(1, schedule.n_samples)
 
-    return mem_out, observed_results
+        inputs = (keys, outer_iters)
+
+        (_, mem_out), observed_results = jax.lax.scan(
+            body_fn, ((warmup_state, warmup_sampler_states), mem), inputs
+        )
+
+        # need to prepend the first observation from the warmup
+        def prepend_warmup_observation(_warmup, _rest):
+            return jnp.concatenate([_warmup[None], _rest], axis=0)
+
+        observed_results = jax.tree.map(
+            prepend_warmup_observation, warmup_observation, observed_results
+        )
+
+        return mem_out, observed_results
 
 
 def sample_states(
@@ -704,12 +745,14 @@ def sample_states(
     init_state_free: list[PyTree[Shaped[Array, "nodes ?*state"]]],
     state_clamp: list[_State],
     nodes_to_sample: list[Block],
+    *,
+    device: DeviceLike = "auto",
 ) -> list[PyTree[Shaped[Array, "n_samples nodes ?*state"]]]:
     """Convenience wrapper to collect state information for *nodes_to_sample* only.
 
     Internally builds a [`hamon.StateObserver`][], runs
-    [`hamon.sample_with_observation`][], and returns a stacked tensor of shape
-    `(schedule.n_samples, ...)`.
+    [`hamon.sample_with_observation`][] (which `device` is forwarded to), and
+    returns a stacked tensor of shape `(schedule.n_samples, ...)`.
     """
     f_observe = StateObserver(nodes_to_sample)
     carry_init = f_observe.init()
@@ -722,6 +765,7 @@ def sample_states(
         state_clamp,
         carry_init,
         f_observe,
+        device=device,
     )
 
     return results_out

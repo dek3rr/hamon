@@ -766,3 +766,30 @@ class TestJitCacheReuse:
         )
         traces = _nrpt_rounds_trace_count[0] - before
         assert traces == 1, f"expected 1 trace across 4 phases, got {traces}"
+
+    def test_adaptive_phases_compile_once_with_explicit_cpu(self):
+        # Device routing device_puts the program pytree per call (tree.map
+        # reconstructs container Modules around the moved arrays). The jit
+        # cache must still hit: leaf-level statics keep object identity and
+        # reconstructed Modules compare equal.
+        from hamon.nrpt import _nrpt_rounds_trace_count
+
+        _, _, fb, ebms, progs = _make_ising(4, [0.5, 1.0, 1.5], coupling=0.5)
+        inits = _make_states(jax.random.key(3), ebms, fb, 3)
+
+        before = _nrpt_rounds_trace_count[0]
+        nrpt_adaptive(
+            jax.random.key(4),
+            ebm=ebms[-1],
+            program=progs[-1],
+            init_states=inits,
+            clamp_state=[],
+            n_rounds=10,
+            gibbs_steps_per_round=1,
+            initial_betas=jnp.array([0.5, 1.0, 1.5]),
+            n_tune=3,
+            rounds_per_tune=10,
+            device="cpu",
+        )
+        traces = _nrpt_rounds_trace_count[0] - before
+        assert traces == 1, f"expected 1 trace across 4 phases, got {traces}"

@@ -56,6 +56,29 @@ pip install -e ".[development,testing,examples]"
 
 Requires Python ≥ 3.11 and a JAX installation ([GPU setup guide](https://jax.readthedocs.io/en/latest/installation.html)).
 
+## Device routing
+
+With CUDA jax installed, JAX places everything on the GPU — including the
+small, dispatch-bound programs where a CPU finishes several times faster.
+hamon's entry points (`nrpt`, `nrpt_adaptive`, `discover_chain_count`,
+`ising_sample`, `sample_states`, `sample_with_observation`, …) therefore take
+a `device` argument:
+
+- `"auto"` (default) — with no accelerator visible, placement is untouched.
+  Otherwise the work score `n_chains × free nodes` decides: small workloads
+  run on the CPU, large ones on the accelerator. The threshold is set by
+  `HAMON_DEVICE_THRESHOLD` (calibrate yours with
+  `python benchmarks/device_crossover.py`); `HAMON_DEVICE=cpu|gpu|none`
+  forces a choice without code changes.
+- `"cpu"` / `"gpu"` — that platform, raising if it is not visible.
+- a concrete `jax.Device` — used as-is.
+- `None` — hamon never touches placement.
+
+Routing re-commits the entry arrays (program tensors, states, β ladder) to
+the chosen device and returns outputs committed there; pass `device=None` to
+keep full manual control of placement. Orchestrators resolve the device once
+and reuse it across all tuning phases, so jit caches stay warm.
+
 ## Quick example
 
 ```python

@@ -11,6 +11,7 @@ rectangular block partitions.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Sequence
 from typing import Any, Callable, NamedTuple
 
@@ -21,6 +22,12 @@ import numpy as np
 from jax import lax
 
 from hamon.block_sampling import _run_blocks, BlockSamplingProgram
+from hamon.device import (
+    DeviceLike,
+    free_node_count,
+    resolve_entry_device,
+    tree_device_put,
+)
 from hamon.models.ebm import AbstractEBM
 from hamon.observers import AbstractNRPTObserver
 from hamon.round_trips import (
@@ -456,6 +463,7 @@ def nrpt(
     track_round_trips: bool = True,
     energy_delta_fn: Callable | None = None,
     observer: AbstractNRPTObserver | None = None,
+    device: DeviceLike = "auto",
 ) -> tuple[list, dict]:
     """Non-Reversible Parallel Tempering with vectorized swaps.
 
@@ -485,6 +493,15 @@ def nrpt(
     .. warning::
        To collect samples from the target distribution, always use
        ``states[-1]`` (the cold chain), **not** ``states[0]``.
+
+    ``device`` selects where the computation runs: ``"auto"`` (default) routes
+    small workloads to the CPU and large ones to a visible accelerator (see
+    ``hamon.device``), ``"cpu"``/``"gpu"`` force a platform, a concrete
+    ``jax.Device`` is used as-is, and ``None`` leaves placement untouched.
+    Routing re-commits the entry arrays (program tensors, states, betas) to
+    the chosen device; outputs come back committed there. Arrays closed over
+    by ``energy_delta_fn`` cannot be moved by routing — keep them uncommitted
+    or on the target device.
 
     Stats keys:
         accepted, attempted, acceptance_rate, rejection_rates, betas
@@ -581,42 +598,82 @@ def nrpt(
         ebm_ref, beta_ref = _make_reference_ebm(ebms, betas)
         beta_ref = jnp.asarray(beta_ref, dtype=compute_dtype)
 
-    # --- Stack states ---------------------------------------------------------
-    states = [list(s) for s in init_states]
-    stacked_states = [
-        jnp.stack([states[c][b] for c in range(n_chains)]) for b in range(n_free_blocks)
-    ]
-
-    # --- Run ------------------------------------------------------------------
-    n_pairs = n_chains - 1
-    if n_rounds > 0:
-        final, observations = _nrpt_rounds(
+    # --- Device routing --------------------------------------------------------
+    dev = resolve_entry_device(
+        device,
+        n_chains=n_chains,
+        n_nodes=free_node_count(run_program),
+        arrays=(init_states, betas, chain_data, clamp_state, key),
+    )
+    if dev is not None:
+        (
             key,
             run_program,
+            chain_data,
+            betas,
+            clamp_state,
             ebm_ref,
             beta_ref,
-            base_pbi,
-            chain_data,
-            stacked_states,
-            clamp_state,
-            betas,
-            n_rounds,
-            gibbs_steps_per_round,
-            energy_delta_fn,
             observer,
-            track_round_trips,
+            init_states,
+        ) = tree_device_put(
+            (
+                key,
+                run_program,
+                chain_data,
+                betas,
+                clamp_state,
+                ebm_ref,
+                beta_ref,
+                observer,
+                init_states,
+            ),
+            dev,
         )
-    else:
-        final = NRPTCarry(
-            key=key,
-            states=stacked_states,
-            accepted=jnp.zeros(n_pairs, dtype=jnp.int32),
-            attempted=jnp.zeros(n_pairs, dtype=jnp.int32),
-            idx_state=init_index_state(n_chains),
-            base_E=jnp.zeros(n_chains, dtype=compute_dtype),
-            obs_carry=None,
-        )
-        observations = None
+        if base_pbi is not None:
+            # base_pbi aliases run_program.per_block_interactions; re-derive it
+            # from the moved program so the kernel reads on-device tensors.
+            base_pbi = run_program.per_block_interactions
+    device_ctx = jax.default_device(dev) if dev is not None else contextlib.nullcontext()
+
+    with device_ctx:
+        # --- Stack states -----------------------------------------------------
+        states = [list(s) for s in init_states]
+        stacked_states = [
+            jnp.stack([states[c][b] for c in range(n_chains)])
+            for b in range(n_free_blocks)
+        ]
+
+        # --- Run --------------------------------------------------------------
+        n_pairs = n_chains - 1
+        if n_rounds > 0:
+            final, observations = _nrpt_rounds(
+                key,
+                run_program,
+                ebm_ref,
+                beta_ref,
+                base_pbi,
+                chain_data,
+                stacked_states,
+                clamp_state,
+                betas,
+                n_rounds,
+                gibbs_steps_per_round,
+                energy_delta_fn,
+                observer,
+                track_round_trips,
+            )
+        else:
+            final = NRPTCarry(
+                key=key,
+                states=stacked_states,
+                accepted=jnp.zeros(n_pairs, dtype=jnp.int32),
+                attempted=jnp.zeros(n_pairs, dtype=jnp.int32),
+                idx_state=init_index_state(n_chains),
+                base_E=jnp.zeros(n_chains, dtype=compute_dtype),
+                obs_carry=None,
+            )
+            observations = None
 
     # --- Unstack --------------------------------------------------------------
     states_out = [
@@ -677,6 +734,7 @@ def nrpt_adaptive(
     ebm: AbstractEBM | None = None,
     program: BlockSamplingProgram | None = None,
     observer: AbstractNRPTObserver | None = None,
+    device: DeviceLike = "auto",
 ) -> tuple[list, dict]:
     """NRPT with iterative schedule optimization (Algorithm 4).
 
@@ -691,6 +749,9 @@ def nrpt_adaptive(
     Returns ``(states, stats)`` where stats includes tuning history in
     ``stats["tuning_history"]``.  States are ordered by ascending β — the
     **cold chain** (target distribution) is ``states[-1]``.
+
+    ``device`` is resolved **once** here and passed to every tuning and
+    production phase, so the device never flips mid-run (see ``hamon.device``).
     """
     # Template route: hand the single (ebm, program) pair straight to nrpt's
     # temperature-linear mode. No per-phase EBM/program rebuilds — only the
@@ -712,6 +773,22 @@ def nrpt_adaptive(
         template_ebm = ebm.with_beta(jnp.asarray(1.0))
         template_program = program.with_ebm(template_ebm)
 
+        # Resolve the device once for all phases — a flip between phases would
+        # recompile the round loop and shuttle states across devices.
+        dev = resolve_entry_device(
+            device,
+            n_chains=len(initial_betas),
+            n_nodes=free_node_count(template_program),
+            arrays=(init_states, initial_betas, key),
+        )
+        if dev is not None:
+            # Move the template once, outside the phase loop: every phase then
+            # hands nrpt arrays already committed to `dev`, its device_put hits
+            # the identity fast path, and the jit cache sees the same objects.
+            template_ebm, template_program = tree_device_put(
+                (template_ebm, template_program), dev
+            )
+
         def _run_phase(
             phase_key, phase_betas, phase_states, rounds, phase_observer=None
         ):
@@ -726,10 +803,24 @@ def nrpt_adaptive(
                 betas=phase_betas,
                 track_round_trips=track_round_trips,
                 observer=phase_observer,
+                device=dev,
             )
     else:
         _make_ebms, _make_programs = _resolve_factories(
             ebm_factory, program_factory, ebm, program
+        )
+
+        if isinstance(device, str) and device.lower() == "auto":
+            # One throwaway single-chain program purely for size metadata.
+            _meta_prog = _make_programs(_make_ebms(jnp.asarray(initial_betas)[:1]))[0]
+            _meta_nodes = free_node_count(_meta_prog)
+        else:
+            _meta_nodes = 0
+        dev = resolve_entry_device(
+            device,
+            n_chains=len(initial_betas),
+            n_nodes=_meta_nodes,
+            arrays=(init_states, initial_betas, key),
         )
 
         def _run_phase(
@@ -748,6 +839,7 @@ def nrpt_adaptive(
                 betas=phase_betas,
                 track_round_trips=track_round_trips,
                 observer=phase_observer,
+                device=dev,
             )
 
     betas = initial_betas
@@ -804,6 +896,7 @@ def discover_chain_count(
     *,
     ebm: AbstractEBM | None = None,
     program: BlockSamplingProgram | None = None,
+    device: DeviceLike = "auto",
 ) -> dict:
     """Iteratively discover the right chain count for a given target acceptance.
 
@@ -888,6 +981,23 @@ def discover_chain_count(
         and program is not None
     )
 
+    # Resolve the device once for all probes. Chain counts vary across probes
+    # (each recompiles regardless), but a single device avoids transfer thrash;
+    # the conservative score uses the starting chain count. Borderline
+    # workloads can pass an explicit device.
+    if template_mode:
+        _meta_nodes = free_node_count(program)
+    elif isinstance(device, str) and device.lower() == "auto":
+        _meta_prog = _make_programs(
+            _make_ebms(jnp.linspace(beta_range[0], beta_range[1], 1))
+        )[0]
+        _meta_nodes = free_node_count(_meta_prog)
+    else:
+        _meta_nodes = 0
+    dev = resolve_entry_device(
+        device, n_chains=initial_n, n_nodes=_meta_nodes, arrays=(key,)
+    )
+
     for iteration in range(max_iters):
         betas = jnp.linspace(beta_range[0], beta_range[1], n_current)
 
@@ -913,6 +1023,7 @@ def discover_chain_count(
                 initial_betas=betas,
                 n_tune=probe_tune,
                 rounds_per_tune=probe_rounds,
+                device=dev,
             )
         else:
             _, stats = nrpt_adaptive(
@@ -926,6 +1037,7 @@ def discover_chain_count(
                 initial_betas=betas,
                 n_tune=probe_tune,
                 rounds_per_tune=probe_rounds,
+                device=dev,
             )
 
         lambda_raw = float(jnp.sum(stats["rejection_rates"]))

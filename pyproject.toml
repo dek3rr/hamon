@@ -100,6 +100,7 @@ ignore = ["F722"]
 [tool.pytest.ini_options]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "gpu: exercises GPU execution (auto-skipped when no GPU is visible)",
 ]
 
 [tool.pyright]

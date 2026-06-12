@@ -25,6 +25,9 @@ from .conditional_samplers import (
 )
 from .conditional_samplers import BernoulliConditional as BernoulliConditional
 from .conditional_samplers import SoftmaxConditional as SoftmaxConditional
+from .device import DeviceLike as DeviceLike
+from .device import resolve_device as resolve_device
+from .device import work_score as work_score
 from .factor import AbstractFactor as AbstractFactor
 from .factor import FactorSamplingProgram as FactorSamplingProgram
 from .factor import WeightedFactor as WeightedFactor

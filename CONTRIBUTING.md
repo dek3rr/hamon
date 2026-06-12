@@ -45,17 +45,18 @@ pytest -v -m "not slow" tests/
 pytest -v tests/
 ```
 
-On a machine with a CUDA jax install, prefer running the suite on CPU:
+The suite pins JAX's default device to the CPU (`tests/conftest.py`): test
+models are tiny, so GPU runs are dominated by compilation and kernel-launch
+overhead, not compute. GPU code paths are covered by a small smoke subset:
 
 ```bash
-JAX_PLATFORMS=cpu pytest -v -m "not slow" tests/
+pytest -v -m gpu tests/          # auto-skipped when no GPU is visible
+HAMON_TEST_DEVICE=gpu pytest -v -m "not slow" tests/   # whole suite on GPU
 ```
 
-The tests use tiny models, so GPU runs are dominated by XLA compilation and
-per-kernel dispatch overhead, not compute — CPU finishes the suite several
-times faster. (`tests/conftest.py` enables a persistent compilation cache on
-GPU backends, which recovers part of that, but CPU is still the fast path
-for test iteration. The GPU pays off on real workloads, not unit tests.)
+To calibrate hamon's automatic CPU/GPU routing threshold for your machine,
+run `python benchmarks/device_crossover.py` and export the recommended
+`HAMON_DEVICE_THRESHOLD`.
 
 ## Branching
 
