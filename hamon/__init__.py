@@ -37,6 +37,9 @@ from .observers import AbstractObserver as AbstractObserver
 from .observers import MomentAccumulatorObserver as MomentAccumulatorObserver
 from .observers import NRPTStateObserver as NRPTStateObserver
 from .observers import StateObserver as StateObserver
+from .observers import nrpt_node_samples as nrpt_node_samples
+from .diagnostics import NRPTHealthReport as NRPTHealthReport
+from .diagnostics import report_nrpt_diagnostics as report_nrpt_diagnostics
 from .pgm import AbstractNode as AbstractNode
 from .pgm import CategoricalNode as CategoricalNode
 from .pgm import SpinNode as SpinNode

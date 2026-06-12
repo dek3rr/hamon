@@ -23,6 +23,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   full opt-out with `device=None`. Orchestrators resolve the device once and
   reuse it across tuning phases, preserving the jit-once round loop.
   `hamon.resolve_device` is exported for pre-resolving with custom thresholds.
+- **`nrpt_node_samples`** — converts NRPT observer output into node order in
+  one call (``samples[:, i]`` is the state of ``nodes[i]``), replacing the
+  ~20 lines of block-concatenation and permutation-inversion every observer
+  user previously had to write, where a forgotten inversion produced
+  plausible-looking but scrambled samples.
+- **`report_nrpt_diagnostics` / `NRPTHealthReport`** — a single
+  "did sampling work?" verdict built on round-trip diagnostics (the primary
+  PT quality signal), schedule equalization, and optional sample entropy.
+  Marginal-convergence checks are reported but never used as pass/fail —
+  correct multi-modal PT shifts marginals between run halves. Thresholds are
+  keyword arguments; verdicts are withheld (not failed) when swap-attempt
+  counts are too low to judge. Low efficiency auto-suggests a chain count
+  via `recommend_n_chains`. `ising_sample` now includes the report under
+  ``diagnostics["health"]``.
+- **`nrpt` accepts stacked initial states** — ``init_states`` may be a
+  single block-state list with a leading ``(n_chains, ...)`` axis, e.g.
+  straight from ``hinton_init(key, model, blocks, (n_chains,))``, instead of
+  a per-chain list of lists.
+- **`nrpt_adaptive(tune_tol=...)`** — optional early stop for schedule
+  tuning: when an update moves every β by less than the tolerance, the
+  remaining phases are skipped. Each phase now logs one INFO line
+  (Λ, mean acceptance, schedule movement) and records ``max_beta_shift`` in
+  the tuning history.
+
+### Fixed
+
+- **`nrpt` validates the β ladder** — a descending or shuffled ladder
+  previously ran without error while silently breaking the cold-chain
+  convention (``states[-1]``) and the DEO pairing; it now raises, as does a
+  betas/chain-count length mismatch.
+- **Float32 models stay float32 under x64** — enabling `jax_enable_x64` in the
+  host application (common when hamon is mixed with double-precision
+  analytics) used to promote the entire device sampling loop to float64
+  through hamon's internal scalars: `IsingEBM`'s β, the `jnp.array(0.0)`
+  energy seed in `AbstractFactorizedEBM.energy`, the β ladder and reference-β
+  scalars in `nrpt`, and the round-trip diagnostics. β values are now cast to
+  the float dtype of the interaction weights, so the model's parameters alone
+  decide the compute precision; pass float64 weights to opt in to
+  double-precision sampling. Verified by `tests/test_dtype_preservation.py`,
+  which runs NRPT under x64 with strict dtype promotion.
 
 ### Changed
 
@@ -42,21 +82,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   No behavioral change.
 - **Shared Ising-grid test fixture** — `tests/utils.make_ising_grid` replaces
   per-file copies of the lattice builder.
+- **One dispatch point for NRPT's template/factory routes** — the
+  template-vs-factory mode check existed three times (`nrpt_adaptive` twice,
+  `discover_chain_count` once) with duplicated phase/probe call sites. A new
+  internal `_ChainSource` owns the dispatch: `nrpt_adaptive` has a single
+  `_run_phase`, `discover_chain_count` a single probe call that forwards the
+  caller's route. Jit-cache behavior is preserved (the template route hands
+  back the identical β = 1 pair every phase). `nrpt_adaptive` also validates
+  `init_states` up front instead of failing later with a shape error.
 - `EdgePartition` documented as analysis/planning tooling (it is not part of
   the sampling pipeline).
-
-### Fixed
-
-- **Float32 models stay float32 under x64** — enabling `jax_enable_x64` in the
-  host application (common when hamon is mixed with double-precision
-  analytics) used to promote the entire device sampling loop to float64
-  through hamon's internal scalars: `IsingEBM`'s β, the `jnp.array(0.0)`
-  energy seed in `AbstractFactorizedEBM.energy`, the β ladder and reference-β
-  scalars in `nrpt`, and the round-trip diagnostics. β values are now cast to
-  the float dtype of the interaction weights, so the model's parameters alone
-  decide the compute precision; pass float64 weights to opt in to
-  double-precision sampling. Verified by `tests/test_dtype_preservation.py`,
-  which runs NRPT under x64 with strict dtype promotion.
 
 ### Removed
 

@@ -13,6 +13,7 @@ import pytest
 
 from hamon import (
     AbstractNRPTObserver,
+    nrpt_node_samples,
     make_empty_block_state,
     make_ising_delta_fn,
     NRPTStateObserver,
@@ -133,13 +134,13 @@ class TestSinglePassDEO:
         )
         attempted = stats["attempted"]
         # 3 pairs: even={0,2}, odd={1}
-        # 50 rounds → 25 even rounds, 25 odd rounds
+        # 50 rounds â†’ 25 even rounds, 25 odd rounds
         assert int(attempted[0]) == 25  # even pair
         assert int(attempted[1]) == 25  # odd pair
         assert int(attempted[2]) == 25  # even pair
 
     def test_round_trips_with_zero_coupling(self):
-        """Zero coupling → all swaps accepted → conveyor belt round trips."""
+        """Zero coupling â†’ all swaps accepted â†’ conveyor belt round trips."""
         betas = [0.5, 1.0, 1.5, 2.0]
         _, _, fb, ebms, progs = _make_ising(4, betas, coupling=0.0)
         init = make_empty_block_state(fb, ebms[0].node_shape_dtypes)
@@ -177,7 +178,7 @@ class TestSinglePassDEO:
         assert jnp.all(stats["attempted"] > 0)
 
     def test_lambda_consistent(self):
-        """Λ = sum(rejection_rates) should hold."""
+        """Î› = sum(rejection_rates) should hold."""
         betas = [0.5, 1.0, 1.5, 2.0]
         _, _, fb, ebms, progs = _make_ising(8, betas, coupling=0.5)
         states = _make_states(jax.random.key(0), ebms, fb, 4)
@@ -211,7 +212,7 @@ class TestSinglePassDEO:
             n_rounds=200,
             gibbs_steps_per_round=3,
         )
-        # Pair 0 (β=0.1↔0.2, small gap) vs pair 1 (β=0.2↔2.0, large gap)
+        # Pair 0 (Î²=0.1â†”0.2, small gap) vs pair 1 (Î²=0.2â†”2.0, large gap)
         rates = stats["acceptance_rate"]
         assert not jnp.allclose(rates[0], rates[1], atol=0.05), (
             f"Suspiciously similar rates: {rates}"
@@ -220,8 +221,8 @@ class TestSinglePassDEO:
     def test_multi_pass_would_break_conveyor(self):
         """Document WHY multi-pass DEO is wrong.
 
-        With 4 chains and all swaps accepted, even∘odd followed by
-        odd∘even = identity permutation. States oscillate with period 2
+        With 4 chains and all swaps accepted, evenâˆ˜odd followed by
+        oddâˆ˜even = identity permutation. States oscillate with period 2
         instead of drifting through the temperature ladder.
         """
         # Verify the algebra: compose the two permutations
@@ -414,7 +415,7 @@ class TestNRPTObserver:
 
 
 # ---------------------------------------------------------------------------
-# β₀ = 0 ladders (regression: base energies were NaN, silently rejecting
+# Î²â‚€ = 0 ladders (regression: base energies were NaN, silently rejecting
 # every swap)
 # ---------------------------------------------------------------------------
 
@@ -433,10 +434,10 @@ class _OpaqueEBM(AbstractEBM):
 
 
 class TestZeroBetaHotChain:
-    """A hottest chain at exactly β = 0 must produce finite, working swaps."""
+    """A hottest chain at exactly Î² = 0 must produce finite, working swaps."""
 
     def test_swaps_accepted_with_zero_beta0(self):
-        """Regression: β₀ = 0 yielded NaN base energies → 0% acceptance."""
+        """Regression: Î²â‚€ = 0 yielded NaN base energies â†’ 0% acceptance."""
         betas = [0.0, 0.4, 0.8, 1.2]
         _, _, fb, ebms, progs = _make_ising(4, betas, coupling=0.4)
         states = _make_states(jax.random.key(0), ebms, fb, 4)
@@ -457,8 +458,8 @@ class TestZeroBetaHotChain:
         assert jnp.all(acc > 0.0), f"swaps never accepted: {acc}"
 
     def test_reference_ebm_prefers_beta1_copy(self):
-        """The reference EBM is an exact β=1 copy when with_beta() exists,
-        and base energies match a directly-constructed β=1 model."""
+        """The reference EBM is an exact Î²=1 copy when with_beta() exists,
+        and base energies match a directly-constructed Î²=1 model."""
         betas = [0.0, 0.5, 1.0]
         nodes, edges, fb, ebms, progs = _make_ising(4, betas, coupling=0.7)
         states = _make_states(jax.random.key(3), ebms, fb, 3)
@@ -517,7 +518,7 @@ class TestZeroBetaHotChain:
         assert jnp.array_equal(stats_ising["accepted"], stats_opaque["accepted"])
 
     def test_fallback_with_zero_cold_beta_raises(self):
-        """No with_beta() and β_cold = 0 is unrecoverable — must raise."""
+        """No with_beta() and Î²_cold = 0 is unrecoverable â€” must raise."""
         betas = [0.0, 0.0]
         _, _, fb, ebms, progs = _make_ising(4, betas)
         opaque_ebms = [_OpaqueEBM(inner=e) for e in ebms]
@@ -536,7 +537,7 @@ class TestZeroBetaHotChain:
             )
 
     def test_adaptive_tuning_with_zero_beta0(self):
-        """nrpt_adaptive (the path ising_sample uses) works from β₀ = 0."""
+        """nrpt_adaptive (the path ising_sample uses) works from Î²â‚€ = 0."""
         betas = jnp.linspace(0.0, 1.2, 4)
         _, _, fb, ebms, progs = _make_ising(4, [float(b) for b in betas], coupling=0.6)
         ebm, prog = ebms[-1], progs[-1]
@@ -580,7 +581,7 @@ class TestObserverEnergyAlignment:
 
     n_rounds = 12
     n_chains = 4
-    # Close betas → high swap acceptance, so misalignment cannot hide
+    # Close betas â†’ high swap acceptance, so misalignment cannot hide
     # behind an identity permutation.
     betas = [0.8, 1.0, 1.2, 1.4]
 
@@ -634,13 +635,13 @@ class TestObserverEnergyAlignment:
 
 
 # ---------------------------------------------------------------------------
-# Temperature-linear mode (single base program + per-chain β scaling)
+# Temperature-linear mode (single base program + per-chain Î² scaling)
 # ---------------------------------------------------------------------------
 
 
 class TestTemperatureLinearMode:
     """nrpt with single template (ebm, program) objects must reproduce the
-    per-chain-programs path bit-for-bit for β-linear models."""
+    per-chain-programs path bit-for-bit for Î²-linear models."""
 
     def _setup(self):
         betas = [0.4, 0.8, 1.2, 1.6]
@@ -663,7 +664,7 @@ class TestTemperatureLinearMode:
             betas=betas,
             observer=obs,
         )
-        # Template objects at an arbitrary β — rebased to β=1 internally.
+        # Template objects at an arbitrary Î² â€” rebased to Î²=1 internally.
         states_lin, stats_lin = nrpt(
             jax.random.key(11),
             ebms[-1],
@@ -716,7 +717,7 @@ class TestTemperatureLinearMode:
 
 
 class TestJitCacheReuse:
-    """Repeated nrpt calls with the same β=1 base pair must reuse the
+    """Repeated nrpt calls with the same Î²=1 base pair must reuse the
     compiled round loop instead of retracing."""
 
     def test_repeated_calls_do_not_retrace(self):
@@ -732,7 +733,7 @@ class TestJitCacheReuse:
         nrpt(jax.random.key(1), base_ebm, base_prog, inits, [], 6, 1, betas=betas)
         assert _nrpt_rounds_trace_count[0] == before + 1
 
-        # Same static structure, different betas values and key → cache hit.
+        # Same static structure, different betas values and key â†’ cache hit.
         nrpt(
             jax.random.key(2),
             base_ebm,
@@ -793,3 +794,202 @@ class TestJitCacheReuse:
         )
         traces = _nrpt_rounds_trace_count[0] - before
         assert traces == 1, f"expected 1 trace across 4 phases, got {traces}"
+
+
+# ---------------------------------------------------------------------------
+# Usability features: node-order extraction, beta validation, stacked inits,
+# tuning early-stop
+# ---------------------------------------------------------------------------
+
+
+class TestNodeOrderSamples:
+    """nrpt_node_samples must invert the block->node permutation exactly."""
+
+    def _setup(self):
+        betas = [0.6, 1.0]
+        nodes, _, fb, ebms, progs = _make_ising(2, betas, coupling=0.3)
+        return nodes, fb, ebms, progs
+
+    def test_synthetic_permutation_inverted(self):
+        nodes, fb, ebms, progs = self._setup()
+        node_idx = {id(n): i for i, n in enumerate(nodes)}
+        n_rounds = 3
+        observations = []
+        for block in fb:
+            vals = jnp.array([node_idx[id(n)] for n in block.nodes], dtype=jnp.int32)
+            arr = jnp.broadcast_to(vals, (n_rounds, len(block)))
+            # chain slot 1 carries +100 so chain selection is testable
+            observations.append(jnp.stack([arr, arr + 100], axis=1))
+
+        out = nrpt_node_samples(observations, progs[0], nodes, chain_index=0)
+        expected = jnp.broadcast_to(
+            jnp.arange(len(nodes), dtype=jnp.int32), (n_rounds, len(nodes))
+        )
+        assert jnp.array_equal(out, expected)
+
+        out_cold = nrpt_node_samples(observations, progs[0], nodes, chain_index=1)
+        assert jnp.array_equal(out_cold, expected + 100)
+
+    def test_end_to_end_matches_manual_indexing(self):
+        nodes, fb, ebms, progs = self._setup()
+        inits = _make_states(jax.random.key(0), ebms, fb, 2)
+        obs = NRPTStateObserver(chain_indices=(0, -1))
+        _, stats = nrpt(
+            jax.random.key(1),
+            ebms,
+            progs,
+            inits,
+            [],
+            8,
+            1,
+            betas=jnp.array([0.6, 1.0]),
+            observer=obs,
+        )
+        out = nrpt_node_samples(stats["observations"], progs[0], nodes, chain_index=1)
+
+        # Independent reference: locate each node by scanning the free blocks.
+        for i, node in enumerate(nodes):
+            for b, block in enumerate(fb):
+                if node in block.nodes:
+                    k = block.nodes.index(node)
+                    ref = stats["observations"][b][:, 1, k]
+                    assert jnp.array_equal(out[:, i], ref)
+                    break
+
+    def test_subset_and_reorder(self):
+        nodes, fb, ebms, progs = self._setup()
+        node_idx = {id(n): i for i, n in enumerate(nodes)}
+        observations = []
+        for block in fb:
+            vals = jnp.array([node_idx[id(n)] for n in block.nodes], dtype=jnp.int32)
+            observations.append(jnp.broadcast_to(vals, (2, 1, len(block))))
+        subset = [nodes[3], nodes[0]]
+        out = nrpt_node_samples(observations, progs[0], subset)
+        assert jnp.array_equal(out, jnp.array([[3, 0], [3, 0]]))
+
+    def test_foreign_node_raises(self):
+        from hamon import SpinNode
+
+        nodes, fb, ebms, progs = self._setup()
+        observations = [jnp.zeros((2, 1, len(b)), dtype=jnp.int32) for b in fb]
+        with pytest.raises(ValueError, match="not found"):
+            nrpt_node_samples(observations, progs[0], [SpinNode()])
+
+    def test_wrong_observation_count_raises(self):
+        nodes, fb, ebms, progs = self._setup()
+        with pytest.raises(ValueError, match="per free block"):
+            nrpt_node_samples([jnp.zeros((2, 1, 2))], progs[0], nodes)
+
+
+class TestBetaLadderValidation:
+    def test_descending_betas_raise_linear_mode(self):
+        nodes, _, fb, ebms, progs = _make_ising(2, [0.5, 1.0, 1.5])
+        inits = _make_states(jax.random.key(0), ebms, fb, 3)
+        with pytest.raises(ValueError, match="ascending"):
+            nrpt(
+                jax.random.key(1),
+                ebms[-1],
+                progs[-1],
+                inits,
+                [],
+                4,
+                1,
+                betas=jnp.array([1.5, 1.0, 0.5]),
+            )
+
+    def test_shuffled_betas_raise_sequence_mode(self):
+        nodes, _, fb, ebms, progs = _make_ising(2, [0.5, 1.0, 1.5])
+        inits = _make_states(jax.random.key(0), ebms, fb, 3)
+        with pytest.raises(ValueError, match="ascending"):
+            nrpt(
+                jax.random.key(1),
+                ebms,
+                progs,
+                inits,
+                [],
+                4,
+                1,
+                betas=jnp.array([1.0, 0.5, 1.5]),
+            )
+
+    def test_betas_length_mismatch_raises(self):
+        nodes, _, fb, ebms, progs = _make_ising(2, [0.5, 1.0, 1.5])
+        inits = _make_states(jax.random.key(0), ebms, fb, 3)
+        with pytest.raises(ValueError, match="one entry per chain"):
+            nrpt(
+                jax.random.key(1),
+                ebms,
+                progs,
+                inits,
+                [],
+                4,
+                1,
+                betas=jnp.array([0.5, 1.0]),
+            )
+
+
+class TestStackedInitStates:
+    def test_stacked_matches_per_chain_lists(self):
+        betas = jnp.array([0.5, 1.0, 1.5])
+        nodes, _, fb, ebms, progs = _make_ising(4, [float(b) for b in betas])
+        per_chain = _make_states(jax.random.key(0), ebms, fb, 3)
+        stacked = [
+            jnp.stack([per_chain[c][b] for c in range(3)]) for b in range(len(fb))
+        ]
+
+        states_a, stats_a = nrpt(
+            jax.random.key(2), ebms[-1], progs[-1], per_chain, [], 20, 2, betas=betas
+        )
+        states_b, stats_b = nrpt(
+            jax.random.key(2), ebms[-1], progs[-1], stacked, [], 20, 2, betas=betas
+        )
+        assert jnp.array_equal(stats_a["accepted"], stats_b["accepted"])
+        for c in range(3):
+            for b in range(len(fb)):
+                assert jnp.array_equal(states_a[c][b], states_b[c][b])
+
+    def test_hinton_init_batch_shape_works_directly(self):
+        betas = jnp.array([0.5, 1.0, 1.5])
+        nodes, _, fb, ebms, progs = _make_ising(4, [float(b) for b in betas])
+        stacked = hinton_init(jax.random.key(0), ebms[0], fb, (3,))
+        _, stats = nrpt(
+            jax.random.key(1), ebms[-1], progs[-1], stacked, [], 10, 1, betas=betas
+        )
+        assert jnp.all(jnp.isfinite(stats["acceptance_rate"]))
+
+    def test_wrong_leading_dim_raises(self):
+        betas = jnp.array([0.5, 1.0, 1.5])
+        nodes, _, fb, ebms, progs = _make_ising(4, [float(b) for b in betas])
+        stacked = hinton_init(jax.random.key(0), ebms[0], fb, (2,))  # 2 != 3
+        with pytest.raises(ValueError, match="leading dimension"):
+            nrpt(jax.random.key(1), ebms[-1], progs[-1], stacked, [], 4, 1, betas=betas)
+
+
+class TestTuneEarlyStop:
+    def _run(self, tune_tol):
+        betas = jnp.array([0.5, 1.0, 1.5])
+        nodes, _, fb, ebms, progs = _make_ising(4, [float(b) for b in betas])
+        inits = _make_states(jax.random.key(0), ebms, fb, 3)
+        _, stats = nrpt_adaptive(
+            jax.random.key(1),
+            ebm=ebms[-1],
+            program=progs[-1],
+            init_states=inits,
+            clamp_state=[],
+            n_rounds=10,
+            gibbs_steps_per_round=1,
+            initial_betas=betas,
+            n_tune=4,
+            rounds_per_tune=10,
+            tune_tol=tune_tol,
+        )
+        return stats
+
+    def test_huge_tol_stops_after_first_phase(self):
+        stats = self._run(tune_tol=10.0)
+        assert len(stats["tuning_history"]) == 1
+
+    def test_default_runs_all_phases(self):
+        stats = self._run(tune_tol=None)
+        assert len(stats["tuning_history"]) == 4
+        assert all("max_beta_shift" in h for h in stats["tuning_history"])

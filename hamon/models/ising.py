@@ -548,6 +548,10 @@ def ising_sample(
 
     mean_spins = float(jnp.mean(jnp.sum(samples, axis=1).astype(jnp.float32)))
 
+    from hamon.diagnostics import report_nrpt_diagnostics
+
+    health = report_nrpt_diagnostics(nrpt_stats, samples=samples)
+
     diagnostics = {
         "n_chains": discovery["n_chains"],
         "betas": nrpt_stats["betas"],
@@ -556,6 +560,7 @@ def ising_sample(
         "acceptance_rate": nrpt_stats["acceptance_rate"],
         "mean_spins": mean_spins,
         "device": str(dev) if dev is not None else None,
+        "health": health,
     }
     if "round_trip_diagnostics" in nrpt_stats:
         diagnostics["round_trip_diagnostics"] = nrpt_stats["round_trip_diagnostics"]
