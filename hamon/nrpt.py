@@ -11,6 +11,7 @@ rectangular block partitions.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from collections.abc import Sequence
 from typing import Any, Callable, NamedTuple
@@ -22,6 +23,12 @@ import numpy as np
 from jax import lax
 
 from hamon.block_sampling import _run_blocks, BlockSamplingProgram
+from hamon.device import (
+    DeviceLike,
+    free_node_count,
+    resolve_entry_device,
+    tree_device_put,
+)
 from hamon.models.ebm import AbstractEBM
 from hamon.observers import AbstractNRPTObserver
 from hamon.round_trips import (
@@ -123,6 +130,30 @@ class _ChainSource:
         if self.template_mode:
             return [self._template_program] * n_chains
         return self._make_programs(ebms)
+
+    def metadata_free_nodes(self, betas, device: DeviceLike) -> int:
+        """Free-node count for the device-routing work score.
+
+        The factory route must build one throwaway single-chain program to
+        read the size, so it only does this when the spec is ``"auto"`` —
+        explicit devices ignore the score."""
+        if self.template_mode:
+            return free_node_count(self._base_program)
+        if isinstance(device, str) and device.lower() == "auto":
+            ebms = self._make_ebms(jnp.asarray(betas)[:1])
+            return free_node_count(self._make_programs(ebms)[0])
+        return 0
+
+    def device_put_template(self, dev) -> None:
+        """Commit the β = 1 template pair to ``dev`` once, outside the phase
+        loop: every later ``nrpt_args`` call then returns arrays already on
+        the device, nrpt's device_put hits its identity fast path, and the
+        jit cache sees the same objects each phase. No-op on the factory
+        route, whose per-phase arrays are moved by nrpt itself."""
+        if dev is not None and self.template_mode:
+            self._base_ebm, self._base_program = tree_device_put(
+                (self._base_ebm, self._base_program), dev
+            )
 
 
 def _stack_pbi_across_chains(interaction_list: list) -> object:
@@ -518,6 +549,7 @@ def nrpt(
     track_round_trips: bool = True,
     energy_delta_fn: Callable | None = None,
     observer: AbstractNRPTObserver | None = None,
+    device: DeviceLike = "auto",
 ) -> tuple[list, dict]:
     """Non-Reversible Parallel Tempering with vectorized swaps.
 
@@ -555,6 +587,15 @@ def nrpt(
        To collect samples from the target distribution, always use
        ``states[-1]`` (the cold chain), **not** ``states[0]``.
 
+    ``device`` selects where the computation runs: ``"auto"`` (default) routes
+    small workloads to the CPU and large ones to a visible accelerator (see
+    ``hamon.device``), ``"cpu"``/``"gpu"`` force a platform, a concrete
+    ``jax.Device`` is used as-is, and ``None`` leaves placement untouched.
+    Routing re-commits the entry arrays (program tensors, states, betas) to
+    the chosen device; outputs come back committed there. Arrays closed over
+    by ``energy_delta_fn`` cannot be moved by routing — keep them uncommitted
+    or on the target device.
+
     Stats keys:
         accepted, attempted, acceptance_rate, rejection_rates, betas
         round_trip_diagnostics (if track_round_trips=True):
@@ -578,8 +619,7 @@ def nrpt(
     if isinstance(ebms, AbstractEBM) and isinstance(programs, BlockSamplingProgram):
         if betas is None:
             raise ValueError(
-                "betas is required when passing single template ebm/program "
-                "objects (temperature-linear mode)."
+                "betas is required when passing single template ebm/program objects (temperature-linear mode)."
             )
         betas = jnp.asarray(betas)
         n_chains = len(betas)
@@ -666,8 +706,7 @@ def nrpt(
     betas_np = np.asarray(betas)
     if betas_np.ndim != 1 or betas_np.size != n_chains:
         raise ValueError(
-            f"betas must be a 1D array with one entry per chain "
-            f"(got shape {betas_np.shape} for {n_chains} chains)."
+            f"betas must be a 1D array with one entry per chain (got shape {betas_np.shape} for {n_chains} chains)."
         )
     if np.any(np.diff(betas_np) < 0):
         raise ValueError(
@@ -676,57 +715,97 @@ def nrpt(
             "init_states — before calling nrpt."
         )
 
-    # --- Stack states ---------------------------------------------------------
-    if stacked_init:
-        stacked_states = list(init_states)
-        if len(stacked_states) != n_free_blocks:
-            raise ValueError(
-                f"Stacked init_states must have one entry per free block "
-                f"({n_free_blocks}), got {len(stacked_states)}."
-            )
-        for leaf in jax.tree.leaves(stacked_states):
-            if leaf.shape[0] != n_chains:
-                raise ValueError(
-                    f"Stacked init_states leaves must have leading dimension "
-                    f"n_chains={n_chains}, got {leaf.shape}."
-                )
-    else:
-        states = [list(s) for s in init_states]
-        stacked_states = [
-            jnp.stack([states[c][b] for c in range(n_chains)])
-            for b in range(n_free_blocks)
-        ]
-
-    # --- Run ------------------------------------------------------------------
-    n_pairs = n_chains - 1
-    if n_rounds > 0:
-        final, observations = _nrpt_rounds(
+    # --- Device routing --------------------------------------------------------
+    dev = resolve_entry_device(
+        device,
+        n_chains=n_chains,
+        n_nodes=free_node_count(run_program),
+        arrays=(init_states, betas, chain_data, clamp_state, key),
+    )
+    if dev is not None:
+        (
             key,
             run_program,
+            chain_data,
+            betas,
+            clamp_state,
             ebm_ref,
             beta_ref,
-            base_pbi,
-            chain_data,
-            stacked_states,
-            clamp_state,
-            betas,
-            n_rounds,
-            gibbs_steps_per_round,
-            energy_delta_fn,
             observer,
-            track_round_trips,
+            init_states,
+        ) = tree_device_put(
+            (
+                key,
+                run_program,
+                chain_data,
+                betas,
+                clamp_state,
+                ebm_ref,
+                beta_ref,
+                observer,
+                init_states,
+            ),
+            dev,
         )
-    else:
-        final = NRPTCarry(
-            key=key,
-            states=stacked_states,
-            accepted=jnp.zeros(n_pairs, dtype=jnp.int32),
-            attempted=jnp.zeros(n_pairs, dtype=jnp.int32),
-            idx_state=init_index_state(n_chains),
-            base_E=jnp.zeros(n_chains, dtype=compute_dtype),
-            obs_carry=None,
-        )
-        observations = None
+        if base_pbi is not None:
+            # base_pbi aliases run_program.per_block_interactions; re-derive it
+            # from the moved program so the kernel reads on-device tensors.
+            base_pbi = run_program.per_block_interactions
+    device_ctx = (
+        jax.default_device(dev) if dev is not None else contextlib.nullcontext()
+    )
+
+    with device_ctx:
+        # --- Stack states -----------------------------------------------------
+        if stacked_init:
+            stacked_states = list(init_states)
+            if len(stacked_states) != n_free_blocks:
+                raise ValueError(
+                    f"Stacked init_states must have one entry per free block "
+                    f"({n_free_blocks}), got {len(stacked_states)}."
+                )
+            for leaf in jax.tree.leaves(stacked_states):
+                if leaf.shape[0] != n_chains:
+                    raise ValueError(
+                        f"Stacked init_states leaves must have leading dimension n_chains={n_chains}, got {leaf.shape}."
+                    )
+        else:
+            states = [list(s) for s in init_states]
+            stacked_states = [
+                jnp.stack([states[c][b] for c in range(n_chains)])
+                for b in range(n_free_blocks)
+            ]
+
+        # --- Run --------------------------------------------------------------
+        n_pairs = n_chains - 1
+        if n_rounds > 0:
+            final, observations = _nrpt_rounds(
+                key,
+                run_program,
+                ebm_ref,
+                beta_ref,
+                base_pbi,
+                chain_data,
+                stacked_states,
+                clamp_state,
+                betas,
+                n_rounds,
+                gibbs_steps_per_round,
+                energy_delta_fn,
+                observer,
+                track_round_trips,
+            )
+        else:
+            final = NRPTCarry(
+                key=key,
+                states=stacked_states,
+                accepted=jnp.zeros(n_pairs, dtype=jnp.int32),
+                attempted=jnp.zeros(n_pairs, dtype=jnp.int32),
+                idx_state=init_index_state(n_chains),
+                base_E=jnp.zeros(n_chains, dtype=compute_dtype),
+                obs_carry=None,
+            )
+            observations = None
 
     # --- Unstack --------------------------------------------------------------
     states_out = [
@@ -788,6 +867,7 @@ def nrpt_adaptive(
     program: BlockSamplingProgram | None = None,
     observer: AbstractNRPTObserver | None = None,
     tune_tol: float | None = None,
+    device: DeviceLike = "auto",
 ) -> tuple[list, dict]:
     """NRPT with iterative schedule optimization (Algorithm 4).
 
@@ -809,6 +889,9 @@ def nrpt_adaptive(
     ``stats["tuning_history"]`` (each entry records ``max_beta_shift``).
     States are ordered by ascending β — the **cold chain** (target
     distribution) is ``states[-1]``.
+
+    ``device`` is resolved **once** here and passed to every tuning and
+    production phase, so the device never flips mid-run (see ``hamon.device``).
     """
     if clamp_state is None:
         clamp_state = []
@@ -821,6 +904,16 @@ def nrpt_adaptive(
     # (temperature-linear mode, jit cache reuse); the factory route builds
     # per-chain sequences per phase. _ChainSource hides the difference.
     source = _ChainSource(ebm_factory, program_factory, ebm, program)
+
+    # Resolve the device once for all phases — a flip between phases would
+    # recompile the round loop and shuttle states across devices.
+    dev = resolve_entry_device(
+        device,
+        n_chains=len(initial_betas),
+        n_nodes=source.metadata_free_nodes(initial_betas, device),
+        arrays=(init_states, initial_betas, key),
+    )
+    source.device_put_template(dev)
 
     def _run_phase(phase_key, phase_betas, phase_states, rounds, phase_observer=None):
         chain_ebms, chain_programs = source.nrpt_args(phase_betas)
@@ -835,6 +928,7 @@ def nrpt_adaptive(
             betas=phase_betas,
             track_round_trips=track_round_trips,
             observer=phase_observer,
+            device=dev,
         )
 
     betas = initial_betas
@@ -861,8 +955,7 @@ def nrpt_adaptive(
             }
         )
         logger.info(
-            "nrpt_adaptive tune %d/%d: Lambda=%.3f mean_acceptance=%.3f "
-            "max|dbeta|=%.4g",
+            "nrpt_adaptive tune %d/%d: Lambda=%.3f mean_acceptance=%.3f max|dbeta|=%.4g",
             tune_iter + 1,
             n_tune,
             phase_lambda,
@@ -913,6 +1006,7 @@ def discover_chain_count(
     *,
     ebm: AbstractEBM | None = None,
     program: BlockSamplingProgram | None = None,
+    device: DeviceLike = "auto",
 ) -> dict:
     """Iteratively discover the right chain count for a given target acceptance.
 
@@ -984,6 +1078,18 @@ def discover_chain_count(
     stable_count = 0
     converged_reason = "max_iters"
 
+    # Resolve the device once for all probes. Chain counts vary across probes
+    # (each recompiles regardless), but a single device avoids transfer thrash;
+    # the conservative score uses the starting chain count. Borderline
+    # workloads can pass an explicit device.
+    _meta_betas = jnp.linspace(beta_range[0], beta_range[1], 1)
+    dev = resolve_entry_device(
+        device,
+        n_chains=initial_n,
+        n_nodes=source.metadata_free_nodes(_meta_betas, device),
+        arrays=(key,),
+    )
+
     for iteration in range(max_iters):
         betas = jnp.linspace(beta_range[0], beta_range[1], n_current)
 
@@ -1001,7 +1107,8 @@ def discover_chain_count(
         probe_rounds = max(50, rounds_per_probe // 3) if is_early else rounds_per_probe
 
         # Forward whichever route the caller used; nrpt_adaptive re-dispatches
-        # through its own _ChainSource.
+        # through its own _ChainSource. The concrete device (or None) bypasses
+        # its heuristic, so probes never flip devices.
         _, stats = nrpt_adaptive(
             k_probe,
             ebm_factory,
@@ -1015,6 +1122,7 @@ def discover_chain_count(
             rounds_per_tune=probe_rounds,
             ebm=ebm,
             program=program,
+            device=dev,
         )
 
         lambda_raw = float(jnp.sum(stats["rejection_rates"]))

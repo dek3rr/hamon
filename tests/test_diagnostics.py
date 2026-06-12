@@ -29,7 +29,7 @@ class TestSampleConvergence(unittest.TestCase):
         key = jax.random.key(1)
         samples = jax.random.bernoulli(key, 0.5, shape=(20, 50))
         report = sample_convergence(samples, target_k=10)
-        # With only 20 samples, marginals are noisy Ã¢â‚¬â€ should not be CONVERGED.
+        # With only 20 samples, marginals are noisy — should not be CONVERGED.
         self.assertIn(report.status, ("BORDERLINE", "NEED_MORE"))
 
     def test_target_k_clamped(self):

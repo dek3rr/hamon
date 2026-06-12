@@ -416,8 +416,7 @@ def nrpt_node_samples(
     free_blocks = spec.free_blocks
     if len(observations) != len(free_blocks):
         raise ValueError(
-            f"Expected one observation array per free block "
-            f"({len(free_blocks)}), got {len(observations)}."
+            f"Expected one observation array per free block ({len(free_blocks)}), got {len(observations)}."
         )
     if not nodes:
         raise ValueError("nodes must be non-empty.")
@@ -456,8 +455,7 @@ def nrpt_node_samples(
             )
         if loc[1] >= n_free_of_type:
             raise ValueError(
-                "Node belongs to a clamped block; only free-block states are "
-                "observed by NRPT observers."
+                "Node belongs to a clamped block; only free-block states are observed by NRPT observers."
             )
         positions.append(loc[1])
 

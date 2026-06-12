@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Automatic CPU/GPU device routing** — public entry points (`nrpt`,
+  `nrpt_adaptive`, `discover_chain_count`, `ising_sample`, `sample_states`,
+  `sample_with_observation`, `estimate_moments`, `estimate_kl_grad`) take a
+  `device` argument, default `"auto"`: with no accelerator visible placement
+  is untouched; otherwise the work score `n_chains × free nodes` routes small
+  workloads to the CPU and large ones to the accelerator, so installing CUDA
+  jax never makes a workload slower than CPU-only jax. The default threshold
+  (4096) is the steady-state crossover measured on an RTX 5080, where every
+  sweep point at score ≥ 4096 ran 2–11× faster on GPU; override via
+  `HAMON_DEVICE_THRESHOLD` (calibrate with
+  `benchmarks/device_crossover.py`); force with `HAMON_DEVICE=cpu|gpu|none`;
+  full opt-out with `device=None`. Orchestrators resolve the device once and
+  reuse it across tuning phases, preserving the jit-once round loop.
+  `hamon.resolve_device` is exported for pre-resolving with custom thresholds.
 - **`nrpt_node_samples`** — converts NRPT observer output into node order in
   one call (``samples[:, i]`` is the state of ``nodes[i]``), replacing the
   ~20 lines of block-concatenation and permutation-inversion every observer
@@ -52,11 +66,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Test suite defaults to the CPU device** — tiny test models are
+  compile/dispatch-bound on GPU (~4× slower end to end). The GPU stays
+  enumerable: a new `gpu` pytest marker runs a smoke subset on real hardware
+  (auto-skipped when absent), and `HAMON_TEST_DEVICE=gpu` runs the whole
+  suite on the GPU.
 - **Persistent XLA compilation cache in the test suite** (GPU backends only) —
   the suite compiles hundreds of small programs, and on GPU compilation
   dominates wall time; with a warm cache (`~/.cache/jax`) GPU runs are ~3×
-  faster and beat CPU. Set `JAX_COMPILATION_CACHE_DIR` to override.
-
+  faster. Set `JAX_COMPILATION_CACHE_DIR` to override.
 - **Single source of truth for block layout** — the contiguity check and
   node-position lookup that existed in three copies (`scatter_block_to_global`,
   `from_global_state`, `BlockSamplingProgram.__init__`) now live in one
