@@ -15,7 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `device` argument, default `"auto"`: with no accelerator visible placement
   is untouched; otherwise the work score `n_chains × free nodes` routes small
   workloads to the CPU and large ones to the accelerator, so installing CUDA
-  jax never makes a workload slower than CPU-only jax. Threshold via
+  jax never makes a workload slower than CPU-only jax. The default threshold
+  (4096) is the steady-state crossover measured on an RTX 5080, where every
+  sweep point at score ≥ 4096 ran 2–11× faster on GPU; override via
   `HAMON_DEVICE_THRESHOLD` (calibrate with
   `benchmarks/device_crossover.py`); force with `HAMON_DEVICE=cpu|gpu|none`;
   full opt-out with `device=None`. Orchestrators resolve the device once and

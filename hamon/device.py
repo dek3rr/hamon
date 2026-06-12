@@ -29,10 +29,14 @@ import jax
 
 DeviceLike = Union[str, jax.Device, None]
 
-# Provisional: above the largest workload measured to lose on GPU (~3e3) and
-# just below the smallest measured to win (64x64 lattice x 10 chains = 40960).
-# Calibrate per machine with benchmarks/device_crossover.py.
-DEFAULT_DEVICE_THRESHOLD = 32768
+# Steady-state crossover measured on an RTX 5080 (benchmarks/device_crossover.py,
+# jax 0.10.1): every sweep point at score <= 2048 ran faster on CPU and every
+# point at score >= 4096 ran faster on GPU (2-11x). Holds for production-length
+# runs (hundreds of rounds or repeated calls); very short one-shot flows are
+# compile-dominated (GPU compiles cost ~2x CPU's) — force those to "cpu", or
+# enable the persistent compilation cache (JAX_COMPILATION_CACHE_DIR) to
+# amortize. Calibrate per machine with benchmarks/device_crossover.py.
+DEFAULT_DEVICE_THRESHOLD = 4096
 
 _THRESHOLD_ENV = "HAMON_DEVICE_THRESHOLD"
 _DEVICE_ENV = "HAMON_DEVICE"
