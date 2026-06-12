@@ -193,6 +193,4 @@ class SoftmaxConditional(AbstractParametricConditionalSampler):
         output_sd: PyTree[jax.ShapeDtypeStruct],
     ) -> tuple[_State, None]:
         """Sample from a softmax distribution given the parameter vector $\theta$."""
-        return jax.random.categorical(key, parameters, axis=-1).astype(
-            output_sd.dtype
-        ), sampler_state
+        return jax.random.categorical(key, parameters, axis=-1).astype(output_sd.dtype), sampler_state

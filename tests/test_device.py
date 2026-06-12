@@ -274,7 +274,5 @@ class TestResolveEntryDevice:
         assert results == [None]
 
     def test_concrete_arrays_resolve(self):
-        dev = resolve_entry_device(
-            "cpu", n_chains=1, n_nodes=1, arrays=(jnp.ones(2),)
-        )
+        dev = resolve_entry_device("cpu", n_chains=1, n_nodes=1, arrays=(jnp.ones(2),))
         assert dev == CPU

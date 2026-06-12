@@ -72,11 +72,7 @@ class PassthroughSampler(AbstractConditionalSampler):
         if isinstance(output_sd, jax.ShapeDtypeStruct):
             return jnp.zeros(output_sd.shape, output_sd.dtype), sampler_state
         return jax.tree.map(
-            lambda sd: (
-                jnp.zeros(sd.shape, sd.dtype)
-                if isinstance(sd, jax.ShapeDtypeStruct)
-                else sd
-            ),
+            lambda sd: jnp.zeros(sd.shape, sd.dtype) if isinstance(sd, jax.ShapeDtypeStruct) else sd,
             output_sd,
         ), sampler_state
 
@@ -179,9 +175,7 @@ class TestScatterCorrectness(unittest.TestCase):
         blocks, spec = self._setup()
         state = [jnp.array([True, False, True, False]), jnp.array([True, True, True])]
         gs = block_state_to_global(state, spec)
-        gs_new = scatter_block_to_global(
-            gs, jnp.array([False, False, False]), blocks[1], spec
-        )
+        gs_new = scatter_block_to_global(gs, jnp.array([False, False, False]), blocks[1], spec)
         recovered = from_global_state(gs_new, spec, [blocks[0]])
         self.assertTrue(jnp.array_equal(recovered[0], state[0]))
 
@@ -199,12 +193,8 @@ class TestScatterCorrectness(unittest.TestCase):
 
         new_cat = jnp.array([0, 0], dtype=jnp.uint8)
         gs_new = scatter_block_to_global(gs, new_cat, blocks[1], spec)
-        self.assertTrue(
-            jnp.array_equal(from_global_state(gs_new, spec, [blocks[0]])[0], state[0])
-        )
-        self.assertTrue(
-            jnp.array_equal(from_global_state(gs_new, spec, [blocks[1]])[0], new_cat)
-        )
+        self.assertTrue(jnp.array_equal(from_global_state(gs_new, spec, [blocks[0]])[0], state[0]))
+        self.assertTrue(jnp.array_equal(from_global_state(gs_new, spec, [blocks[1]])[0], new_cat))
 
 
 # ---------------------------------------------------------------------------
@@ -308,9 +298,7 @@ class TestSampleSingleBlockGlobalState(unittest.TestCase):
         key = jax.random.key(42)
         out_no_gs, _ = sample_single_block(key, state, [], prog, 0, None)
         gs = block_state_to_global(state, prog.gibbs_spec)
-        out_with_gs, _ = sample_single_block(
-            key, state, [], prog, 0, None, global_state=gs
-        )
+        out_with_gs, _ = sample_single_block(key, state, [], prog, 0, None, global_state=gs)
         self.assertTrue(jnp.array_equal(out_no_gs, out_with_gs))
 
 
@@ -327,9 +315,7 @@ class TestRunBlocksEdgeCases(unittest.TestCase):
 
     def test_global_state_consistent(self):
         prog, state, _ = _make_simple_program()
-        out_state, _, out_gs = _run_blocks(
-            jax.random.key(0), prog, state, [], 5, [None]
-        )
+        out_state, _, out_gs = _run_blocks(jax.random.key(0), prog, state, [], 5, [None])
         rebuilt = block_state_to_global(out_state, prog.gibbs_spec)
         for a, b in zip(out_gs, rebuilt):
             self.assertTrue(jnp.array_equal(a, b))
@@ -364,9 +350,7 @@ class TestStateObserverJIT(unittest.TestCase):
         prog, state, block = _make_simple_program()
         observer = StateObserver([block])
         schedule = SamplingSchedule(n_warmup=2, n_samples=3, steps_per_sample=1)
-        _, samples = sample_with_observation(
-            jax.random.key(0), prog, schedule, state, [], observer.init(), observer
-        )
+        _, samples = sample_with_observation(jax.random.key(0), prog, schedule, state, [], observer.init(), observer)
         self.assertEqual(samples[0].shape, (3, 4))
 
 
@@ -412,9 +396,7 @@ class TestMomentAccumulatorDedup(unittest.TestCase):
         # n1 appears in both moment types
         observer = MomentAccumulatorObserver([[(n1,), (n2,)], [(n1, n2)]])
         total_nodes_in_blocks = sum(len(b) for b in observer.blocks_to_sample)
-        self.assertEqual(
-            total_nodes_in_blocks, 2, "Each node should appear exactly once"
-        )
+        self.assertEqual(total_nodes_in_blocks, 2, "Each node should appear exactly once")
 
     def test_flat_scatter_index_is_permutation(self):
         """After dedup, _flat_scatter_index should contain each index exactly once."""
@@ -422,9 +404,7 @@ class TestMomentAccumulatorDedup(unittest.TestCase):
         observer = MomentAccumulatorObserver([[(n1, n2)], [(n2, n3)]])
         idx = observer._flat_scatter_index
         self.assertEqual(len(idx), 3)
-        self.assertEqual(
-            len(set(idx.tolist())), 3, "Scatter index must be a permutation"
-        )
+        self.assertEqual(len(set(idx.tolist())), 3, "Scatter index must be a permutation")
 
     def test_flat_value_order_inverts_scatter(self):
         """_flat_value_order should be argsort(_flat_scatter_index)."""
@@ -495,25 +475,19 @@ class TestVerifyBlockState(unittest.TestCase):
     def test_valid_passes(self):
         nodes = [SpinNode() for _ in range(3)]
         sd = {SpinNode: jax.ShapeDtypeStruct((), jnp.bool_)}
-        verify_block_state(
-            [Block(nodes)], [jnp.array([True, False, True])], sd, block_axis=-1
-        )
+        verify_block_state([Block(nodes)], [jnp.array([True, False, True])], sd, block_axis=-1)
 
     def test_wrong_dtype_raises(self):
         nodes = [SpinNode() for _ in range(3)]
         sd = {SpinNode: jax.ShapeDtypeStruct((), jnp.bool_)}
         with self.assertRaises(RuntimeError):
-            verify_block_state(
-                [Block(nodes)], [jnp.ones(3, jnp.float32)], sd, block_axis=-1
-            )
+            verify_block_state([Block(nodes)], [jnp.ones(3, jnp.float32)], sd, block_axis=-1)
 
     def test_wrong_length_raises(self):
         nodes = [SpinNode() for _ in range(3)]
         sd = {SpinNode: jax.ShapeDtypeStruct((), jnp.bool_)}
         with self.assertRaises(RuntimeError):
-            verify_block_state(
-                [Block(nodes)], [jnp.array([True, False])], sd, block_axis=-1
-            )
+            verify_block_state([Block(nodes)], [jnp.array([True, False])], sd, block_axis=-1)
 
 
 # ---------------------------------------------------------------------------
@@ -676,9 +650,7 @@ class TestPrecomputedOutputSDs(unittest.TestCase):
 
             def _resize(leaf):
                 if isinstance(leaf, jax.ShapeDtypeStruct):
-                    return jax.ShapeDtypeStruct(
-                        (len(block.nodes), *leaf.shape), leaf.dtype
-                    )
+                    return jax.ShapeDtypeStruct((len(block.nodes), *leaf.shape), leaf.dtype)
                 return leaf
 
             expected = jax.tree.map(_resize, template)

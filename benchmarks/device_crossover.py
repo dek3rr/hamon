@@ -108,8 +108,14 @@ def sweep(args) -> list[dict]:
             row = {"L": L, "n_chains": n_chains, "score": n_chains * L * L}
             for device in ("cpu", "gpu"):
                 compile_s, steady_s = time_nrpt(
-                    device, ebm, program, free_blocks,
-                    n_chains, args.rounds, args.gibbs_steps, args.repeats,
+                    device,
+                    ebm,
+                    program,
+                    free_blocks,
+                    n_chains,
+                    args.rounds,
+                    args.gibbs_steps,
+                    args.repeats,
                 )
                 row[f"{device}_compile"] = compile_s
                 row[f"{device}_steady"] = steady_s
@@ -181,8 +187,7 @@ def portfolio(args) -> None:
         jax.block_until_ready(states[-1][0])
         return discovery["n_chains"]
 
-    print(f"\nportfolio flow: {n} nodes, {len(edges)} edges, "
-          f"{args.rounds} rounds/probe ({n_colors} colors)")
+    print(f"\nportfolio flow: {n} nodes, {len(edges)} edges, {args.rounds} rounds/probe ({n_colors} colors)")
     for device in ("cpu", "gpu"):
         t0 = time.perf_counter()
         n_chains = flow(device, jax.random.key(3))
@@ -191,30 +196,30 @@ def portfolio(args) -> None:
         flow(device, jax.random.key(4))
         warm = time.perf_counter() - t0
         score = n_chains * n
-        print(f"  {device}: cold={cold:.1f}s warm={warm:.1f}s "
-              f"(discovered {n_chains} chains, production score={score})",
-              flush=True)
+        print(
+            f"  {device}: cold={cold:.1f}s warm={warm:.1f}s (discovered {n_chains} chains, production score={score})",
+            flush=True,
+        )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--sizes", default="8,16,32,64,128",
-                        help="comma-separated lattice side lengths")
-    parser.add_argument("--chains", default="4,8,16,32",
-                        help="comma-separated chain counts")
+    parser.add_argument("--sizes", default="8,16,32,64,128", help="comma-separated lattice side lengths")
+    parser.add_argument("--chains", default="4,8,16,32", help="comma-separated chain counts")
     parser.add_argument("--rounds", type=int, default=100)
     parser.add_argument("--gibbs-steps", type=int, default=2)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--csv", default=None, help="write results to CSV")
-    parser.add_argument("--portfolio", action="store_true",
-                        help="also time a ~500-node calibration flow")
+    parser.add_argument("--portfolio", action="store_true", help="also time a ~500-node calibration flow")
     args = parser.parse_args()
     args.sizes = [int(x) for x in str(args.sizes).split(",")]
     args.chains = [int(x) for x in str(args.chains).split(",")]
 
     if accelerator_device() is None:
-        print("No GPU/TPU visible to JAX — nothing to calibrate; hamon's "
-              "'auto' routing is already a no-op on this machine.")
+        print(
+            "No GPU/TPU visible to JAX — nothing to calibrate; hamon's "
+            "'auto' routing is already a no-op on this machine."
+        )
         return 0
 
     print(f"jax {jax.__version__}, accelerator: {accelerator_device()}\n")
@@ -229,8 +234,7 @@ def main() -> int:
 
     threshold = recommend_threshold(rows)
     if threshold is None:
-        print("\nGPU never beat CPU in this sweep — leave routing at its "
-              "default (or raise HAMON_DEVICE_THRESHOLD).")
+        print("\nGPU never beat CPU in this sweep — leave routing at its default (or raise HAMON_DEVICE_THRESHOLD).")
     else:
         print(f"\nRecommended threshold for this machine: {threshold}")
         print(f"  bash:       export HAMON_DEVICE_THRESHOLD={threshold}")

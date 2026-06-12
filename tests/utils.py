@@ -63,20 +63,14 @@ def generate_all_states_categorical(num_categorical: int, n_categories: int) -> 
     return jnp.array(list(combos), dtype=jnp.int32)
 
 
-def generate_all_states_bin_cat(
-    num_binary: int, num_categorical: int, n_categories: int
-) -> tuple[Array, Array]:
+def generate_all_states_bin_cat(num_binary: int, num_categorical: int, n_categories: int) -> tuple[Array, Array]:
     bin_states = generate_all_states_binary(num_binary)
     cat_states = generate_all_states_categorical(num_categorical, n_categories)
 
     final_batch_shape = (bin_states.shape[0], cat_states.shape[0])
 
-    bin_states_expand = jnp.broadcast_to(
-        jnp.expand_dims(bin_states, 1), (*final_batch_shape, bin_states.shape[1])
-    )
-    cat_states_expand = jnp.broadcast_to(
-        jnp.expand_dims(cat_states, 0), (*final_batch_shape, cat_states.shape[1])
-    )
+    bin_states_expand = jnp.broadcast_to(jnp.expand_dims(bin_states, 1), (*final_batch_shape, bin_states.shape[1]))
+    cat_states_expand = jnp.broadcast_to(jnp.expand_dims(cat_states, 0), (*final_batch_shape, cat_states.shape[1]))
 
     batch_size = final_batch_shape[0] * final_batch_shape[1]
 
@@ -86,9 +80,7 @@ def generate_all_states_bin_cat(
     )
 
 
-def count_samples(
-    all_states_bin: Array, all_states_cat: Array, samples_bin: Array, samples_cat: Array
-) -> Array:
+def count_samples(all_states_bin: Array, all_states_cat: Array, samples_bin: Array, samples_cat: Array) -> Array:
     count_dict = {}
 
     for i, (bin_state, cat_state) in enumerate(zip(all_states_bin, all_states_cat)):
@@ -157,9 +149,7 @@ def sample_and_compare_distribution(
         else:
             all_samples.append(jnp.empty((schedule.n_samples, 0, *sd.shape), sd.dtype))
 
-    all_bin_states, all_cat_states = generate_all_states_bin_cat(
-        len(all_binary_nodes), len(all_cat_nodes), n_cats
-    )
+    all_bin_states, all_cat_states = generate_all_states_bin_cat(len(all_binary_nodes), len(all_cat_nodes), n_cats)
 
     empirical_dist = count_samples(all_bin_states, all_cat_states, *all_samples)
 
@@ -172,11 +162,9 @@ def sample_and_compare_distribution(
     clamp_vals = jax.tree.map(lambda x: x.astype(jnp.int32), clamp_vals)
     energy_states = jax.tree.map(lambda x: x.astype(jnp.int32), energy_states)
 
-    energies = jax.vmap(
-        lambda x: ebm.energy(
-            [*x] + clamp_vals, observe_blocks + program.gibbs_spec.clamped_blocks
-        )
-    )(energy_states)
+    energies = jax.vmap(lambda x: ebm.energy([*x] + clamp_vals, observe_blocks + program.gibbs_spec.clamped_blocks))(
+        energy_states
+    )
 
     un = jnp.exp(-energies)
 

@@ -50,9 +50,7 @@ class TestMomentObserver(unittest.TestCase):
         ]
 
         with jax.numpy_dtype_promotion("standard"):
-            carry_out, _ = observer(
-                self.program, state_free, [], carry, jnp.array(0, dtype=jnp.int32)
-            )
+            carry_out, _ = observer(self.program, state_free, [], carry, jnp.array(0, dtype=jnp.int32))
 
         # spin=True → ±1 transform gives +1; cat=2 → 2; product = 2
         self.assertEqual(carry_out[0][0], 2)

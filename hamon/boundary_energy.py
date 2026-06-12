@@ -55,12 +55,8 @@ class EdgePartition:
                 node_to_block[id(node)] = b_idx
 
         # Classify each edge
-        self.edge_block_a = np.array(
-            [node_to_block.get(id(e[0]), -1) for e in edges], dtype=np.int32
-        )
-        self.edge_block_b = np.array(
-            [node_to_block.get(id(e[1]), -1) for e in edges], dtype=np.int32
-        )
+        self.edge_block_a = np.array([node_to_block.get(id(e[0]), -1) for e in edges], dtype=np.int32)
+        self.edge_block_b = np.array([node_to_block.get(id(e[1]), -1) for e in edges], dtype=np.int32)
 
         # Per-block incident edge masks
         self.incident_masks = []  # (n_blocks, n_edges) bool
@@ -144,9 +140,7 @@ def ising_energy_delta(
     # Coupling delta: only incident edges contribute
     old_prod = old_state_flat[edge_src_idx] * old_state_flat[edge_dst_idx]
     new_prod = new_state_flat[edge_src_idx] * new_state_flat[edge_dst_idx]
-    coupling_delta = jnp.sum(
-        weights * (new_prod - old_prod) * incident_mask.astype(weights.dtype)
-    )
+    coupling_delta = jnp.sum(weights * (new_prod - old_prod) * incident_mask.astype(weights.dtype))
 
     return -(bias_delta + coupling_delta)
 
@@ -193,10 +187,7 @@ def make_ising_delta_fn(
     n_nodes = len(nodes)
 
     # Per-block arrays of global node indices — static, computed once.
-    block_indices = [
-        jnp.array([node_map[id(n)] for n in block], dtype=jnp.int32)
-        for block in free_blocks
-    ]
+    block_indices = [jnp.array([node_map[id(n)] for n in block], dtype=jnp.int32) for block in free_blocks]
 
     edge_src = jnp.array([node_map[id(e[0])] for e in edges], dtype=jnp.int32)
     edge_dst = jnp.array([node_map[id(e[1])] for e in edges], dtype=jnp.int32)

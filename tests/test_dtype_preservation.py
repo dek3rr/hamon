@@ -68,9 +68,7 @@ class TestX64DoesNotPromoteFloat32Models:
             betas = jnp.linspace(0.1, 1.0, n_chains)  # float64 under x64
             keys = jax.random.split(jax.random.key(0), n_chains)
             inits = [hinton_init(keys[c], ebm, blocks, ()) for c in range(n_chains)]
-            _, stats = nrpt(
-                jax.random.key(1), ebm, program, inits, [], 6, 1, betas=betas
-            )
+            _, stats = nrpt(jax.random.key(1), ebm, program, inits, [], 6, 1, betas=betas)
             assert stats["betas"].dtype == jnp.float32
             assert stats["acceptance_rate"].dtype == jnp.float32
             assert stats["round_trip_diagnostics"]["Lambda"].dtype == jnp.float32
@@ -82,9 +80,7 @@ class TestX64DoesNotPromoteFloat32Models:
             ebms = [ebm.with_beta(jnp.array(b)) for b in beta_values]
             programs = [program.with_ebm(e) for e in ebms]
             keys = jax.random.split(jax.random.key(0), len(ebms))
-            inits = [
-                hinton_init(keys[c], ebms[c], blocks, ()) for c in range(len(ebms))
-            ]
+            inits = [hinton_init(keys[c], ebms[c], blocks, ()) for c in range(len(ebms))]
             _, stats = nrpt(jax.random.key(1), ebms, programs, inits, [], 4, 1)
             assert stats["betas"].dtype == jnp.float32
             assert stats["acceptance_rate"].dtype == jnp.float32

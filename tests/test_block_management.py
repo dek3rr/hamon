@@ -81,18 +81,14 @@ class TestBlocks(unittest.TestCase):
         for label, node_dict in self.node_type_dicts.items():
             spec = block_management.BlockSpec(self.blocks, node_dict)
             all_types = [type_list for type_list in node_dict.values()]
-            block_state = block_management.make_empty_block_state(
-                self.blocks, node_dict
-            )
+            block_state = block_management.make_empty_block_state(self.blocks, node_dict)
             self.configs[label] = (spec, block_state, all_types)
 
     def test_shape_transforms(self):
         for label, (spec, block_state, _) in self.configs.items():
             with self.subTest(msg=f"Testing shape_transforms with {label}"):
                 global_state = block_management.block_state_to_global(block_state, spec)
-                re_block = block_management.from_global_state(
-                    global_state, spec, spec.blocks
-                )
+                re_block = block_management.from_global_state(global_state, spec, spec.blocks)
                 self.assertTrue(eqx.tree_equal(block_state, re_block))
 
     def test_node_lookup(self):
@@ -100,9 +96,7 @@ class TestBlocks(unittest.TestCase):
             with self.subTest(msg=f"Testing node_lookup with {label}"):
                 global_state = block_management.block_state_to_global(block_state, spec)
                 for block, state in zip(spec.blocks, block_state):
-                    type_inds, arr_inds = block_management.get_node_locations(
-                        block, spec
-                    )
+                    type_inds, arr_inds = block_management.get_node_locations(block, spec)
                     vals = jax.tree.map(lambda x: x[arr_inds], global_state[type_inds])
                     self.assertTrue(eqx.tree_equal(vals, state))
 
@@ -110,15 +104,9 @@ class TestBlocks(unittest.TestCase):
         for label, (spec, block_state, _) in self.configs.items():
             with self.subTest(msg=f"Testing empty_state with {label}"):
                 batch_shape = (10, 2)
-                empty_state = block_management.make_empty_block_state(
-                    spec.blocks, spec.node_shape_struct, batch_shape
-                )
-                empty_state = jax.tree.map(
-                    lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype), empty_state
-                )
-                b_state = jax.tree.map(
-                    lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype), block_state
-                )
+                empty_state = block_management.make_empty_block_state(spec.blocks, spec.node_shape_struct, batch_shape)
+                empty_state = jax.tree.map(lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype), empty_state)
+                b_state = jax.tree.map(lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype), block_state)
                 eqx.tree_equal(empty_state, b_state)
 
 
@@ -140,12 +128,8 @@ class TestBlockCompat(unittest.TestCase):
         self.batch_shape = (4, 2, 10)
 
         temp_2_sd = Template2(1, jax.ShapeDtypeStruct(shape=(4,), dtype=jnp.float32))
-        self.temp_1_sd = Template1(
-            temp_2_sd, jax.ShapeDtypeStruct(shape=(), dtype=jnp.int8), 4.3
-        )
-        self.temp_2_good = Template2(
-            3, jnp.zeros((*self.batch_shape, 4), dtype=jnp.float32)
-        )
+        self.temp_1_sd = Template1(temp_2_sd, jax.ShapeDtypeStruct(shape=(), dtype=jnp.int8), 4.3)
+        self.temp_2_good = Template2(3, jnp.zeros((*self.batch_shape, 4), dtype=jnp.float32))
 
         self.block_1 = block_management.Block([Node1() for _ in range(5)])
         self.block_2 = block_management.Block([Node2() for _ in range(3)])
@@ -183,24 +167,18 @@ class TestBlockCompat(unittest.TestCase):
         self.good_state_3 = jnp.zeros((*self.batch_shape, 9, 7), dtype=jnp.float32)
 
     def test_good(self):
-        temp_1_good = Template1(
-            self.temp_2_good, jnp.zeros(self.batch_shape, dtype=jnp.int8), 7.1
-        )
+        temp_1_good = Template1(self.temp_2_good, jnp.zeros(self.batch_shape, dtype=jnp.int8), 7.1)
         batch_shape = block_management._check_pytree_compat(self.temp_1_sd, temp_1_good)
         self.assertEqual(batch_shape, self.batch_shape)
 
     def test_bad_dtype(self):
-        temp_1_bad = Template1(
-            self.temp_2_good, jnp.zeros(self.batch_shape, dtype=jnp.float32), 10.2
-        )
+        temp_1_bad = Template1(self.temp_2_good, jnp.zeros(self.batch_shape, dtype=jnp.float32), 10.2)
         with self.assertRaises(RuntimeError) as error:
             _ = block_management._check_pytree_compat(self.temp_1_sd, temp_1_bad)
         self.assertIn("type", str(error.exception))
 
     def test_bad_shape(self):
-        temp_1_bad = Template1(
-            self.temp_2_good, jnp.zeros((*self.batch_shape, 1), dtype=jnp.int8), 11.9
-        )
+        temp_1_bad = Template1(self.temp_2_good, jnp.zeros((*self.batch_shape, 1), dtype=jnp.int8), 11.9)
         with self.assertRaises(RuntimeError) as error:
             _ = block_management._check_pytree_compat(self.temp_1_sd, temp_1_bad)
         self.assertIn("shape", str(error.exception))
@@ -261,9 +239,7 @@ class TestBlockCompat(unittest.TestCase):
 class TestDuplicate(unittest.TestCase):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.good_blocks = [
-            block_management.Block([Node1() for _ in range(3)]) for _ in range(2)
-        ]
+        self.good_blocks = [block_management.Block([Node1() for _ in range(3)]) for _ in range(2)]
         self.node_sd = {Node1: jax.ShapeDtypeStruct}
 
     def test_good(self):
@@ -271,9 +247,7 @@ class TestDuplicate(unittest.TestCase):
 
     def test_duplicate(self):
         with self.assertRaises(RuntimeError) as error:
-            _ = block_management.BlockSpec(
-                self.good_blocks + self.good_blocks, self.node_sd
-            )
+            _ = block_management.BlockSpec(self.good_blocks + self.good_blocks, self.node_sd)
         self.assertIn("show up twice", str(error.exception))
 
 
@@ -378,9 +352,7 @@ class TestScatterBlockToGlobal(unittest.TestCase):
     def test_contiguous_block(self):
         """Blocks laid out by BlockSpec are contiguous → slice-update path."""
         new_state = jnp.arange(3, dtype=jnp.float32) + 100.0
-        out = block_management.scatter_block_to_global(
-            self.global_state, new_state, self.blocks[1], self.spec
-        )
+        out = block_management.scatter_block_to_global(self.global_state, new_state, self.blocks[1], self.spec)
         sd_ind, ref = self._reference(self.blocks[1], new_state)
         self.assertTrue(jnp.array_equal(out[sd_ind], ref))
         # positions outside the block are untouched
@@ -389,17 +361,13 @@ class TestScatterBlockToGlobal(unittest.TestCase):
     def test_non_contiguous_block_falls_back(self):
         """A block interleaving nodes from two spec blocks has non-contiguous
         global positions and must take the scatter fallback."""
-        mixed = block_management.Block(
-            [self.blocks[0][0], self.blocks[1][0], self.blocks[0][1]]
-        )
+        mixed = block_management.Block([self.blocks[0][0], self.blocks[1][0], self.blocks[0][1]])
         _, positions = block_management.get_node_locations(mixed, self.spec)
         pos = list(map(int, positions))
         self.assertNotEqual(pos, list(range(pos[0], pos[0] + len(pos))))
 
         new_state = jnp.array([7.0, 8.0, 9.0])
-        out = block_management.scatter_block_to_global(
-            self.global_state, new_state, mixed, self.spec
-        )
+        out = block_management.scatter_block_to_global(self.global_state, new_state, mixed, self.spec)
         sd_ind, ref = self._reference(mixed, new_state)
         self.assertTrue(jnp.array_equal(out[sd_ind], ref))
 
@@ -407,9 +375,7 @@ class TestScatterBlockToGlobal(unittest.TestCase):
         """A length-1 block is trivially contiguous."""
         single = block_management.Block([self.blocks[0][2]])
         new_state = jnp.array([42.0])
-        out = block_management.scatter_block_to_global(
-            self.global_state, new_state, single, self.spec
-        )
+        out = block_management.scatter_block_to_global(self.global_state, new_state, single, self.spec)
         sd_ind, ref = self._reference(single, new_state)
         self.assertTrue(jnp.array_equal(out[sd_ind], ref))
 
@@ -432,15 +398,11 @@ class TestFromGlobalState(unittest.TestCase):
         return jnp.take(self.global_state[sd_ind], positions, axis=0)
 
     def test_contiguous_blocks(self):
-        out = block_management.from_global_state(
-            self.global_state, self.spec, self.blocks
-        )
+        out = block_management.from_global_state(self.global_state, self.spec, self.blocks)
         for block, extracted in zip(self.blocks, out):
             self.assertTrue(jnp.array_equal(extracted, self._reference(block)))
 
     def test_non_contiguous_block_falls_back(self):
-        mixed = block_management.Block(
-            [self.blocks[1][2], self.blocks[0][1], self.blocks[1][0]]
-        )
+        mixed = block_management.Block([self.blocks[1][2], self.blocks[0][1], self.blocks[1][0]])
         out = block_management.from_global_state(self.global_state, self.spec, [mixed])
         self.assertTrue(jnp.array_equal(out[0], self._reference(mixed)))

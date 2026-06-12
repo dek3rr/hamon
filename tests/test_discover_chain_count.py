@@ -30,9 +30,7 @@ _FREE_BLOCKS = [Block(_NODES[::2]), Block(_NODES[1::2])]
 
 
 def _ebm_factory(betas):
-    return [
-        IsingEBM(_NODES, _EDGES, _BIASES, _WEIGHTS, jnp.array(float(b))) for b in betas
-    ]
+    return [IsingEBM(_NODES, _EDGES, _BIASES, _WEIGHTS, jnp.array(float(b))) for b in betas]
 
 
 def _program_factory(ebms):

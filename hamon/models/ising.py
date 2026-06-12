@@ -102,17 +102,13 @@ class IsingEBM(AbstractFactorizedEBM):
 class IsingSamplingProgram(FactorSamplingProgram):
     """A very thin wrapper on FactorSamplingProgram that specializes it to the case of an Ising Model."""
 
-    def __init__(
-        self, ebm: IsingEBM, free_blocks: list[SuperBlock], clamped_blocks: list[Block]
-    ):
+    def __init__(self, ebm: IsingEBM, free_blocks: list[SuperBlock], clamped_blocks: list[Block]):
         samp = SpinGibbsConditional()
         spec = BlockGibbsSpec(free_blocks, clamped_blocks, ebm.node_shape_dtypes)
         super().__init__(spec, [samp for _ in spec.free_blocks], ebm.factors, [])
 
     def with_ebm(self, ebm: IsingEBM) -> "IsingSamplingProgram":
-        return IsingSamplingProgram(
-            ebm, list(self.gibbs_spec.superblocks), self.gibbs_spec.clamped_blocks
-        )
+        return IsingSamplingProgram(ebm, list(self.gibbs_spec.superblocks), self.gibbs_spec.clamped_blocks)
 
 
 class IsingTrainingSpec(eqx.Module):
@@ -139,12 +135,8 @@ class IsingTrainingSpec(eqx.Module):
         schedule_negative: SamplingSchedule,
     ):
         self.ebm = ebm
-        self.program_positive = IsingSamplingProgram(
-            ebm, positive_sampling_blocks, data_blocks + conditioning_blocks
-        )
-        self.program_negative = IsingSamplingProgram(
-            ebm, negative_sampling_blocks, conditioning_blocks
-        )
+        self.program_positive = IsingSamplingProgram(ebm, positive_sampling_blocks, data_blocks + conditioning_blocks)
+        self.program_negative = IsingSamplingProgram(ebm, negative_sampling_blocks, conditioning_blocks)
         self.schedule_positive = schedule_positive
         self.schedule_negative = schedule_negative
 
@@ -188,9 +180,7 @@ def hinton_init(
         indices = jnp.array([node_map[n] for n in block], dtype=jnp.int32)
         block_biases = model.biases[indices]  # (block_size,)
         probs = jax.nn.sigmoid(model.beta * block_biases)
-        sample = jax.random.bernoulli(
-            k, p=probs, shape=(*batch_shape, len(block))
-        ).astype(jnp.bool_)
+        sample = jax.random.bernoulli(k, p=probs, shape=(*batch_shape, len(block))).astype(jnp.bool_)
         result.append(sample)
 
     return result
@@ -233,7 +223,13 @@ def estimate_moments(
     init_mem = observer.init()
 
     moments, _ = sample_with_observation(
-        key, program, schedule, init_state, clamped_data, init_mem, observer,
+        key,
+        program,
+        schedule,
+        init_state,
+        clamped_data,
+        init_mem,
+        observer,
         device=device,
     )
 
@@ -371,12 +367,10 @@ def estimate_kl_grad(
 
         float_type = training_spec.ebm.beta.dtype
         grad_b = -training_spec.ebm.beta * (
-            jnp.mean(moms_b_pos, axis=(0, 1), dtype=float_type)
-            - jnp.mean(moms_b_neg, axis=0, dtype=float_type)
+            jnp.mean(moms_b_pos, axis=(0, 1), dtype=float_type) - jnp.mean(moms_b_neg, axis=0, dtype=float_type)
         )
         grad_w = -training_spec.ebm.beta * (
-            jnp.mean(moms_w_pos, axis=(0, 1), dtype=float_type)
-            - jnp.mean(moms_w_neg, axis=0, dtype=float_type)
+            jnp.mean(moms_w_pos, axis=(0, 1), dtype=float_type) - jnp.mean(moms_w_neg, axis=0, dtype=float_type)
         )
         return grad_w, grad_b, (moms_b_pos, moms_w_pos), (moms_b_neg, moms_w_neg)
 
@@ -450,8 +444,7 @@ def ising_sample(
     # --- degenerate model checks ---
     if edges_np.shape[0] == 0:
         logger.warning(
-            "No edges provided — variables are independent. "
-            "NRPT is unnecessary; single-chain Gibbs sampling suffices."
+            "No edges provided — variables are independent. NRPT is unnecessary; single-chain Gibbs sampling suffices."
         )
     elif jnp.all(weights == 0):
         logger.warning(
@@ -493,9 +486,7 @@ def ising_sample(
 
     # Device routing, stage 1: discovery probes start at 8 chains
     # (discover_chain_count's initial_n default).
-    dev = resolve_entry_device(
-        device, n_chains=8, n_nodes=n, arrays=(biases, weights, key)
-    )
+    dev = resolve_entry_device(device, n_chains=8, n_nodes=n, arrays=(biases, weights, key))
 
     discovery = discover_chain_count(
         k_disc,
@@ -541,9 +532,7 @@ def ising_sample(
     cold_state = warm_states[-1]
     schedule = SamplingSchedule(n_warmup, n_samples, steps_per_sample)
     obs_block = Block(nodes)
-    raw_samples = sample_states(
-        k_samp, program, schedule, cold_state, [], [obs_block], device=dev
-    )
+    raw_samples = sample_states(k_samp, program, schedule, cold_state, [], [obs_block], device=dev)
     samples = raw_samples[0]  # (n_samples, n)
 
     mean_spins = float(jnp.mean(jnp.sum(samples, axis=1).astype(jnp.float32)))

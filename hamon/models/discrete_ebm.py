@@ -90,9 +90,7 @@ class DiscreteEBMFactor(EBMFactor, WeightedFactor):
         categorical_node_groups: list[Block],
         weights: Array,
     ):
-        WeightedFactor.__init__(
-            self, weights, spin_node_groups + categorical_node_groups
-        )
+        WeightedFactor.__init__(self, weights, spin_node_groups + categorical_node_groups)
 
         is_spin = defaultdict(lambda: False)
 
@@ -127,9 +125,7 @@ class DiscreteEBMFactor(EBMFactor, WeightedFactor):
 
         if n_spin > 0:
             spin_inds = list(range(len(self.spin_node_groups)))
-            spin_combos = [
-                (x, spin_inds[:i] + spin_inds[i + 1 :]) for i, x in enumerate(spin_inds)
-            ]
+            spin_combos = [(x, spin_inds[:i] + spin_inds[i + 1 :]) for i, x in enumerate(spin_inds)]
 
             all_head_nodes = []
             all_tail_nodes = [[] for _ in range(n_total - 1)]
@@ -154,9 +150,7 @@ class DiscreteEBMFactor(EBMFactor, WeightedFactor):
 
         if n_cat > 0:
             cat_inds = list(range(len(self.categorical_node_groups)))
-            cat_combos = [
-                (x, cat_inds[:i] + cat_inds[i + 1 :]) for i, x in enumerate(cat_inds)
-            ]
+            cat_combos = [(x, cat_inds[:i] + cat_inds[i + 1 :]) for i, x in enumerate(cat_inds)]
 
             for combo in cat_combos:
                 head_nodes = self.categorical_node_groups[combo[0]]
@@ -165,9 +159,7 @@ class DiscreteEBMFactor(EBMFactor, WeightedFactor):
 
                 reind = (0, combo[0] + 1, *[x + 1 for x in combo[1]])
 
-                weights_reind = jnp.moveaxis(
-                    self.weights, reind, list(range(len(reind)))
-                )
+                weights_reind = jnp.moveaxis(self.weights, reind, list(range(len(reind))))
 
                 interaction_groups.append(
                     InteractionGroup(
@@ -185,9 +177,7 @@ class DiscreteEBMFactor(EBMFactor, WeightedFactor):
         In this case, that is the sum of terms like s_1 * ... * s_M * W[c_1, ..., c_N].
         """
         spin_vals = from_global_state(global_state, block_spec, self.spin_node_groups)
-        cat_vals = from_global_state(
-            global_state, block_spec, self.categorical_node_groups
-        )
+        cat_vals = from_global_state(global_state, block_spec, self.categorical_node_groups)
         spin_prod = _spin_product(spin_vals)
         weights = _batch_gather(self.weights, *cat_vals)
         return -jnp.sum(weights * spin_prod.astype(weights.dtype))
@@ -208,9 +198,7 @@ def _merge_groups(groups, n_tail_groups):
 
     return [
         InteractionGroup(
-            DiscreteEBMInteraction(
-                groups[0].interaction.n_spin, jnp.concatenate(all_weights, axis=0)
-            ),
+            DiscreteEBMInteraction(groups[0].interaction.n_spin, jnp.concatenate(all_weights, axis=0)),
             Block(all_head),
             [Block(x) for x in all_tail],
         )
@@ -287,13 +275,9 @@ def _batch_gather_with_k(x, *idx):
 
     k = batch_shape[-1]
 
-    new_idx = [
-        jnp.broadcast_to(jnp.expand_dims(y, -1), (*y.shape, k)).flatten() for y in idx
-    ]
+    new_idx = [jnp.broadcast_to(jnp.expand_dims(y, -1), (*y.shape, k)).flatten() for y in idx]
 
-    return _batch_gather(
-        x.reshape((np.prod(batch_shape), *x.shape[-n:])), *new_idx
-    ).reshape(batch_shape)
+    return _batch_gather(x.reshape((np.prod(batch_shape), *x.shape[-n:])), *new_idx).reshape(batch_shape)
 
 
 def _accumulator_dtype(interactions) -> jnp.dtype:
@@ -301,9 +285,7 @@ def _accumulator_dtype(interactions) -> jnp.dtype:
     interaction weight dtypes, so float64 weights accumulate in float64
     instead of being silently seeded with a float32 zero. Falls back to
     float32 when no DiscreteEBMInteractions are present."""
-    w_dtypes = [
-        i.weights.dtype for i in interactions if isinstance(i, DiscreteEBMInteraction)
-    ]
+    w_dtypes = [i.weights.dtype for i in interactions if isinstance(i, DiscreteEBMInteraction)]
     return jnp.result_type(*w_dtypes) if w_dtypes else jnp.dtype(jnp.float32)
 
 
@@ -349,9 +331,7 @@ class SpinGibbsConditional(BernoulliConditional):
         """
 
         gamma = jnp.zeros(output_sd.shape, dtype=_accumulator_dtype(interactions))
-        for i, (interaction, active, state) in enumerate(
-            zip(interactions, active_flags, states)
-        ):
+        for i, (interaction, active, state) in enumerate(zip(interactions, active_flags, states)):
             if isinstance(interaction, DiscreteEBMInteraction):
                 state_bin, state_cat = _split_states(state, interaction.n_spin)
 
@@ -399,16 +379,12 @@ class CategoricalGibbsConditional(SoftmaxConditional):
             (*output_sd.shape, self.n_categories),
             dtype=_accumulator_dtype(interactions),
         )
-        for i, (interaction, active, state) in enumerate(
-            zip(interactions, active_flags, states)
-        ):
+        for i, (interaction, active, state) in enumerate(zip(interactions, active_flags, states)):
             if isinstance(interaction, DiscreteEBMInteraction):
                 state_bin, state_cat = _split_states(state, interaction.n_spin)
 
                 weights = _batch_gather_with_k(interaction.weights, *state_cat)
-                spin_prod = jnp.expand_dims(_spin_product(state_bin), -1).astype(
-                    weights.dtype
-                )
+                spin_prod = jnp.expand_dims(_spin_product(state_bin), -1).astype(weights.dtype)
                 # Padded entries are pre-zeroed at program construction; see
                 # SpinGibbsConditional.compute_parameters.
                 theta += jnp.sum(spin_prod * weights, axis=-2)

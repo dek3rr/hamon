@@ -168,9 +168,7 @@ class TestInfluenceAwarePartition:
         nodes, edges, _ = _grid_graph(8)
         w = np.ones(len(edges))
         max_sz = 6
-        blocks = influence_aware_partition(
-            nodes, edges, w, beta=1.0, max_block_size=max_sz
-        )
+        blocks = influence_aware_partition(nodes, edges, w, beta=1.0, max_block_size=max_sz)
         for block in blocks:
             assert len(block) <= max_sz
 

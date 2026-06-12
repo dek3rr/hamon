@@ -214,9 +214,7 @@ class BlockSamplingProgram(eqx.Module):
 
         n_free_blocks = len(self.gibbs_spec.free_blocks)
         if len(self.samplers) != n_free_blocks:
-            raise ValueError(
-                f"Expected {n_free_blocks} samplers, received {len(self.samplers)}"
-            )
+            raise ValueError(f"Expected {n_free_blocks} samplers, received {len(self.samplers)}")
 
         # Map every head node to (interaction_group_index, position_within_group).
         head_node_map = defaultdict(list)
@@ -230,18 +228,14 @@ class BlockSamplingProgram(eqx.Module):
 
         for block in gibbs_spec.free_blocks:
             this_block_interaction_info = [
-                [[] for _ in range(len(block.nodes))]
-                for _ in range(len(interaction_groups))
+                [[] for _ in range(len(block.nodes))] for _ in range(len(interaction_groups))
             ]
             for j, node in enumerate(block.nodes):
                 this_node_interaction_info = head_node_map[node]
                 for info in this_node_interaction_info:
                     this_block_interaction_info[info[0]][j].append(info[1])
             interaction_inds.append(this_block_interaction_info)
-            this_max_n = [
-                max([len(x) for x in this_int])
-                for this_int in this_block_interaction_info
-            ]
+            this_max_n = [max([len(x) for x in this_int]) for this_int in this_block_interaction_info]
             max_n_interactions.append(this_max_n)
 
         # Build per-block interaction data and global-state slicers.
@@ -267,12 +261,8 @@ class BlockSamplingProgram(eqx.Module):
                     global_inds = []
                     global_slices = []
                     for tail_block in interaction_group.tail_nodes:
-                        global_inds.append(
-                            gibbs_spec.node_global_location_map[tail_block.nodes[0]][0]
-                        )
-                        global_slices.append(
-                            np.zeros((n_nodes, n_interactions), dtype=int)
-                        )
+                        global_inds.append(gibbs_spec.node_global_location_map[tail_block.nodes[0]][0])
+                        global_slices.append(np.zeros((n_nodes, n_interactions), dtype=int))
 
                     active = np.zeros((n_nodes, n_interactions), dtype=bool)
                     for i, inds in enumerate(interact_inds):
@@ -280,20 +270,14 @@ class BlockSamplingProgram(eqx.Module):
                             interaction_slices[i, j] = ind
                             active[i, j] = 1
 
-                            for k, tail_block in enumerate(
-                                interaction_group.tail_nodes
-                            ):
-                                s = gibbs_spec.node_global_location_map[
-                                    tail_block.nodes[ind]
-                                ][1]
+                            for k, tail_block in enumerate(interaction_group.tail_nodes):
+                                s = gibbs_spec.node_global_location_map[tail_block.nodes[ind]][1]
                                 global_slices[k][i, j] = s
 
                     interaction_slices = jnp.array(interaction_slices)
 
                     sliced_interaction = jax.tree.map(
-                        lambda x: _tree_slice(
-                            x, interaction_slices
-                        ),  # shape -> (n, m, …)
+                        lambda x: _tree_slice(x, interaction_slices),  # shape -> (n, m, …)
                         interaction_group.interaction,
                     )
 
@@ -316,9 +300,7 @@ class BlockSamplingProgram(eqx.Module):
                     this_block_interactions.append(sliced_interaction)
                     this_block_active.append(active_arr)
                     this_block_global_inds.append(global_inds)
-                    this_block_global_slices.append(
-                        [jnp.array(x) for x in global_slices]
-                    )
+                    this_block_global_slices.append([jnp.array(x) for x in global_slices])
             per_block_interactions.append(this_block_interactions)
             per_block_interaction_active.append(this_block_active)
             per_block_interaction_global_inds.append(this_block_global_inds)
@@ -390,16 +372,12 @@ def sample_single_block(
     - Updated block state and sampler state for the specified block.
     """
     if global_state is None:
-        global_state = block_state_to_global(
-            state_free + clamp_state, program.gibbs_spec
-        )
+        global_state = block_state_to_global(state_free + clamp_state, program.gibbs_spec)
     per_interaction_global_inds = program.per_block_interaction_global_inds[block]
     per_interaction_slices = program.per_block_interaction_global_slices[block]
 
     all_interaction_states = []
-    for interaction_global_inds, interaction_slices in zip(
-        per_interaction_global_inds, per_interaction_slices
-    ):
+    for interaction_global_inds, interaction_slices in zip(per_interaction_global_inds, per_interaction_slices):
         this_interaction_states = []
         for ind, sl in zip(interaction_global_inds, interaction_slices):
             this_interaction_states.append(
@@ -413,9 +391,7 @@ def sample_single_block(
     sd_to_pass = program._block_output_sds[block]
 
     block_interactions = (
-        per_block_interactions[block]
-        if per_block_interactions is not None
-        else program.per_block_interactions[block]
+        per_block_interactions[block] if per_block_interactions is not None else program.per_block_interactions[block]
     )
 
     sampler = program.samplers[block]
@@ -497,9 +473,7 @@ def _run_blocks(
     n_iters: int,
     sampler_states: list[_SamplerState],
     per_block_interactions: list[list[PyTree]] | None = None,
-) -> tuple[
-    list[PyTree[Shaped[Array, "nodes ?*state"]]], list[_SamplerState], list[PyTree]
-]:
+) -> tuple[list[PyTree[Shaped[Array, "nodes ?*state"]]], list[_SamplerState], list[PyTree]]:
     """Perform `n_iters` steps of block sampling.
 
     The scan carries only the sampler states and the concatenated global
@@ -516,18 +490,12 @@ def _run_blocks(
     """
 
     # Build global state once before scan (clamped slice is static).
-    init_global_state = block_state_to_global(
-        init_chain_state + state_clamp, program.gibbs_spec
-    )
+    init_global_state = block_state_to_global(init_chain_state + state_clamp, program.gibbs_spec)
 
     if n_iters == 0:
         return init_chain_state, sampler_states, init_global_state
 
-    pbi = (
-        per_block_interactions
-        if per_block_interactions is not None
-        else program.per_block_interactions
-    )
+    pbi = per_block_interactions if per_block_interactions is not None else program.per_block_interactions
 
     block_sd_inds = program._block_sd_inds
     block_positions = program._block_positions
@@ -566,9 +534,7 @@ def _run_blocks(
                     # Contiguous block: a static-offset dynamic_update_slice,
                     # which XLA fuses far better than a gather-index scatter.
                     new_global[sd_ind] = jax.tree.map(
-                        lambda g, s: jax.lax.dynamic_update_slice_in_dim(
-                            g, s, start, axis=0
-                        ),
+                        lambda g, s: jax.lax.dynamic_update_slice_in_dim(g, s, start, axis=0),
                         global_state[sd_ind],
                         new_states[i],
                     )
@@ -584,14 +550,10 @@ def _run_blocks(
         return (sampler_state, global_state), None
 
     keys = jax.random.split(key, n_iters)
-    (final_sampler_states, final_global), _ = jax.lax.scan(
-        body_fn, (sampler_states, init_global_state), keys
-    )
+    (final_sampler_states, final_global), _ = jax.lax.scan(body_fn, (sampler_states, init_global_state), keys)
     # Free-block states are contiguous slices of the global state, so this
     # extraction lowers to static slices that XLA fuses away.
-    final_state_free = from_global_state(
-        final_global, program.gibbs_spec, program.gibbs_spec.free_blocks
-    )
+    final_state_free = from_global_state(final_global, program.gibbs_spec, program.gibbs_spec.free_blocks)
     return final_state_free, final_sampler_states, final_global
 
 
@@ -712,9 +674,7 @@ def sample_with_observation(
                 schedule.steps_per_sample,
                 prev_sampler_state,
             )
-            _mem, observe_out = f_observe(
-                program, new_state, state_clamp, _mem, i, new_global
-            )
+            _mem, observe_out = f_observe(program, new_state, state_clamp, _mem, i, new_global)
             new_carry = ((new_state, new_sampler_state), _mem)
             return new_carry, observe_out
 
@@ -723,17 +683,13 @@ def sample_with_observation(
 
         inputs = (keys, outer_iters)
 
-        (_, mem_out), observed_results = jax.lax.scan(
-            body_fn, ((warmup_state, warmup_sampler_states), mem), inputs
-        )
+        (_, mem_out), observed_results = jax.lax.scan(body_fn, ((warmup_state, warmup_sampler_states), mem), inputs)
 
         # need to prepend the first observation from the warmup
         def prepend_warmup_observation(_warmup, _rest):
             return jnp.concatenate([_warmup[None], _rest], axis=0)
 
-        observed_results = jax.tree.map(
-            prepend_warmup_observation, warmup_observation, observed_results
-        )
+        observed_results = jax.tree.map(prepend_warmup_observation, warmup_observation, observed_results)
 
         return mem_out, observed_results
 

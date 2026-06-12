@@ -63,14 +63,9 @@ def sample_convergence(
     target_k = min(target_k, n_vars)
 
     quartile_indices = [n_samples * q // 4 for q in range(1, 5)]
-    marginals = [
-        jnp.mean(samples[:idx].astype(jnp.float32), axis=0) for idx in quartile_indices
-    ]
+    marginals = [jnp.mean(samples[:idx].astype(jnp.float32), axis=0) for idx in quartile_indices]
 
-    drifts = [
-        float(jnp.mean(jnp.abs(marginals[i + 1] - marginals[i])))
-        for i in range(len(marginals) - 1)
-    ]
+    drifts = [float(jnp.mean(jnp.abs(marginals[i + 1] - marginals[i]))) for i in range(len(marginals) - 1)]
 
     # Rank stability: Jaccard of top-k between first and second half.
     half = n_samples // 2
@@ -193,15 +188,13 @@ def energy_balance(
 
     if ratio < warn_low:
         logger.warning(
-            "Energy balance ratio %.3f < %.3f: biases dominate, "
-            "couplings may be irrelevant.",
+            "Energy balance ratio %.3f < %.3f: biases dominate, couplings may be irrelevant.",
             ratio,
             warn_low,
         )
     elif ratio > warn_high:
         logger.warning(
-            "Energy balance ratio %.3f > %.1f: couplings dominate, "
-            "biases may be irrelevant.",
+            "Energy balance ratio %.3f > %.1f: couplings dominate, biases may be irrelevant.",
             ratio,
             warn_high,
         )
@@ -269,10 +262,7 @@ class NRPTHealthReport:
             lines.append("VERDICT: healthy — samples are reliable")
         else:
             lines.append("VERDICT: unhealthy — do not trust these samples")
-        lines.append(
-            f"  acceptance mean={self.acceptance_mean:.3f}  "
-            f"rejection std={self.rejection_std:.3f}"
-        )
+        lines.append(f"  acceptance mean={self.acceptance_mean:.3f}  rejection std={self.rejection_std:.3f}")
         if self.Lambda is not None:
             lines.append(
                 f"  Lambda={self.Lambda:.3f}  tau_obs={self.tau_observed:.4f}  "
@@ -284,10 +274,7 @@ class NRPTHealthReport:
             note = ""
             if self.convergence_status not in (None, "CONVERGED"):
                 note = " (informational only for multi-modal PT)"
-            lines.append(
-                f"  entropy={self.marginal_entropy:.3f}  "
-                f"convergence={self.convergence_status}{note}"
-            )
+            lines.append(f"  entropy={self.marginal_entropy:.3f}  convergence={self.convergence_status}{note}")
         for issue in self.issues:
             lines.append(f"  ISSUE: {issue}")
         for warning in self.warnings:
@@ -357,8 +344,7 @@ def report_nrpt_diagnostics(
     insufficient = bool(jnp.min(attempted) < min_attempts)
     if insufficient:
         warnings.append(
-            f"insufficient swap attempts (min {int(jnp.min(attempted))} < "
-            f"{min_attempts}); pass/fail verdict withheld"
+            f"insufficient swap attempts (min {int(jnp.min(attempted))} < {min_attempts}); pass/fail verdict withheld"
         )
 
     def _flag(message: str) -> None:
@@ -385,10 +371,7 @@ def report_nrpt_diagnostics(
         report.total_round_trips = int(jnp.sum(rt["round_trips_per_chain"]))
 
         if report.tau_observed < tau_min:
-            _flag(
-                f"near-zero round trip rate (tau_obs="
-                f"{report.tau_observed:.4f}) — information not flowing"
-            )
+            _flag(f"near-zero round trip rate (tau_obs={report.tau_observed:.4f}) — information not flowing")
         elif report.efficiency < efficiency_fail:
             from hamon.round_trips import recommend_n_chains
 
@@ -399,10 +382,7 @@ def report_nrpt_diagnostics(
                 f"Lambda={report.Lambda:.2f}"
             )
         elif report.efficiency < efficiency_warn:
-            warnings.append(
-                f"round-trip efficiency below {efficiency_warn} "
-                f"({report.efficiency:.3f})"
-            )
+            warnings.append(f"round-trip efficiency below {efficiency_warn} ({report.efficiency:.3f})")
 
         lam_profile = jnp.asarray(rt["lambda_profile"])
         peak_val = float(jnp.max(lam_profile))
@@ -410,17 +390,14 @@ def report_nrpt_diagnostics(
         if mean_val > 0 and peak_val > 3 * mean_val:
             peak_idx = int(jnp.argmax(lam_profile))
             betas = jnp.asarray(stats["betas"])
-            report.barrier_peak_beta = float(
-                (betas[peak_idx] + betas[peak_idx + 1]) / 2
-            )
+            report.barrier_peak_beta = float((betas[peak_idx] + betas[peak_idx + 1]) / 2)
             warnings.append(
                 f"sharp barrier peak near beta={report.barrier_peak_beta:.3f} "
                 f"(peak={peak_val:.3f}, mean={mean_val:.3f})"
             )
     else:
         warnings.append(
-            "round trip diagnostics unavailable (track_round_trips=False); "
-            "the primary NRPT quality signal is missing"
+            "round trip diagnostics unavailable (track_round_trips=False); the primary NRPT quality signal is missing"
         )
 
     if samples is not None:
@@ -432,10 +409,7 @@ def report_nrpt_diagnostics(
         if report.marginal_entropy < entropy_frozen:
             _flag(f"frozen marginals (entropy={report.marginal_entropy:.3f})")
         elif report.marginal_entropy > entropy_uniform:
-            warnings.append(
-                f"near-uniform marginals "
-                f"(entropy={report.marginal_entropy:.3f}) — beta may be too low"
-            )
+            warnings.append(f"near-uniform marginals (entropy={report.marginal_entropy:.3f}) — beta may be too low")
 
     report.healthy = not issues and not insufficient
     for issue in issues:

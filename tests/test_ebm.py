@@ -33,9 +33,7 @@ class TestEnergyBlockSpecFastPath(unittest.TestCase):
         weights = jax.random.uniform(subkey, (self.n - 1,))
 
         bias_factor = SpinEBMFactor([self.block], biases)
-        edge_factor = SpinEBMFactor(
-            [Block(self.nodes[:-1]), Block(self.nodes[1:])], weights
-        )
+        edge_factor = SpinEBMFactor([Block(self.nodes[:-1]), Block(self.nodes[1:])], weights)
 
         self.ebm = FactorizedEBM([bias_factor, edge_factor])
 

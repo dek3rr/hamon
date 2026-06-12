@@ -29,9 +29,7 @@ class AbstractEBM(eqx.Module):
         )
 
     @abc.abstractmethod
-    def energy(
-        self, state: list[_State], blocks: "BlockSpec | list[Block]"
-    ) -> Float[Array, ""]:
+    def energy(self, state: list[_State], blocks: "BlockSpec | list[Block]") -> Float[Array, ""]:
         """Evaluate the energy function of the EBM given some state information.
 
         **Arguments:**
@@ -52,9 +50,7 @@ class EBMFactor(AbstractFactor):
     """A factor that defines an energy function."""
 
     @abc.abstractmethod
-    def energy(
-        self, global_state: list[Array], block_spec: BlockSpec
-    ) -> Float[Array, ""]:
+    def energy(self, global_state: list[Array], block_spec: BlockSpec) -> Float[Array, ""]:
         """Evaluate the energy function of the factor.
 
         **Arguments:**
@@ -87,9 +83,7 @@ class AbstractFactorizedEBM(AbstractEBM):
     def __init__(self, node_shape_dtypes: _SD = DEFAULT_NODE_SHAPE_DTYPES):
         self.node_shape_dtypes = node_shape_dtypes
 
-    def energy(
-        self, state: list[_State], blocks: "BlockSpec | list[Block]"
-    ) -> Float[Array, ""]:
+    def energy(self, state: list[_State], blocks: "BlockSpec | list[Block]") -> Float[Array, ""]:
         """Evaluate the total energy as the sum of all factor energies."""
         if isinstance(blocks, BlockSpec):
             block_spec = blocks

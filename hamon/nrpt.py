@@ -54,9 +54,7 @@ def _resolve_factories(
     """Resolve (ebm_factory, program_factory) or (ebm, program) into callables."""
     if ebm_factory is None and program_factory is None:
         if ebm is None or program is None:
-            raise ValueError(
-                "Provide either (ebm_factory, program_factory) or (ebm=, program=)."
-            )
+            raise ValueError("Provide either (ebm_factory, program_factory) or (ebm=, program=).")
         _ebm = ebm
         _prog = program
 
@@ -91,12 +89,7 @@ class _ChainSource:
         ebm: AbstractEBM | None,
         program: BlockSamplingProgram | None,
     ):
-        self.template_mode = (
-            ebm_factory is None
-            and program_factory is None
-            and ebm is not None
-            and program is not None
-        )
+        self.template_mode = ebm_factory is None and program_factory is None and ebm is not None and program is not None
         if self.template_mode:
             assert ebm is not None and program is not None
             # Rebase to β = 1 once; every later nrpt_args call hands back the
@@ -106,9 +99,7 @@ class _ChainSource:
             self._template_program = program
         # Factories exist in both routes; the template route still uses them
         # for the cheap per-chain EBM list handed to init factories.
-        self._make_ebms, self._make_programs = _resolve_factories(
-            ebm_factory, program_factory, ebm, program
-        )
+        self._make_ebms, self._make_programs = _resolve_factories(ebm_factory, program_factory, ebm, program)
 
     def nrpt_args(self, betas):
         """``(ebms, programs)`` arguments for ``nrpt`` at this β schedule."""
@@ -151,16 +142,12 @@ class _ChainSource:
         jit cache sees the same objects each phase. No-op on the factory
         route, whose per-phase arrays are moved by nrpt itself."""
         if dev is not None and self.template_mode:
-            self._base_ebm, self._base_program = tree_device_put(
-                (self._base_ebm, self._base_program), dev
-            )
+            self._base_ebm, self._base_program = tree_device_put((self._base_ebm, self._base_program), dev)
 
 
 def _stack_pbi_across_chains(interaction_list: list) -> object:
     return jax.tree.map(
-        lambda *leaves: (
-            jnp.stack(leaves) if isinstance(leaves[0], jax.Array) else leaves[0]
-        ),
+        lambda *leaves: jnp.stack(leaves) if isinstance(leaves[0], jax.Array) else leaves[0],
         *interaction_list,
     )
 
@@ -178,9 +165,7 @@ def _interaction_float_dtype(pbi) -> jnp.dtype:
     enabling x64 in the host application does not promote a float32 model
     to float64 on device."""
     dtypes = [
-        x.dtype
-        for x in jax.tree.leaves(pbi)
-        if isinstance(x, jax.Array) and jnp.issubdtype(x.dtype, jnp.floating)
+        x.dtype for x in jax.tree.leaves(pbi) if isinstance(x, jax.Array) and jnp.issubdtype(x.dtype, jnp.floating)
     ]
     return jnp.result_type(*dtypes) if dtypes else jnp.dtype(jnp.float32)
 
@@ -211,9 +196,7 @@ def _compute_base_energies(
     return jax.vmap(_energy_one_chain)(*stacked_states) / beta_ref
 
 
-def _make_reference_ebm(
-    ebms: Sequence[AbstractEBM], betas: jax.Array
-) -> tuple[AbstractEBM, jax.Array]:
+def _make_reference_ebm(ebms: Sequence[AbstractEBM], betas: jax.Array) -> tuple[AbstractEBM, jax.Array]:
     """Pick the (EBM, β) pair used to recover base energies E_base = E(x)/β.
 
     Using the hottest chain (β₀) breaks when β₀ = 0 — a standard NRPT ladder
@@ -260,9 +243,7 @@ def _vectorized_swap(
     i_idx = pair_indices
     j_idx = pair_indices + 1
 
-    log_r = (betas[i_idx] - betas[j_idx]) * (
-        base_energies[i_idx] - base_energies[j_idx]
-    )
+    log_r = (betas[i_idx] - betas[j_idx]) * (base_energies[i_idx] - base_energies[j_idx])
     accept_probs = jnp.exp(jnp.minimum(0.0, log_r))
     u = jax.random.uniform(key, shape=(n_active,), dtype=accept_probs.dtype)
     accepted = u < accept_probs
@@ -272,11 +253,7 @@ def _vectorized_swap(
     perm = perm.at[j_idx].set(jnp.where(accepted, i_idx, j_idx))
     new_states = [stacked_states[b][perm] for b in range(n_free_blocks)]
 
-    acc = (
-        jnp.zeros(n_pairs, dtype=jnp.int32)
-        .at[pair_indices]
-        .set(accepted.astype(jnp.int32))
-    )
+    acc = jnp.zeros(n_pairs, dtype=jnp.int32).at[pair_indices].set(accepted.astype(jnp.int32))
 
     return new_states, acc, perm
 
@@ -467,9 +444,7 @@ def _nrpt_rounds(
     else:
 
         def _energy_fresh(st_states, old_states, cached_bE):
-            return _compute_base_energies(
-                ebm_ref, beta_ref, base_spec, st_states, clamp_state
-            )
+            return _compute_base_energies(ebm_ref, beta_ref, base_spec, st_states, clamp_state)
 
         energy_compute = _energy_fresh
 
@@ -619,15 +594,12 @@ def nrpt(
     if isinstance(ebms, AbstractEBM) and isinstance(programs, BlockSamplingProgram):
         if betas is None:
             raise ValueError(
-                "betas is required when passing single template ebm/program "
-                "objects (temperature-linear mode)."
+                "betas is required when passing single template ebm/program objects (temperature-linear mode)."
             )
         betas = jnp.asarray(betas)
         n_chains = len(betas)
         if not stacked_init and len(init_states) != n_chains:
-            raise ValueError(
-                "len(init_states) must equal len(betas) in temperature-linear mode."
-            )
+            raise ValueError("len(init_states) must equal len(betas) in temperature-linear mode.")
         beta_attr = getattr(ebms, "beta", None)
         if beta_attr is not None and float(beta_attr) == 1.0:
             # Already a β = 1 base pair. Reuse it as-is so repeated calls
@@ -652,23 +624,16 @@ def nrpt(
         )
     else:
         if not stacked_init and not (len(ebms) == len(programs) == len(init_states)):
-            raise ValueError(
-                "ebms, programs, and init_states must have the same length."
-            )
+            raise ValueError("ebms, programs, and init_states must have the same length.")
         if len(ebms) != len(programs):
             raise ValueError("ebms and programs must have the same length.")
 
         base_spec = programs[0].gibbs_spec
         n_free_blocks = len(base_spec.free_blocks)
         base_clamped = len(base_spec.clamped_blocks)
-        base_nodes = [
-            set(id(n) for n in block.nodes) for block in base_spec.free_blocks
-        ]
+        base_nodes = [set(id(n) for n in block.nodes) for block in base_spec.free_blocks]
         for i, prog in enumerate(programs[1:], 1):
-            if (
-                len(prog.gibbs_spec.free_blocks) != n_free_blocks
-                or len(prog.gibbs_spec.clamped_blocks) != base_clamped
-            ):
+            if len(prog.gibbs_spec.free_blocks) != n_free_blocks or len(prog.gibbs_spec.clamped_blocks) != base_clamped:
                 raise ValueError("All programs must share the same block structure.")
             for b, block in enumerate(prog.gibbs_spec.free_blocks):
                 prog_nodes = set(id(n) for n in block.nodes)
@@ -686,9 +651,7 @@ def nrpt(
         run_program = programs[0]
         stacked_pbi = [
             [
-                _stack_pbi_across_chains(
-                    [programs[c].per_block_interactions[b][g] for c in range(n_chains)]
-                )
+                _stack_pbi_across_chains([programs[c].per_block_interactions[b][g] for c in range(n_chains)])
                 for g in range(len(programs[0].per_block_interactions[b]))
             ]
             for b in range(n_free_blocks)
@@ -707,8 +670,7 @@ def nrpt(
     betas_np = np.asarray(betas)
     if betas_np.ndim != 1 or betas_np.size != n_chains:
         raise ValueError(
-            f"betas must be a 1D array with one entry per chain "
-            f"(got shape {betas_np.shape} for {n_chains} chains)."
+            f"betas must be a 1D array with one entry per chain (got shape {betas_np.shape} for {n_chains} chains)."
         )
     if np.any(np.diff(betas_np) < 0):
         raise ValueError(
@@ -767,15 +729,11 @@ def nrpt(
             for leaf in jax.tree.leaves(stacked_states):
                 if leaf.shape[0] != n_chains:
                     raise ValueError(
-                        f"Stacked init_states leaves must have leading dimension "
-                        f"n_chains={n_chains}, got {leaf.shape}."
+                        f"Stacked init_states leaves must have leading dimension n_chains={n_chains}, got {leaf.shape}."
                     )
         else:
             states = [list(s) for s in init_states]
-            stacked_states = [
-                jnp.stack([states[c][b] for c in range(n_chains)])
-                for b in range(n_free_blocks)
-            ]
+            stacked_states = [jnp.stack([states[c][b] for c in range(n_chains)]) for b in range(n_free_blocks)]
 
         # --- Run --------------------------------------------------------------
         n_pairs = n_chains - 1
@@ -809,15 +767,12 @@ def nrpt(
             observations = None
 
     # --- Unstack --------------------------------------------------------------
-    states_out = [
-        [final.states[b][c] for b in range(n_free_blocks)] for c in range(n_chains)
-    ]
+    states_out = [[final.states[b][c] for b in range(n_free_blocks)] for c in range(n_chains)]
     # Rates are reported in the model's compute dtype; the plain int/int
     # division would yield float64 under x64.
     acceptance_rate = jnp.where(
         final.attempted > 0,
-        final.accepted.astype(betas.dtype)
-        / jnp.maximum(final.attempted, 1).astype(betas.dtype),
+        final.accepted.astype(betas.dtype) / jnp.maximum(final.attempted, 1).astype(betas.dtype),
         0.0,
     )
     rejection_rates = 1.0 - acceptance_rate
@@ -956,8 +911,7 @@ def nrpt_adaptive(
             }
         )
         logger.info(
-            "nrpt_adaptive tune %d/%d: Lambda=%.3f mean_acceptance=%.3f "
-            "max|dbeta|=%.4g",
+            "nrpt_adaptive tune %d/%d: Lambda=%.3f mean_acceptance=%.3f max|dbeta|=%.4g",
             tune_iter + 1,
             n_tune,
             phase_lambda,
@@ -977,9 +931,7 @@ def nrpt_adaptive(
 
     # Production run
     key, subkey = jax.random.split(key)
-    states, stats = _run_phase(
-        subkey, betas, current_states, n_rounds, phase_observer=observer
-    )
+    states, stats = _run_phase(subkey, betas, current_states, n_rounds, phase_observer=observer)
     stats["tuning_history"] = tuning_history
     return states, stats
 
