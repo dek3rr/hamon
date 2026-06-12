@@ -115,7 +115,9 @@ def resolve_device(
     if isinstance(device, jax.Device):
         return device
     if not isinstance(device, str):
-        raise TypeError(f"device must be a str, jax.Device, or None; got {type(device).__name__}")
+        raise TypeError(
+            f"device must be a str, jax.Device, or None; got {type(device).__name__}"
+        )
 
     spec = device.lower()
     if spec == "auto":

@@ -45,7 +45,9 @@ class AbstractFactor(eqx.Module):
 
         for group in node_groups:
             if not len(group.nodes) == n_nodes:
-                raise RuntimeError("Every block in node_groups must contain the same number of nodes.")
+                raise RuntimeError(
+                    "Every block in node_groups must contain the same number of nodes."
+                )
 
         self.node_groups = node_groups
 

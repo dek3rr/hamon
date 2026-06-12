@@ -372,7 +372,9 @@ def weighted_hamming_distance(
     interior_f = block_interior_mask.astype(jnp.float32)
 
     internal_dist = jnp.sum(disagree * interior_f)
-    external_dist = jnp.sum(disagree * (1.0 - interior_f) * aggregate_influence * weight_external)
+    external_dist = jnp.sum(
+        disagree * (1.0 - interior_f) * aggregate_influence * weight_external
+    )
 
     return (internal_dist + external_dist) / n_nodes
 

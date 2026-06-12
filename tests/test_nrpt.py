@@ -67,7 +67,9 @@ class TestVmapEnergies:
         ref = self._loop_base_energies(ebms, spec, stacked, [], betas_arr)
         vmap_result = _compute_base_energies(ebms[0], betas_arr[0], spec, stacked, [])
 
-        assert jnp.allclose(ref, vmap_result, atol=1e-5), f"max diff: {float(jnp.max(jnp.abs(ref - vmap_result)))}"
+        assert jnp.allclose(ref, vmap_result, atol=1e-5), (
+            f"max diff: {float(jnp.max(jnp.abs(ref - vmap_result)))}"
+        )
 
     def test_matches_loop_16chains(self):
         betas = jnp.linspace(0.3, 2.5, 16).tolist()
@@ -191,7 +193,9 @@ class TestSinglePassDEO:
             gibbs_steps_per_round=3,
         )
         diag = stats["round_trip_diagnostics"]
-        assert jnp.allclose(diag["Lambda"], jnp.sum(stats["rejection_rates"]), atol=1e-5)
+        assert jnp.allclose(
+            diag["Lambda"], jnp.sum(stats["rejection_rates"]), atol=1e-5
+        )
 
     def test_deo_alternation_asymmetric_rates(self):
         """Even-pair and odd-pair rates should differ with asymmetric betas."""
@@ -210,7 +214,9 @@ class TestSinglePassDEO:
         )
         # Pair 0 (β=0.1↔0.2, small gap) vs pair 1 (β=0.2↔2.0, large gap)
         rates = stats["acceptance_rate"]
-        assert not jnp.allclose(rates[0], rates[1], atol=0.05), f"Suspiciously similar rates: {rates}"
+        assert not jnp.allclose(rates[0], rates[1], atol=0.05), (
+            f"Suspiciously similar rates: {rates}"
+        )
 
     def test_multi_pass_would_break_conveyor(self):
         """Document WHY multi-pass DEO is wrong.
@@ -231,7 +237,9 @@ class TestSinglePassDEO:
 
         # Two rounds should compose to identity
         full_cycle = composed_of[composed_ef]
-        assert jnp.array_equal(full_cycle, jnp.arange(n)), f"Expected identity, got {full_cycle}"
+        assert jnp.array_equal(full_cycle, jnp.arange(n)), (
+            f"Expected identity, got {full_cycle}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -466,8 +474,15 @@ class TestZeroBetaHotChain:
         base_E = _compute_base_energies(ebm_ref, beta_ref, spec, stacked, [])
         assert jnp.all(jnp.isfinite(base_E))
 
-        ebm_unit = IsingEBM(nodes, edges, ebms[0].biases, ebms[0].weights, jnp.array(1.0))
-        expected = jnp.stack([ebm_unit.energy([states[c][b] for b in range(len(fb))], spec) for c in range(3)])
+        ebm_unit = IsingEBM(
+            nodes, edges, ebms[0].biases, ebms[0].weights, jnp.array(1.0)
+        )
+        expected = jnp.stack(
+            [
+                ebm_unit.energy([states[c][b] for b in range(len(fb))], spec)
+                for c in range(3)
+            ]
+        )
         assert jnp.allclose(base_E, expected, atol=1e-5)
 
     def test_fallback_without_with_beta_matches_ising_run(self):
@@ -576,7 +591,9 @@ class TestObserverEnergyAlignment:
 
         kwargs = {}
         if energy_delta_fn == "ising":
-            kwargs["energy_delta_fn"] = make_ising_delta_fn(nodes, edges, fb, ebms[0].biases, ebms[0].weights)
+            kwargs["energy_delta_fn"] = make_ising_delta_fn(
+                nodes, edges, fb, ebms[0].biases, ebms[0].weights
+            )
 
         obs = _EnergyRecordingObserver()
         _, stats = nrpt(
@@ -593,7 +610,9 @@ class TestObserverEnergyAlignment:
         # The regression only manifests when swaps actually happen.
         assert int(jnp.sum(stats["accepted"])) > 0, "test needs accepted swaps"
 
-        ebm_unit = IsingEBM(nodes, edges, ebms[0].biases, ebms[0].weights, jnp.array(1.0))
+        ebm_unit = IsingEBM(
+            nodes, edges, ebms[0].biases, ebms[0].weights, jnp.array(1.0)
+        )
         spec = progs[0].gibbs_spec
         obs_states, obs_energies = stats["observations"]
 
@@ -803,7 +822,9 @@ class TestNodeOrderSamples:
             observations.append(jnp.stack([arr, arr + 100], axis=1))
 
         out = nrpt_node_samples(observations, progs[0], nodes, chain_index=0)
-        expected = jnp.broadcast_to(jnp.arange(len(nodes), dtype=jnp.int32), (n_rounds, len(nodes)))
+        expected = jnp.broadcast_to(
+            jnp.arange(len(nodes), dtype=jnp.int32), (n_rounds, len(nodes))
+        )
         assert jnp.array_equal(out, expected)
 
         out_cold = nrpt_node_samples(observations, progs[0], nodes, chain_index=1)
@@ -912,10 +933,16 @@ class TestStackedInitStates:
         betas = jnp.array([0.5, 1.0, 1.5])
         nodes, _, fb, ebms, progs = _make_ising(4, [float(b) for b in betas])
         per_chain = _make_states(jax.random.key(0), ebms, fb, 3)
-        stacked = [jnp.stack([per_chain[c][b] for c in range(3)]) for b in range(len(fb))]
+        stacked = [
+            jnp.stack([per_chain[c][b] for c in range(3)]) for b in range(len(fb))
+        ]
 
-        states_a, stats_a = nrpt(jax.random.key(2), ebms[-1], progs[-1], per_chain, [], 20, 2, betas=betas)
-        states_b, stats_b = nrpt(jax.random.key(2), ebms[-1], progs[-1], stacked, [], 20, 2, betas=betas)
+        states_a, stats_a = nrpt(
+            jax.random.key(2), ebms[-1], progs[-1], per_chain, [], 20, 2, betas=betas
+        )
+        states_b, stats_b = nrpt(
+            jax.random.key(2), ebms[-1], progs[-1], stacked, [], 20, 2, betas=betas
+        )
         assert jnp.array_equal(stats_a["accepted"], stats_b["accepted"])
         for c in range(3):
             for b in range(len(fb)):
@@ -925,7 +952,9 @@ class TestStackedInitStates:
         betas = jnp.array([0.5, 1.0, 1.5])
         nodes, _, fb, ebms, progs = _make_ising(4, [float(b) for b in betas])
         stacked = hinton_init(jax.random.key(0), ebms[0], fb, (3,))
-        _, stats = nrpt(jax.random.key(1), ebms[-1], progs[-1], stacked, [], 10, 1, betas=betas)
+        _, stats = nrpt(
+            jax.random.key(1), ebms[-1], progs[-1], stacked, [], 10, 1, betas=betas
+        )
         assert jnp.all(jnp.isfinite(stats["acceptance_rate"]))
 
     def test_wrong_leading_dim_raises(self):

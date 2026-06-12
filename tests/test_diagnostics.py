@@ -132,7 +132,11 @@ class TestNRPTHealthReport(unittest.TestCase):
         }
         if with_rt:
             n_chains = len(rej) + 1
-            lam = jnp.array(lam_profile) if lam_profile is not None else rej / jnp.diff(stats["betas"])
+            lam = (
+                jnp.array(lam_profile)
+                if lam_profile is not None
+                else rej / jnp.diff(stats["betas"])
+            )
             tau_pred = 1.0 / (2.0 + 2.0 * float(jnp.sum(rej)))
             stats["round_trip_diagnostics"] = {
                 "Lambda": jnp.sum(rej),
@@ -168,7 +172,9 @@ class TestNRPTHealthReport(unittest.TestCase):
         self.assertTrue(any("equalized" in i for i in report.issues))
 
     def test_insufficient_data_withholds_verdict(self):
-        report = report_nrpt_diagnostics(self._stats(rej=(0.05, 0.8, 0.05), attempted=(5, 5, 5)))
+        report = report_nrpt_diagnostics(
+            self._stats(rej=(0.05, 0.8, 0.05), attempted=(5, 5, 5))
+        )
         self.assertTrue(report.insufficient_data)
         self.assertEqual(report.issues, [])  # demoted to warnings
         self.assertFalse(report.healthy)

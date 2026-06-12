@@ -112,7 +112,10 @@ class TestBoltzmannMarginals:
 
         # Warmup via nrpt_adaptive so cold chain isn't stuck
         def ebm_factory(b):
-            return [IsingEBM(nodes, edges, biases, weights, jnp.array(float(bi))) for bi in b]
+            return [
+                IsingEBM(nodes, edges, biases, weights, jnp.array(float(bi)))
+                for bi in b
+            ]
 
         def prog_factory(es):
             return [IsingSamplingProgram(e, fb, []) for e in es]
@@ -133,10 +136,14 @@ class TestBoltzmannMarginals:
         # Collect samples from warm cold-chain state only
         schedule = SamplingSchedule(n_warmup=200, n_samples=8000, steps_per_sample=3)
         obs_block = Block(nodes)
-        samples = sample_states(k_samp, prog_cold, schedule, warm_states[2], [], [obs_block])
+        samples = sample_states(
+            k_samp, prog_cold, schedule, warm_states[2], [], [obs_block]
+        )
         # samples[0]: (8000, 8) bool
 
-        return dict(samples=samples[0], nodes=nodes, ebm_cold=ebm_cold, obs_block=obs_block)
+        return dict(
+            samples=samples[0], nodes=nodes, ebm_cold=ebm_cold, obs_block=obs_block
+        )
 
     def test_first_order_marginals(self, model_8):
         """Empirical P(x_k=1) must match exact to within 3% relative error."""
@@ -150,7 +157,9 @@ class TestBoltzmannMarginals:
         exact_marg = _exact_marginals(exact_probs, n)
         emp_marg = np.array(_empirical_marginals(samples))
 
-        max_rel_err = np.max(np.abs(emp_marg - exact_marg) / (np.abs(exact_marg) + 1e-8))
+        max_rel_err = np.max(
+            np.abs(emp_marg - exact_marg) / (np.abs(exact_marg) + 1e-8)
+        )
         assert max_rel_err < 0.05, (
             f"Marginal mismatch: max relative error {max_rel_err:.3f}\n"
             f"  exact:    {np.round(exact_marg, 3)}\n"
@@ -188,13 +197,19 @@ class TestBoltzmannMarginals:
         k_bias, k_sc, k_pt, k_samp_sc, k_samp_pt = jax.random.split(key, 5)
         beta = 1.0
 
-        nodes, edges, biases, weights, fb, ebm, prog = _ising_chain(n, coupling=0.7, beta=beta, key=k_bias)
+        nodes, edges, biases, weights, fb, ebm, prog = _ising_chain(
+            n, coupling=0.7, beta=beta, key=k_bias
+        )
         obs_block = Block(nodes)
 
         # Single-chain reference
         sc_init = hinton_init(k_sc, ebm, fb, ())
-        sc_schedule = SamplingSchedule(n_warmup=2000, n_samples=6000, steps_per_sample=3)
-        sc_samples = sample_states(k_samp_sc, prog, sc_schedule, sc_init, [], [obs_block])[0]
+        sc_schedule = SamplingSchedule(
+            n_warmup=2000, n_samples=6000, steps_per_sample=3
+        )
+        sc_samples = sample_states(
+            k_samp_sc, prog, sc_schedule, sc_init, [], [obs_block]
+        )[0]
 
         # NRPT warmup → sample_states
         betas = [0.2, 0.5, beta]
@@ -202,7 +217,10 @@ class TestBoltzmannMarginals:
         pt_init = _init_states(k_pt, 3, ebms, fb)
 
         def ebm_f(b):
-            return [IsingEBM(nodes, edges, biases, weights, jnp.array(float(bi))) for bi in b]
+            return [
+                IsingEBM(nodes, edges, biases, weights, jnp.array(float(bi)))
+                for bi in b
+            ]
 
         def prog_f(es):
             return [IsingSamplingProgram(e, fb, []) for e in es]
@@ -220,7 +238,9 @@ class TestBoltzmannMarginals:
             rounds_per_tune=100,
         )
         pt_schedule = SamplingSchedule(n_warmup=0, n_samples=6000, steps_per_sample=3)
-        pt_samples = sample_states(k_samp_pt, prog, pt_schedule, warm[2], [], [obs_block])[0]
+        pt_samples = sample_states(
+            k_samp_pt, prog, pt_schedule, warm[2], [], [obs_block]
+        )[0]
 
         sc_marg = np.array(_empirical_marginals(sc_samples))
         pt_marg = np.array(_empirical_marginals(pt_samples))
@@ -302,7 +322,9 @@ class TestDEODetailedBalance:
             init_spins_0=[True] * n,  # hot chain: LOW energy (swap-favorable)
             init_spins_1=[False] * n,  # cold chain: HIGH energy
         )
-        assert alpha == pytest.approx(1.0, abs=1e-6), f"Test setup error: expected alpha=1, got {alpha}"
+        assert alpha == pytest.approx(1.0, abs=1e-6), (
+            f"Test setup error: expected alpha=1, got {alpha}"
+        )
 
         _, stats = nrpt(
             jax.random.key(0),
@@ -315,7 +337,9 @@ class TestDEODetailedBalance:
             track_round_trips=False,
         )
         assert int(stats["attempted"][0]) == 1, "Expected exactly 1 swap attempt"
-        assert int(stats["accepted"][0]) == 1, f"alpha=1 swap was not accepted: accepted={stats['accepted'][0]}"
+        assert int(stats["accepted"][0]) == 1, (
+            f"alpha=1 swap was not accepted: accepted={stats['accepted'][0]}"
+        )
 
     def test_near_zero_accept(self):
         """When α≈0, swap rate must be very low."""
@@ -445,7 +469,9 @@ class TestDEODetailedBalance:
         # Unless one of them hits the min(0,·) clamp. The ratio must satisfy DB.
         # Check: exp(log_r_fwd) * exp(log_r_rev) = 1 (before clamping)
         unclamped_product = np.exp(log_r_fwd) * np.exp(log_r_rev)
-        assert abs(unclamped_product - 1.0) < 1e-6, f"Unclamped α product should be 1.0, got {unclamped_product}"
+        assert abs(unclamped_product - 1.0) < 1e-6, (
+            f"Unclamped α product should be 1.0, got {unclamped_product}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -456,7 +482,10 @@ class TestDEODetailedBalance:
 class TestAdaptiveSchedule:
     def _make_factories(self, nodes, edges, biases, weights, free_blocks):
         def ebm_f(b):
-            return [IsingEBM(nodes, edges, biases, weights, jnp.array(float(bi))) for bi in b]
+            return [
+                IsingEBM(nodes, edges, biases, weights, jnp.array(float(bi)))
+                for bi in b
+            ]
 
         def prog_f(es):
             return [IsingSamplingProgram(e, fb, []) for e in es]
@@ -475,10 +504,15 @@ class TestAdaptiveSchedule:
         n = 8
         key = jax.random.key(33)
         k_bias, k_init = jax.random.split(key)
-        nodes, edges, biases, weights, fb, _, _ = _ising_chain(n, coupling=0.8, beta=1.0, key=k_bias)
+        nodes, edges, biases, weights, fb, _, _ = _ising_chain(
+            n, coupling=0.8, beta=1.0, key=k_bias
+        )
         # Intentionally unequal: 3 close betas then a big jump -- large initial std
         betas_init = jnp.array([0.2, 0.21, 0.22, 1.0, 1.8, 2.5])
-        ebms_init = [IsingEBM(nodes, edges, biases, weights, jnp.array(float(b))) for b in betas_init]
+        ebms_init = [
+            IsingEBM(nodes, edges, biases, weights, jnp.array(float(b)))
+            for b in betas_init
+        ]
         init = _init_states(k_init, 6, ebms_init, fb)
         ebm_f, prog_f = self._make_factories(nodes, edges, biases, weights, fb)
 
@@ -516,9 +550,14 @@ class TestAdaptiveSchedule:
         n = 8
         key = jax.random.key(55)
         k_bias, k_init = jax.random.split(key)
-        nodes, edges, biases, weights, fb, _, _ = _ising_chain(n, coupling=1.0, beta=1.0, key=k_bias)
+        nodes, edges, biases, weights, fb, _, _ = _ising_chain(
+            n, coupling=1.0, beta=1.0, key=k_bias
+        )
         betas_init = jnp.linspace(0.2, 2.5, 6)
-        ebms_init = [IsingEBM(nodes, edges, biases, weights, jnp.array(float(b))) for b in betas_init]
+        ebms_init = [
+            IsingEBM(nodes, edges, biases, weights, jnp.array(float(b)))
+            for b in betas_init
+        ]
         init = _init_states(k_init, 6, ebms_init, fb)
         ebm_f, prog_f = self._make_factories(nodes, edges, biases, weights, fb)
 
@@ -542,7 +581,9 @@ class TestAdaptiveSchedule:
         assert min_acc_final > min_acc_phase0, (
             f"Min acceptance did not improve: phase0={min_acc_phase0:.4f}, final={min_acc_final:.4f}"
         )
-        assert min_acc_final > 0.05, f"Final min acceptance {min_acc_final:.4f} -- conveyor belt still broken"
+        assert min_acc_final > 0.05, (
+            f"Final min acceptance {min_acc_final:.4f} -- conveyor belt still broken"
+        )
 
     def test_min_acceptance_floor_after_tuning(self):
         """After adaptive tuning, no pair should have zero acceptance.
@@ -553,9 +594,14 @@ class TestAdaptiveSchedule:
         n = 8
         key = jax.random.key(77)
         k_bias, k_init = jax.random.split(key)
-        nodes, edges, biases, weights, fb, _, _ = _ising_chain(n, coupling=0.8, beta=1.0, key=k_bias)
+        nodes, edges, biases, weights, fb, _, _ = _ising_chain(
+            n, coupling=0.8, beta=1.0, key=k_bias
+        )
         betas_init = jnp.linspace(0.3, 2.5, 6)  # intentionally wide
-        ebms_init = [IsingEBM(nodes, edges, biases, weights, jnp.array(float(b))) for b in betas_init]
+        ebms_init = [
+            IsingEBM(nodes, edges, biases, weights, jnp.array(float(b)))
+            for b in betas_init
+        ]
         init = _init_states(k_init, 6, ebms_init, fb)
         ebm_f, prog_f = self._make_factories(nodes, edges, biases, weights, fb)
 
@@ -572,7 +618,9 @@ class TestAdaptiveSchedule:
             rounds_per_tune=200,
         )
         min_acc = float(jnp.min(stats["acceptance_rate"]))
-        assert min_acc > 0.05, f"After tuning, min pair acceptance is {min_acc:.4f} — conveyor belt broken"
+        assert min_acc > 0.05, (
+            f"After tuning, min pair acceptance is {min_acc:.4f} — conveyor belt broken"
+        )
 
     def test_optimize_schedule_endpoints_preserved(self):
         """β_min and β_max must be unchanged after optimize_schedule."""
@@ -590,7 +638,9 @@ class TestAdaptiveSchedule:
         new_betas = optimize_schedule(rej, betas)
 
         # Verify new betas are still sorted
-        assert jnp.all(jnp.diff(new_betas) > 0), "optimize_schedule must preserve ordering"
+        assert jnp.all(jnp.diff(new_betas) > 0), (
+            "optimize_schedule must preserve ordering"
+        )
         assert len(new_betas) == len(betas)
 
 
@@ -611,13 +661,21 @@ class TestRoundTripPrediction:
         n = 6
         key = jax.random.key(99)
         k_bias, k_init = jax.random.split(key)
-        nodes, edges, biases, weights, fb, _, _ = _ising_chain(n, coupling=0.5, beta=1.0, key=k_bias)
+        nodes, edges, biases, weights, fb, _, _ = _ising_chain(
+            n, coupling=0.5, beta=1.0, key=k_bias
+        )
         betas_init = jnp.linspace(0.2, 1.5, 6)
-        ebms_init = [IsingEBM(nodes, edges, biases, weights, jnp.array(float(b))) for b in betas_init]
+        ebms_init = [
+            IsingEBM(nodes, edges, biases, weights, jnp.array(float(b)))
+            for b in betas_init
+        ]
         init = _init_states(k_init, 6, ebms_init, fb)
 
         def ebm_f(b):
-            return [IsingEBM(nodes, edges, biases, weights, jnp.array(float(bi))) for bi in b]
+            return [
+                IsingEBM(nodes, edges, biases, weights, jnp.array(float(bi)))
+                for bi in b
+            ]
 
         def prog_f(es):
             return [IsingSamplingProgram(e, fb, []) for e in es]
@@ -643,7 +701,9 @@ class TestRoundTripPrediction:
 
         # Factor-of-2 tolerance: well within what Theorem 3 guarantees asymptotically
         ratio = tau_obs / tau_pred
-        assert 0.25 <= ratio <= 4.0, f"τ_obs/τ_pred = {ratio:.3f} (τ_obs={tau_obs:.4f}, τ_pred={tau_pred:.4f})"
+        assert 0.25 <= ratio <= 4.0, (
+            f"τ_obs/τ_pred = {ratio:.3f} (τ_obs={tau_obs:.4f}, τ_pred={tau_pred:.4f})"
+        )
 
     def test_tau_predicted_formula(self):
         """τ̄ = 1/(2+2Λ) directly."""
@@ -656,12 +716,16 @@ class TestRoundTripPrediction:
         ]
         for Lambda, expected_tau in cases:
             tau = float(predict_optimal_round_trip_rate(Lambda))
-            assert tau == pytest.approx(expected_tau, rel=1e-5), f"Λ={Lambda}: expected τ̄={expected_tau}, got {tau}"
+            assert tau == pytest.approx(expected_tau, rel=1e-5), (
+                f"Λ={Lambda}: expected τ̄={expected_tau}, got {tau}"
+            )
 
     def test_zero_coupling_round_trips_achievable(self):
         """With zero coupling (independent spins), NRPT should complete round trips."""
         n = 6
-        nodes, edges, biases, weights, fb, _, _ = _ising_chain(n, coupling=0.0, beta=1.0, key=jax.random.key(0))
+        nodes, edges, biases, weights, fb, _, _ = _ising_chain(
+            n, coupling=0.0, beta=1.0, key=jax.random.key(0)
+        )
         betas = [0.3, 0.6, 0.9, 1.2]
         ebms = [IsingEBM(nodes, edges, biases, weights, jnp.array(b)) for b in betas]
         progs = [IsingSamplingProgram(e, fb, []) for e in ebms]
@@ -678,16 +742,22 @@ class TestRoundTripPrediction:
             track_round_trips=True,
         )
         total_rts = int(jnp.sum(stats["index_state"]["round_trips"]))
-        assert total_rts > 0, "Expected round trips in zero-coupling model with 500 rounds"
+        assert total_rts > 0, (
+            "Expected round trips in zero-coupling model with 500 rounds"
+        )
 
     def test_efficiency_bounded(self):
         """Efficiency = τ_obs / τ_pred must be in (0, ∞) and finite."""
         n = 6
         key = jax.random.key(55)
         k_bias, k_init = jax.random.split(key)
-        nodes, edges, biases, weights, fb, _, _ = _ising_chain(n, coupling=0.5, beta=1.0, key=k_bias)
+        nodes, edges, biases, weights, fb, _, _ = _ising_chain(
+            n, coupling=0.5, beta=1.0, key=k_bias
+        )
         betas = jnp.linspace(0.3, 1.5, 5)
-        ebms = [IsingEBM(nodes, edges, biases, weights, jnp.array(float(b))) for b in betas]
+        ebms = [
+            IsingEBM(nodes, edges, biases, weights, jnp.array(float(b))) for b in betas
+        ]
         progs = [IsingSamplingProgram(e, fb, []) for e in ebms]
         init = _init_states(k_init, 5, ebms, fb)
 

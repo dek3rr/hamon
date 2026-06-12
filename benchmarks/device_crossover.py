@@ -95,7 +95,9 @@ def recommend_threshold(rows) -> "int | None":
     if not gpu_wins:
         return None
     low = max(cpu_wins) if cpu_wins else min(gpu_wins) / 2
-    high = min(s for s in gpu_wins if s > low) if any(s > low for s in gpu_wins) else low
+    high = (
+        min(s for s in gpu_wins if s > low) if any(s > low for s in gpu_wins) else low
+    )
     geo = math.sqrt(low * high) if low > 0 else high
     return 2 ** max(int(round(math.log2(geo))), 0)
 
@@ -187,7 +189,9 @@ def portfolio(args) -> None:
         jax.block_until_ready(states[-1][0])
         return discovery["n_chains"]
 
-    print(f"\nportfolio flow: {n} nodes, {len(edges)} edges, {args.rounds} rounds/probe ({n_colors} colors)")
+    print(
+        f"\nportfolio flow: {n} nodes, {len(edges)} edges, {args.rounds} rounds/probe ({n_colors} colors)"
+    )
     for device in ("cpu", "gpu"):
         t0 = time.perf_counter()
         n_chains = flow(device, jax.random.key(3))
@@ -204,13 +208,21 @@ def portfolio(args) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--sizes", default="8,16,32,64,128", help="comma-separated lattice side lengths")
-    parser.add_argument("--chains", default="4,8,16,32", help="comma-separated chain counts")
+    parser.add_argument(
+        "--sizes", default="8,16,32,64,128", help="comma-separated lattice side lengths"
+    )
+    parser.add_argument(
+        "--chains", default="4,8,16,32", help="comma-separated chain counts"
+    )
     parser.add_argument("--rounds", type=int, default=100)
     parser.add_argument("--gibbs-steps", type=int, default=2)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--csv", default=None, help="write results to CSV")
-    parser.add_argument("--portfolio", action="store_true", help="also time a ~500-node calibration flow")
+    parser.add_argument(
+        "--portfolio",
+        action="store_true",
+        help="also time a ~500-node calibration flow",
+    )
     args = parser.parse_args()
     args.sizes = [int(x) for x in str(args.sizes).split(",")]
     args.chains = [int(x) for x in str(args.chains).split(",")]
@@ -234,7 +246,9 @@ def main() -> int:
 
     threshold = recommend_threshold(rows)
     if threshold is None:
-        print("\nGPU never beat CPU in this sweep — leave routing at its default (or raise HAMON_DEVICE_THRESHOLD).")
+        print(
+            "\nGPU never beat CPU in this sweep — leave routing at its default (or raise HAMON_DEVICE_THRESHOLD)."
+        )
     else:
         print(f"\nRecommended threshold for this machine: {threshold}")
         print(f"  bash:       export HAMON_DEVICE_THRESHOLD={threshold}")

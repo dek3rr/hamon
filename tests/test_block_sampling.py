@@ -142,19 +142,27 @@ class TestPlusMinus(unittest.TestCase):
                 )[0]
             )
 
-        first_output = self.state_free[0][0] - jnp.sum(self.minus_weights[:2] * self.state_clamped[0][2:])
+        first_output = self.state_free[0][0] - jnp.sum(
+            self.minus_weights[:2] * self.state_clamped[0][2:]
+        )
         second_output = (
             self.state_free[1][0]
             - self.minus_weights[-1] * self.state_clamped[0][-1]
             + self.plus_weights[0] * self.state_clamped[0][0]
         )
-        third_output = self.state_free[1][1] + jnp.sum(self.plus_weights[1:] * self.state_clamped[0][:2])
+        third_output = self.state_free[1][1] + jnp.sum(
+            self.plus_weights[1:] * self.state_clamped[0][:2]
+        )
 
         self.assertTrue(np.allclose(outputs[0], [first_output], rtol=1e-6))
-        self.assertTrue(np.allclose(outputs[1], [second_output, third_output], rtol=1e-6))
+        self.assertTrue(
+            np.allclose(outputs[1], [second_output, third_output], rtol=1e-6)
+        )
 
     def test_sample_blocks(self):
-        sample_blocks(self.key, self.state_free, self.state_clamped, self.program, [None, None])
+        sample_blocks(
+            self.key, self.state_free, self.state_clamped, self.program, [None, None]
+        )
 
     def test_sample_states(self):
         schedule = SamplingSchedule(5, 5, 5)
@@ -252,7 +260,9 @@ class TestPyTreeState(unittest.TestCase):
         nodes = [MultiNode() for _ in range(10)]
         key = jax.random.key(424)
 
-        interaction_group = InteractionGroup(PlusInteraction(jnp.ones((len(nodes),))), Block(nodes), [Block(nodes)])
+        interaction_group = InteractionGroup(
+            PlusInteraction(jnp.ones((len(nodes),))), Block(nodes), [Block(nodes)]
+        )
         spec = BlockGibbsSpec([Block(nodes)], [], sd_map)
 
         key, subkey = jax.random.split(key, 2)
@@ -266,7 +276,9 @@ class TestPyTreeState(unittest.TestCase):
         res, _ = sample_single_block(key, init_state, [], prog, 0, None)
 
         self.assertTrue(jnp.allclose(init_state[0].cat_counter + 1, res.cat_counter))
-        self.assertTrue(jnp.allclose(init_state[0].float_counter + 1, res.float_counter))
+        self.assertTrue(
+            jnp.allclose(init_state[0].float_counter + 1, res.float_counter)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -284,13 +296,17 @@ class TestRunBlocksGlobalState(unittest.TestCase):
         nodes = [ContinousScalarNode() for _ in range(4)]
         key = jax.random.key(1)
         weights = jax.random.normal(key, (len(nodes),))
-        interaction = InteractionGroup(PlusInteraction(weights), Block(nodes), [Block(nodes)])
+        interaction = InteractionGroup(
+            PlusInteraction(weights), Block(nodes), [Block(nodes)]
+        )
         spec = BlockGibbsSpec(
             [Block(nodes[:2]), Block(nodes[2:])],
             [],
             {ContinousScalarNode: jax.ShapeDtypeStruct((), jnp.float32)},
         )
-        prog = BlockSamplingProgram(spec, [PlusMinusSampler(), PlusMinusSampler()], [interaction])
+        prog = BlockSamplingProgram(
+            spec, [PlusMinusSampler(), PlusMinusSampler()], [interaction]
+        )
         init_state = [jnp.ones((2,), jnp.float32), jnp.ones((2,), jnp.float32)]
         return prog, init_state
 
@@ -366,8 +382,12 @@ class TestPerBlockInteractionsOverride(unittest.TestCase):
         key, _ = jax.random.split(key)
         self.weights_b = -self.weights_a  # opposite sign
 
-        int_a = InteractionGroup(PlusInteraction(self.weights_a), Block(nodes), [Block(nodes)])
-        int_b = InteractionGroup(PlusInteraction(self.weights_b), Block(nodes), [Block(nodes)])
+        int_a = InteractionGroup(
+            PlusInteraction(self.weights_a), Block(nodes), [Block(nodes)]
+        )
+        int_b = InteractionGroup(
+            PlusInteraction(self.weights_b), Block(nodes), [Block(nodes)]
+        )
 
         spec = BlockGibbsSpec(
             [Block(nodes)],
@@ -382,7 +402,9 @@ class TestPerBlockInteractionsOverride(unittest.TestCase):
     def test_override_changes_sample_single_block(self):
         """sample_single_block with per_block_interactions=prog_b's interactions
         should give the same result as running prog_b directly."""
-        result_prog_b, _ = sample_single_block(self.key, self.init_state, [], self.prog_b, block=0, sampler_state=None)
+        result_prog_b, _ = sample_single_block(
+            self.key, self.init_state, [], self.prog_b, block=0, sampler_state=None
+        )
         result_override, _ = sample_single_block(
             self.key,
             self.init_state,
@@ -397,7 +419,9 @@ class TestPerBlockInteractionsOverride(unittest.TestCase):
 
     def test_override_differs_from_original(self):
         """The overridden result should differ from running prog_a."""
-        result_prog_a, _ = sample_single_block(self.key, self.init_state, [], self.prog_a, block=0, sampler_state=None)
+        result_prog_a, _ = sample_single_block(
+            self.key, self.init_state, [], self.prog_a, block=0, sampler_state=None
+        )
         result_override, _ = sample_single_block(
             self.key,
             self.init_state,
@@ -419,7 +443,9 @@ class TestPerBlockInteractionsOverride(unittest.TestCase):
         n_iters = 3
         ss = [None]
 
-        state_b, _, _ = _run_blocks(self.key, self.prog_b, self.init_state, [], n_iters, ss)
+        state_b, _, _ = _run_blocks(
+            self.key, self.prog_b, self.init_state, [], n_iters, ss
+        )
         state_override, _, _ = _run_blocks(
             self.key,
             self.prog_a,

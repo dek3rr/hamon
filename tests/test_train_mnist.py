@@ -53,7 +53,9 @@ def get_double_grid(
         right_edges = make_edge(indices, d, 0)
         upper_edges = make_edge(indices, 0, -d)
         lower_edges = make_edge(indices, 0, d)
-        edges_arr = jnp.concatenate([edges_arr, left_edges, right_edges, upper_edges, lower_edges], axis=0)
+        edges_arr = jnp.concatenate(
+            [edges_arr, left_edges, right_edges, upper_edges, lower_edges], axis=0
+        )
 
     deg = 4 * len(jumps) + 1
     total_edges = size * deg
@@ -87,10 +89,14 @@ class TestTrainMnist(unittest.TestCase):
         label_size = len(self.target_classes) * self.num_label_spots
         data_dim = 28 * 28 + label_size
 
-        self.train_data_filtered = jnp.load("tests/mnist_test_data/train_data_filtered.npy")
+        self.train_data_filtered = jnp.load(
+            "tests/mnist_test_data/train_data_filtered.npy"
+        )
         self.sep_images_test = {}
         for digit in self.target_classes:
-            self.sep_images_test[digit] = jnp.load(f"tests/mnist_test_data/sep_images_test_{digit}.npy")
+            self.sep_images_test[digit] = jnp.load(
+                f"tests/mnist_test_data/sep_images_test_{digit}.npy"
+            )
 
         (
             upper_grid,
@@ -114,7 +120,9 @@ class TestTrainMnist(unittest.TestCase):
         self.training_data_blocks = [visible_nodes]
 
         image_block = Block(visible_nodes.nodes[: 28 * 28])
-        upper_without_image = Block([node for node in upper_grid if node not in image_block.nodes])
+        upper_without_image = Block(
+            [node for node in upper_grid if node not in image_block.nodes]
+        )
         self.classification_sampling_blocks = [upper_without_image, lower_grid]
         self.classification_data_blocks = [image_block]
         self.classification_label_block = Block(visible_nodes.nodes[28 * 28 :])
@@ -144,11 +152,15 @@ class TestTrainMnist(unittest.TestCase):
                 data = data[idxs]
                 _n_batches = data_size // _bsz
                 tot_len = _n_batches * _bsz
-                batched_data = jnp.reshape(data[:tot_len], (_n_batches, _bsz, len(clamped_nodes))).astype(jnp.bool)
+                batched_data = jnp.reshape(
+                    data[:tot_len], (_n_batches, _bsz, len(clamped_nodes))
+                ).astype(jnp.bool)
                 return batched_data, _n_batches
 
             key, key_pos = jax.random.split(key, 2)
-            batched_data_pos, n_batches = batch_data(key_pos, data_positive, bsz_positive, self.training_data_blocks)
+            batched_data_pos, n_batches = batch_data(
+                key_pos, data_positive, bsz_positive, self.training_data_blocks
+            )
 
             def body_fun(carry, key_and_data):
                 _key, _data_pos = key_and_data

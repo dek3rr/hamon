@@ -21,7 +21,9 @@ class TestFactorCreate(unittest.TestCase):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.n_nodes = 5
-        self.good_node_groups = [Block([Node() for _ in range(self.n_nodes)]) for _ in range(3)]
+        self.good_node_groups = [
+            Block([Node() for _ in range(self.n_nodes)]) for _ in range(3)
+        ]
 
     def test_good(self):
         _ = PointlessFactor(self.good_node_groups)
@@ -49,7 +51,9 @@ class TestWeighted(unittest.TestCase):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.n_nodes = 5
-        self.good_node_groups = [Block([Node() for _ in range(self.n_nodes)]) for _ in range(3)]
+        self.good_node_groups = [
+            Block([Node() for _ in range(self.n_nodes)]) for _ in range(3)
+        ]
         self.good_weights = jnp.zeros((self.n_nodes, 1, 3))
 
     def test_good(self):

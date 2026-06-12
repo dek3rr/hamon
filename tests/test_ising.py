@@ -52,7 +52,9 @@ class TestLine(unittest.TestCase):
 
         program = IsingSamplingProgram(ebm, free_blocks, clamped_blocks)
 
-        emp_dist, exact_dist = sample_and_compare_distribution(rng_key, ebm, program, clamp_vals, schedule, 0)
+        emp_dist, exact_dist = sample_and_compare_distribution(
+            rng_key, ebm, program, clamp_vals, schedule, 0
+        )
 
         max_err = jnp.max(jnp.abs(emp_dist - exact_dist)) / jnp.max(exact_dist)
         self.assertLess(max_err, 0.02, f"Distribution mismatch (clamped): {max_err}")
@@ -60,7 +62,9 @@ class TestLine(unittest.TestCase):
 
 def _random_complete_graph(key, dim):
     key, subkey = jax.random.split(key, 2)
-    weight_matrix = jax.random.uniform(subkey, shape=(dim, dim), minval=-0.6, maxval=0.6)
+    weight_matrix = jax.random.uniform(
+        subkey, shape=(dim, dim), minval=-0.6, maxval=0.6
+    )
     key, subkey = jax.random.split(key, 2)
     biases = jax.random.uniform(subkey, shape=(dim,), minval=-1, maxval=1)
     nodes = [SpinNode() for _ in range(dim)]
@@ -110,7 +114,9 @@ class TestMomentAccumulator(unittest.TestCase):
 
         state_observe = StateObserver([Block(self.ebm.nodes)])
         carry_init = state_observe.init()
-        _, samples = sample_with_observation(rng_key, program, schedule, free_data, [], carry_init, state_observe)
+        _, samples = sample_with_observation(
+            rng_key, program, schedule, free_data, [], carry_init, state_observe
+        )
 
         self.samples = jnp.array(2) * samples[0].astype(jnp.int8) - jnp.array(1)
 
@@ -122,7 +128,12 @@ class TestMomentAccumulator(unittest.TestCase):
         avg_edge_vals = []
         node_map = {node: idx for idx, node in enumerate(self.ebm.nodes)}
         for edge in self.ebm.edges:
-            avg_edge_vals.append(jnp.mean(self.samples[:, node_map[edge[0]]] * self.samples[:, node_map[edge[1]]]))
+            avg_edge_vals.append(
+                jnp.mean(
+                    self.samples[:, node_map[edge[0]]]
+                    * self.samples[:, node_map[edge[1]]]
+                )
+            )
         avg_edge_vals = jnp.array(avg_edge_vals)
         self.assertTrue(jnp.allclose(self.second_moments, avg_edge_vals, atol=1e-6))
 
@@ -160,8 +171,12 @@ class TestEstimateKLGrad(unittest.TestCase):
 
         batch_size = 1000
 
-        schedule_positive = SamplingSchedule(n_warmup=1000, n_samples=1000, steps_per_sample=10)
-        schedule_negative = SamplingSchedule(n_warmup=1000, n_samples=1000, steps_per_sample=10)
+        schedule_positive = SamplingSchedule(
+            n_warmup=1000, n_samples=1000, steps_per_sample=10
+        )
+        schedule_negative = SamplingSchedule(
+            n_warmup=1000, n_samples=1000, steps_per_sample=10
+        )
 
         training_spec = IsingTrainingSpec(
             model,
@@ -174,9 +189,13 @@ class TestEstimateKLGrad(unittest.TestCase):
         )
 
         key, subkey = jax.random.split(key, 2)
-        init_state_positive = hinton_init(subkey, model, positive_sampling_blocks, (batch_size, data[0].shape[0]))
+        init_state_positive = hinton_init(
+            subkey, model, positive_sampling_blocks, (batch_size, data[0].shape[0])
+        )
         key, subkey = jax.random.split(key, 2)
-        init_state_negative = hinton_init(subkey, model, negative_sampling_blocks, (batch_size,))
+        init_state_negative = hinton_init(
+            subkey, model, negative_sampling_blocks, (batch_size,)
+        )
 
         grad_w, grad_b, _, _ = estimate_kl_grad(
             key,
@@ -192,7 +211,9 @@ class TestEstimateKLGrad(unittest.TestCase):
         all_bs = _all_bitstrings(4)
 
         def compute_kl(m):
-            energies = jax.vmap(lambda x: m.energy([x], [Block(data_nodes + latent_nodes)]))(all_bs)
+            energies = jax.vmap(
+                lambda x: m.energy([x], [Block(data_nodes + latent_nodes)])
+            )(all_bs)
             unnorm_prob = jnp.exp(-beta * energies)
             fold_un_prob = jnp.reshape(unnorm_prob, (2, 2, 2, 2))
             marginal = jnp.sum(fold_un_prob, axis=(2, 3))

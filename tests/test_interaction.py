@@ -23,7 +23,10 @@ class TestInteractionInputs(unittest.TestCase):
         _ = InteractionGroup(self.good_interaction, self.good_head, self.good_tails)
 
     def test_bad_tail(self):
-        bad_tail = [Block([Node() for _ in range(len(self.good_head) + 1) for _ in range(2)]) for _ in range(2)]
+        bad_tail = [
+            Block([Node() for _ in range(len(self.good_head) + 1) for _ in range(2)])
+            for _ in range(2)
+        ]
 
         with self.assertRaises(RuntimeError) as error:
             _ = InteractionGroup(self.good_interaction, self.good_head, bad_tail)

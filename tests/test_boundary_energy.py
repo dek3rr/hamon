@@ -125,15 +125,29 @@ class TestEnergyDelta:
         weights = jax.random.normal(k2, (n_edges,)) * 0.3
 
         # Two random spin configurations (as float ±1)
-        old_spins = 2.0 * jax.random.bernoulli(jax.random.key(10), shape=(n_nodes,)).astype(jnp.float32) - 1.0
-        new_spins = 2.0 * jax.random.bernoulli(jax.random.key(11), shape=(n_nodes,)).astype(jnp.float32) - 1.0
+        old_spins = (
+            2.0
+            * jax.random.bernoulli(jax.random.key(10), shape=(n_nodes,)).astype(
+                jnp.float32
+            )
+            - 1.0
+        )
+        new_spins = (
+            2.0
+            * jax.random.bernoulli(jax.random.key(11), shape=(n_nodes,)).astype(
+                jnp.float32
+            )
+            - 1.0
+        )
 
         # Only change nodes in block 0 (even sites)
         even_mask = jnp.array([(i + j) % 2 == 0 for i in range(L) for j in range(L)])
         new_spins = jnp.where(even_mask, new_spins, old_spins)
 
         # Pre-compute edge indices
-        idx = precompute_edge_indices(nodes_flat, edges, _checkerboard_blocks(nodes_2d, L))
+        idx = precompute_edge_indices(
+            nodes_flat, edges, _checkerboard_blocks(nodes_2d, L)
+        )
         edge_src = jnp.array(idx["edge_src"])
         edge_dst = jnp.array(idx["edge_dst"])
         incident_mask = jnp.array(idx["incident_masks"][0])
@@ -285,16 +299,24 @@ class TestMakeIsingDeltaFn:
         nodes, edges, free_blocks, biases, weights, ebm = self._build_ising(
             L, coupling=0.5, beta=betas_list[0], key=jax.random.key(0)
         )
-        ebms = [IsingEBM(nodes, edges, biases, weights, jnp.array(b)) for b in betas_list]
+        ebms = [
+            IsingEBM(nodes, edges, biases, weights, jnp.array(b)) for b in betas_list
+        ]
         progs = [IsingSamplingProgram(e, free_blocks, []) for e in ebms]
         spec = progs[0].gibbs_spec
         n_fb = len(free_blocks)
 
         # Random old and new states (n_chains, block_size) bool
         keys = jax.random.split(jax.random.key(1), n_chains * n_fb * 2)
-        old_stacked = [jax.random.bernoulli(keys[b], shape=(n_chains, len(list(free_blocks[b])))) for b in range(n_fb)]
+        old_stacked = [
+            jax.random.bernoulli(keys[b], shape=(n_chains, len(list(free_blocks[b]))))
+            for b in range(n_fb)
+        ]
         new_stacked = [
-            jax.random.bernoulli(keys[n_fb + b], shape=(n_chains, len(list(free_blocks[b])))) for b in range(n_fb)
+            jax.random.bernoulli(
+                keys[n_fb + b], shape=(n_chains, len(list(free_blocks[b])))
+            )
+            for b in range(n_fb)
         ]
 
         delta_fn = make_ising_delta_fn(nodes, edges, free_blocks, biases, weights)
@@ -321,7 +343,9 @@ class TestMakeIsingDeltaFn:
         nodes, edges, free_blocks, biases, weights, _ = self._build_ising(
             L, coupling=0.8, beta=betas_list[0], key=jax.random.key(42)
         )
-        ebms = [IsingEBM(nodes, edges, biases, weights, jnp.array(b)) for b in betas_list]
+        ebms = [
+            IsingEBM(nodes, edges, biases, weights, jnp.array(b)) for b in betas_list
+        ]
         progs = [IsingSamplingProgram(e, free_blocks, []) for e in ebms]
 
         keys = jax.random.split(jax.random.key(99), len(betas_list))
@@ -354,7 +378,9 @@ class TestMakeIsingDeltaFn:
         )
 
         # Acceptance rates must match exactly (same RNG, same computation)
-        assert jnp.allclose(stats_ref["acceptance_rate"], stats_cac["acceptance_rate"], atol=1e-6), (
+        assert jnp.allclose(
+            stats_ref["acceptance_rate"], stats_cac["acceptance_rate"], atol=1e-6
+        ), (
             f"Acceptance rates differ:\\n  ref: {stats_ref['acceptance_rate']}\\n  cac: {stats_cac['acceptance_rate']}"
         )
 
@@ -374,10 +400,13 @@ class TestMakeIsingDeltaFn:
         nodes, edges, free_blocks, biases, weights, _ = self._build_ising(
             L, coupling=0.7, beta=betas_list[0], key=jax.random.key(11)
         )
-        ebms = [IsingEBM(nodes, edges, biases, weights, jnp.array(b)) for b in betas_list]
+        ebms = [
+            IsingEBM(nodes, edges, biases, weights, jnp.array(b)) for b in betas_list
+        ]
         progs = [IsingSamplingProgram(e, free_blocks, []) for e in ebms]
         init_states = [
-            hinton_init(k, ebms[0], free_blocks, ()) for k in jax.random.split(jax.random.key(22), len(betas_list))
+            hinton_init(k, ebms[0], free_blocks, ())
+            for k in jax.random.split(jax.random.key(22), len(betas_list))
         ]
 
         delta_fn = make_ising_delta_fn(nodes, edges, free_blocks, biases, weights)
@@ -407,7 +436,11 @@ class TestMakeIsingDeltaFn:
         )
 
         # 2000 rounds: any accumulation of float32 error would show here
-        max_rate_diff = float(jnp.max(jnp.abs(stats_ref["acceptance_rate"] - stats_cac["acceptance_rate"])))
+        max_rate_diff = float(
+            jnp.max(
+                jnp.abs(stats_ref["acceptance_rate"] - stats_cac["acceptance_rate"])
+            )
+        )
         assert max_rate_diff < 1e-5, (
             f"Acceptance rates diverged after 2000 rounds (max diff={max_rate_diff:.2e}).\\n"
             f"  ref: {stats_ref['acceptance_rate']}\\n"
