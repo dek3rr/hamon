@@ -132,13 +132,13 @@ class TestSinglePassDEO:
         )
         attempted = stats["attempted"]
         # 3 pairs: even={0,2}, odd={1}
-        # 50 rounds â†’ 25 even rounds, 25 odd rounds
+        # 50 rounds → 25 even rounds, 25 odd rounds
         assert int(attempted[0]) == 25  # even pair
         assert int(attempted[1]) == 25  # odd pair
         assert int(attempted[2]) == 25  # even pair
 
     def test_round_trips_with_zero_coupling(self):
-        """Zero coupling â†’ all swaps accepted â†’ conveyor belt round trips."""
+        """Zero coupling → all swaps accepted → conveyor belt round trips."""
         betas = [0.5, 1.0, 1.5, 2.0]
         _, _, fb, ebms, progs = _make_ising(4, betas, coupling=0.0)
         init = make_empty_block_state(fb, ebms[0].node_shape_dtypes)
@@ -176,7 +176,7 @@ class TestSinglePassDEO:
         assert jnp.all(stats["attempted"] > 0)
 
     def test_lambda_consistent(self):
-        """Î› = sum(rejection_rates) should hold."""
+        """Λ = sum(rejection_rates) should hold."""
         betas = [0.5, 1.0, 1.5, 2.0]
         _, _, fb, ebms, progs = _make_ising(8, betas, coupling=0.5)
         states = _make_states(jax.random.key(0), ebms, fb, 4)
@@ -208,15 +208,15 @@ class TestSinglePassDEO:
             n_rounds=200,
             gibbs_steps_per_round=3,
         )
-        # Pair 0 (Î²=0.1â†”0.2, small gap) vs pair 1 (Î²=0.2â†”2.0, large gap)
+        # Pair 0 (β=0.1↔0.2, small gap) vs pair 1 (β=0.2↔2.0, large gap)
         rates = stats["acceptance_rate"]
         assert not jnp.allclose(rates[0], rates[1], atol=0.05), f"Suspiciously similar rates: {rates}"
 
     def test_multi_pass_would_break_conveyor(self):
         """Document WHY multi-pass DEO is wrong.
 
-        With 4 chains and all swaps accepted, evenâˆ˜odd followed by
-        oddâˆ˜even = identity permutation. States oscillate with period 2
+        With 4 chains and all swaps accepted, even∘odd followed by
+        odd∘even = identity permutation. States oscillate with period 2
         instead of drifting through the temperature ladder.
         """
         # Verify the algebra: compose the two permutations
@@ -407,7 +407,7 @@ class TestNRPTObserver:
 
 
 # ---------------------------------------------------------------------------
-# Î²â‚€ = 0 ladders (regression: base energies were NaN, silently rejecting
+# β₀ = 0 ladders (regression: base energies were NaN, silently rejecting
 # every swap)
 # ---------------------------------------------------------------------------
 
@@ -426,10 +426,10 @@ class _OpaqueEBM(AbstractEBM):
 
 
 class TestZeroBetaHotChain:
-    """A hottest chain at exactly Î² = 0 must produce finite, working swaps."""
+    """A hottest chain at exactly β = 0 must produce finite, working swaps."""
 
     def test_swaps_accepted_with_zero_beta0(self):
-        """Regression: Î²â‚€ = 0 yielded NaN base energies â†’ 0% acceptance."""
+        """Regression: β₀ = 0 yielded NaN base energies → 0% acceptance."""
         betas = [0.0, 0.4, 0.8, 1.2]
         _, _, fb, ebms, progs = _make_ising(4, betas, coupling=0.4)
         states = _make_states(jax.random.key(0), ebms, fb, 4)
@@ -450,8 +450,8 @@ class TestZeroBetaHotChain:
         assert jnp.all(acc > 0.0), f"swaps never accepted: {acc}"
 
     def test_reference_ebm_prefers_beta1_copy(self):
-        """The reference EBM is an exact Î²=1 copy when with_beta() exists,
-        and base energies match a directly-constructed Î²=1 model."""
+        """The reference EBM is an exact β=1 copy when with_beta() exists,
+        and base energies match a directly-constructed β=1 model."""
         betas = [0.0, 0.5, 1.0]
         nodes, edges, fb, ebms, progs = _make_ising(4, betas, coupling=0.7)
         states = _make_states(jax.random.key(3), ebms, fb, 3)
@@ -503,7 +503,7 @@ class TestZeroBetaHotChain:
         assert jnp.array_equal(stats_ising["accepted"], stats_opaque["accepted"])
 
     def test_fallback_with_zero_cold_beta_raises(self):
-        """No with_beta() and Î²_cold = 0 is unrecoverable â€” must raise."""
+        """No with_beta() and β_cold = 0 is unrecoverable — must raise."""
         betas = [0.0, 0.0]
         _, _, fb, ebms, progs = _make_ising(4, betas)
         opaque_ebms = [_OpaqueEBM(inner=e) for e in ebms]
@@ -522,7 +522,7 @@ class TestZeroBetaHotChain:
             )
 
     def test_adaptive_tuning_with_zero_beta0(self):
-        """nrpt_adaptive (the path ising_sample uses) works from Î²â‚€ = 0."""
+        """nrpt_adaptive (the path ising_sample uses) works from β₀ = 0."""
         betas = jnp.linspace(0.0, 1.2, 4)
         _, _, fb, ebms, progs = _make_ising(4, [float(b) for b in betas], coupling=0.6)
         ebm, prog = ebms[-1], progs[-1]
@@ -566,7 +566,7 @@ class TestObserverEnergyAlignment:
 
     n_rounds = 12
     n_chains = 4
-    # Close betas â†’ high swap acceptance, so misalignment cannot hide
+    # Close betas → high swap acceptance, so misalignment cannot hide
     # behind an identity permutation.
     betas = [0.8, 1.0, 1.2, 1.4]
 
@@ -616,13 +616,13 @@ class TestObserverEnergyAlignment:
 
 
 # ---------------------------------------------------------------------------
-# Temperature-linear mode (single base program + per-chain Î² scaling)
+# Temperature-linear mode (single base program + per-chain β scaling)
 # ---------------------------------------------------------------------------
 
 
 class TestTemperatureLinearMode:
     """nrpt with single template (ebm, program) objects must reproduce the
-    per-chain-programs path bit-for-bit for Î²-linear models."""
+    per-chain-programs path bit-for-bit for β-linear models."""
 
     def _setup(self):
         betas = [0.4, 0.8, 1.2, 1.6]
@@ -645,7 +645,7 @@ class TestTemperatureLinearMode:
             betas=betas,
             observer=obs,
         )
-        # Template objects at an arbitrary Î² â€” rebased to Î²=1 internally.
+        # Template objects at an arbitrary β — rebased to β=1 internally.
         states_lin, stats_lin = nrpt(
             jax.random.key(11),
             ebms[-1],
@@ -698,7 +698,7 @@ class TestTemperatureLinearMode:
 
 
 class TestJitCacheReuse:
-    """Repeated nrpt calls with the same Î²=1 base pair must reuse the
+    """Repeated nrpt calls with the same β=1 base pair must reuse the
     compiled round loop instead of retracing."""
 
     def test_repeated_calls_do_not_retrace(self):
@@ -714,7 +714,7 @@ class TestJitCacheReuse:
         nrpt(jax.random.key(1), base_ebm, base_prog, inits, [], 6, 1, betas=betas)
         assert _nrpt_rounds_trace_count[0] == before + 1
 
-        # Same static structure, different betas values and key â†’ cache hit.
+        # Same static structure, different betas values and key → cache hit.
         nrpt(
             jax.random.key(2),
             base_ebm,
