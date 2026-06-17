@@ -15,6 +15,7 @@ from .block_sampling import SamplingSchedule as SamplingSchedule
 from .block_sampling import sample_blocks as sample_blocks
 from .block_sampling import sample_single_block as sample_single_block
 from .block_sampling import sample_states as sample_states
+from .block_sampling import sample_states_batched as sample_states_batched
 from .block_sampling import sample_with_observation as sample_with_observation
 from .boundary_energy import make_ising_delta_fn as make_ising_delta_fn
 from .conditional_samplers import (

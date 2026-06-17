@@ -23,6 +23,7 @@ from hamon.block_sampling import (
     SamplingSchedule,
     SuperBlock,
     sample_states,
+    sample_states_batched,
     sample_with_observation,
 )
 from hamon.factor import FactorSamplingProgram
@@ -401,6 +402,7 @@ def ising_sample(
     steps_per_sample: int = 1,
     gibbs_steps_per_round: int = 1,
     target_acceptance: float = 0.6,
+    n_draw_chains: int = 1,
     device: DeviceLike = "auto",
 ) -> tuple[Bool[Array, "n_samples n"], dict]:
     r"""Sample from an Ising model Boltzmann distribution via NRPT.
@@ -425,6 +427,13 @@ def ising_sample(
         gibbs_steps_per_round: Gibbs sweeps between NRPT swap attempts.
         target_acceptance: desired per-pair swap acceptance rate for
             chain-count discovery.
+        n_draw_chains: how many independent chains to run for the final draw.
+            ``1`` (default) reproduces the single-chain draw exactly. With
+            ``k > 1`` the ``n_samples`` budget is split across ``k`` chains run
+            in parallel under one `vmap` (each seeded from the equilibrated cold
+            state), which cuts sample-collection iterations on an accelerator —
+            the draw is dispatch-bound, so fewer, wider kernels finish sooner.
+            The returned sample count is rounded down to ``k * (n_samples // k)``.
         device: where to run — ``"auto"`` (default; small workloads on CPU,
             large on a visible accelerator), ``"cpu"``/``"gpu"``, a concrete
             ``jax.Device``, or ``None`` to leave placement untouched. Under
@@ -546,12 +555,28 @@ def ising_sample(
 
     # --- sample from cold chain (last index = highest beta) ---
     cold_state = warm_states[-1]
-    schedule = SamplingSchedule(n_warmup, n_samples, steps_per_sample)
     obs_block = Block(nodes)
-    raw_samples = sample_states(
-        k_samp, program, schedule, cold_state, [], [obs_block], device=dev
-    )
-    samples = raw_samples[0]  # (n_samples, n)
+    if n_draw_chains > 1:
+        # Split the sample budget across independent chains run under one vmap.
+        # The draw is dispatch-bound, so collecting n_samples//k samples on each
+        # of k chains finishes sooner than one long chain. Each chain starts from
+        # the (already equilibrated) cold state and decorrelates via its own key.
+        per_chain = max(1, n_samples // n_draw_chains)
+        schedule = SamplingSchedule(n_warmup, per_chain, steps_per_sample)
+        draw_inits = jax.tree.map(
+            lambda x: jnp.broadcast_to(x, (n_draw_chains, *x.shape)), cold_state
+        )
+        raw_samples = sample_states_batched(
+            k_samp, program, schedule, draw_inits, [], [obs_block], device=dev
+        )
+        # (k, per_chain, n) -> (k * per_chain, n)
+        samples = raw_samples[0].reshape(-1, raw_samples[0].shape[-1])
+    else:
+        schedule = SamplingSchedule(n_warmup, n_samples, steps_per_sample)
+        raw_samples = sample_states(
+            k_samp, program, schedule, cold_state, [], [obs_block], device=dev
+        )
+        samples = raw_samples[0]  # (n_samples, n)
 
     mean_spins = float(jnp.mean(jnp.sum(samples, axis=1).astype(jnp.float32)))
 

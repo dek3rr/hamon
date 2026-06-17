@@ -24,6 +24,7 @@ from hamon.block_sampling import (
     sample_blocks,
     sample_single_block,
     sample_states,
+    sample_states_batched,
 )
 from hamon.conditional_samplers import (
     AbstractConditionalSampler,
@@ -363,11 +364,13 @@ class TestRunBlocksGlobalState(unittest.TestCase):
             self.assertTrue(jnp.allclose(a, b))
 
     def test_block_slice_starts_precomputed(self):
-        """BlockSpec lays free blocks out contiguously, so every free block
-        gets a static slice start (the scatter fallback should be unused)."""
+        """Every free block gets a static slice start (the scatter fallback
+        should be unused)."""
         prog, _ = self._make_simple_program()
-        # Two 2-node blocks sharing one structural group → starts at 0 and 2.
-        self.assertEqual(prog._block_slice_starts, [0, 2])
+        self.assertTrue(all(s is not None for s in prog._block_slice_starts))
+        # This program is split-safe, so it uses the per-block layout: each
+        # block is the sole occupant of its own slot and therefore starts at 0.
+        self.assertEqual(prog._block_slice_starts, [0, 0])
 
 
 class TestPerBlockInteractionsOverride(unittest.TestCase):
@@ -458,3 +461,59 @@ class TestPerBlockInteractionsOverride(unittest.TestCase):
 
         for a, b in zip(state_b, state_override):
             self.assertTrue(jnp.allclose(a, b))
+
+
+class TestSampleStatesBatched(unittest.TestCase):
+    """sample_states_batched runs N independent chains under one vmap; each
+    chain must match single-chain sample_states with the same per-chain key."""
+
+    def _make_program(self):
+        nodes = [ContinousScalarNode() for _ in range(4)]
+        weights = jax.random.normal(jax.random.key(2), (len(nodes),))
+        interaction = InteractionGroup(
+            PlusInteraction(weights), Block(nodes), [Block(nodes)]
+        )
+        spec = BlockGibbsSpec(
+            [Block(nodes[:2]), Block(nodes[2:])],
+            [],
+            {ContinousScalarNode: jax.ShapeDtypeStruct((), jnp.float32)},
+        )
+        prog = BlockSamplingProgram(
+            spec, [PlusMinusSampler(), PlusMinusSampler()], [interaction]
+        )
+        return prog, nodes
+
+    def test_matches_looped_single_chains(self):
+        prog, nodes = self._make_program()
+        obs = Block(nodes)
+        schedule = SamplingSchedule(3, 4, 1)
+        n_chains = 3
+        key = jax.random.key(5)
+        # Distinct per-chain initial states so the chains genuinely differ.
+        inits = [
+            [
+                jax.random.normal(jax.random.fold_in(key, c), (2,)),
+                jax.random.normal(jax.random.fold_in(key, 100 + c), (2,)),
+            ]
+            for c in range(n_chains)
+        ]
+        stacked = [jnp.stack(x) for x in zip(*inits)]
+
+        batched = sample_states_batched(
+            key, prog, schedule, stacked, [], [obs], device=None
+        )[0]
+
+        # sample_states_batched splits `key` the same way internally.
+        keys = jax.random.split(key, n_chains)
+        looped = jnp.stack(
+            [
+                sample_states(
+                    keys[c], prog, schedule, inits[c], [], [obs], device=None
+                )[0]
+                for c in range(n_chains)
+            ]
+        )
+
+        self.assertEqual(batched.shape, looped.shape)
+        self.assertEqual(batched.shape[0], n_chains)
+        self.assertTrue(jnp.array_equal(batched, looped))

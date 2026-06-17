@@ -431,10 +431,12 @@ def nrpt_node_samples(
             )
 
     # Concatenate the observations of free blocks matching the node type, in
-    # free-block order. Free blocks precede clamped blocks in the BlockSpec
-    # layout, so this concatenation reproduces the global ordering of the
-    # node type's structure group and node_global_location_map positions
-    # index into it directly.
+    # free-block order, then index by each node's column in that concatenation.
+    # The column is derived straight from free_blocks (cumulative same-type
+    # offset + position within the block), so it is correct regardless of the
+    # program's global-state layout (concatenated or per-block) — it does not
+    # rely on node_global_location_map positions, whose meaning depends on the
+    # layout.
     same_type = [
         obs
         for obs, block in zip(observations, free_blocks)
@@ -443,21 +445,28 @@ def nrpt_node_samples(
     if not same_type:
         raise ValueError(f"No free blocks of node type {node_type.__name__}.")
     concat = jnp.concatenate(same_type, axis=2)
-    n_free_of_type = concat.shape[2]
+
+    node_to_column = {}
+    offset = 0
+    for block in free_blocks:
+        if block.node_type is node_type:
+            for k, n in enumerate(block.nodes):
+                node_to_column[n] = offset + k
+            offset += len(block.nodes)
 
     positions = []
     for node in nodes:
-        loc = spec.node_global_location_map.get(node)
-        if loc is None:
-            raise ValueError(
-                "Node not found in the program's BlockSpec; samples can only "
-                "be extracted for nodes that belong to this program."
-            )
-        if loc[1] >= n_free_of_type:
+        column = node_to_column.get(node)
+        if column is None:
+            if spec.node_global_location_map.get(node) is None:
+                raise ValueError(
+                    "Node not found in the program's BlockSpec; samples can only "
+                    "be extracted for nodes that belong to this program."
+                )
             raise ValueError(
                 "Node belongs to a clamped block; only free-block states are observed by NRPT observers."
             )
-        positions.append(loc[1])
+        positions.append(column)
 
     per_chain = concat[:, chain_index]
     return jnp.take(per_chain, jnp.array(positions), axis=1)

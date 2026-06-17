@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`sample_states_batched`** — runs several independent single-chain draws in
+  parallel under one `jax.vmap`, and `ising_sample` gains an `n_draw_chains`
+  argument (default `1`, exact previous behaviour) that splits the sample budget
+  across that many chains, each seeded from the equilibrated cold state. The
+  draw is dispatch-bound on an accelerator, so fewer, wider kernels collect the
+  same total samples in less wall time.
+
+### Changed
+
+- **Per-block global-state layout** — when a block-Gibbs program is
+  "split-safe" (every free block reads each of its tail blocks from a single
+  block, e.g. a 2-coloured grid), each free block now occupies its own
+  global-state slot instead of all same-structure blocks being concatenated
+  into one array. A block update then replaces its slot outright rather than
+  `dynamic_update_slice`-ing into a shared array, removing the device-to-device
+  copies of the unchanged portion on every sweep (fewer, cheaper kernels).
+  Sampling output is bit-identical; programs that are not split-safe keep the
+  previous concatenated layout.
+
 ## [0.4.0] — 2026-06-12
 
 ### Added
