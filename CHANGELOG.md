@@ -16,6 +16,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   draw is dispatch-bound on an accelerator, so fewer, wider kernels collect the
   same total samples in less wall time.
 
+### Fixed
+
+- **NRPT round-loop recompiled on every call** — `BlockSpec` now has value-based
+  `__eq__`/`__hash__` keyed on its structure (block partition, global-state
+  layout, sampling order, SD map). `program.with_ebm(...)` rebuilds the spec on
+  every `nrpt` / `nrpt_adaptive` call and every `discover_chain_count` probe;
+  the fresh spec object previously missed the `eqx.filter_jit` cache for
+  `_nrpt_rounds`, forcing a full recompile (~1 s at 484 nodes / 16 chains) even
+  though the round loop itself runs in microseconds. Repeated NRPT runs at the
+  same scale now compile once and reuse the executable (~40–60× faster steady
+  state); a cold `ising_sample` improves ~25–30%.
+
 ### Changed
 
 - **Per-block global-state layout** — when a block-Gibbs program is

@@ -201,6 +201,39 @@ class BlockSpec:
         self.block_to_global_slice_spec = block_to_global_slice_spec
         self.node_global_location_map = node_global_location_map
 
+    def _structure_key(self):
+        """Everything about this spec that fixes the compiled sampling program:
+        the block partition (the node objects per block, in order), the
+        global-state layout (`block_to_global_slice_spec`, which also encodes the
+        per-block vs. concatenated layout), the Gibbs sampling order, and the
+        node-type SD map.
+
+        Keyed on node identity: a spec rebuilt over the *same* nodes and
+        structure compares equal and shares the `eqx.filter_jit` cache. Without
+        this, every `program.with_ebm(...)` — called once per `nrpt` /
+        `nrpt_adaptive` invocation and per discovery probe — builds a fresh spec
+        object that misses the cache and forces a full recompile of the
+        otherwise-identical NRPT round loop. (Specs over *different* node objects
+        stay distinct, which is what we want: the surrounding program's blocks
+        carry those same nodes and are themselves identity-compared in the cache
+        key, so structural-only equality would buy nothing here.)
+        """
+        return (
+            type(self),
+            tuple(tuple(id(n) for n in block.nodes) for block in self.blocks),
+            tuple(tuple(s) for s in self.block_to_global_slice_spec),
+            tuple(tuple(g) for g in getattr(self, "sampling_order", ())),
+            frozenset(self.node_shape_dtypes.items()),
+        )
+
+    def __eq__(self, other):
+        return isinstance(other, BlockSpec) and (
+            self._structure_key() == other._structure_key()
+        )
+
+    def __hash__(self):
+        return hash(self._structure_key())
+
 
 def _stack(*args):
     if eqx.is_array(args[0]):
