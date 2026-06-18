@@ -892,31 +892,40 @@ def _tune_phase_adaptive_rounds(
     """
     acc_total = None
     att_total = None
+    acceptance_rate = None
     rounds_used = 0
     lambda_prev = None
     stable_count = 0
 
-    while rounds_used < max_rounds:
+    # Always run at least one batch; break on stability or the round ceiling.
+    while True:
         key, subkey = jax.random.split(key)
         batch = min(round_batch, max_rounds - rounds_used)
         states, stats = run_phase(subkey, betas, states, batch)
-        acc_total = stats["accepted"] if acc_total is None else acc_total + stats["accepted"]
-        att_total = stats["attempted"] if att_total is None else att_total + stats["attempted"]
+        acc_total = (
+            stats["accepted"] if acc_total is None else acc_total + stats["accepted"]
+        )
+        att_total = (
+            stats["attempted"] if att_total is None else att_total + stats["attempted"]
+        )
         rounds_used += batch
 
         rate = acc_total.astype(betas.dtype) / jnp.maximum(att_total, 1).astype(
             betas.dtype
         )
-        lambda_cur = float(jnp.sum(1.0 - rate))
+        acceptance_rate = jnp.where(att_total > 0, rate, 0.0)
+        lambda_cur = float(jnp.sum(1.0 - acceptance_rate))
         if rounds_used >= min_rounds and lambda_prev is not None:
             rel = abs(lambda_cur - lambda_prev) / max(lambda_cur, 1e-9)
             stable_count = stable_count + 1 if rel < lambda_rtol else 0
             if stable_count >= stable_k:
                 break
         lambda_prev = lambda_cur
+        if rounds_used >= max_rounds:
+            break
 
-    rate = acc_total.astype(betas.dtype) / jnp.maximum(att_total, 1).astype(betas.dtype)
-    acceptance_rate = jnp.where(att_total > 0, rate, 0.0)
+    assert acc_total is not None and att_total is not None
+    assert acceptance_rate is not None
     pooled_stats = {
         "accepted": acc_total,
         "attempted": att_total,

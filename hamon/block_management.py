@@ -469,13 +469,9 @@ def from_global_state(
                 lambda *xs: jnp.concatenate(xs, axis=0),
                 *[global_state[s] for s in involved],
             )
-            flat_pos = jnp.array(
-                [offset[s] + p for s, p in zip(slots, positions)]
-            )
+            flat_pos = jnp.array([offset[s] + p for s, p in zip(slots, positions)])
             out.append(
-                jax.tree.map(
-                    lambda x, _p=flat_pos: jnp.take(x, _p, axis=0), full
-                )
+                jax.tree.map(lambda x, _p=flat_pos: jnp.take(x, _p, axis=0), full)
             )
     return out
 

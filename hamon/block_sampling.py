@@ -308,7 +308,9 @@ class BlockSamplingProgram(eqx.Module):
                     n_nodes = len(block.nodes)
                     interaction_slices = np.zeros((n_nodes, n_interactions), dtype=int)
 
-                    global_inds = [None for _ in interaction_group.tail_nodes]
+                    global_inds: list[int | None] = [
+                        None for _ in interaction_group.tail_nodes
+                    ]
                     global_slices = [
                         np.zeros((n_nodes, n_interactions), dtype=int)
                         for _ in interaction_group.tail_nodes
@@ -921,6 +923,4 @@ def sample_states_batched(
         return results
 
     with device_ctx:
-        return jax.vmap(_one_chain, in_axes=(0, [0] * n_free))(
-            keys, init_states_free
-        )
+        return jax.vmap(_one_chain, in_axes=(0, [0] * n_free))(keys, init_states_free)
