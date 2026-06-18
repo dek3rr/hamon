@@ -1,5 +1,6 @@
 # Modified from the original thrml library (https://github.com/Extropic-AI/thrml)
 
+import copy
 from typing import (
     Generic,
     Iterator,
@@ -200,6 +201,39 @@ class BlockSpec:
         self.block_to_global_slice_spec = block_to_global_slice_spec
         self.node_global_location_map = node_global_location_map
 
+    def _structure_key(self):
+        """Everything about this spec that fixes the compiled sampling program:
+        the block partition (the node objects per block, in order), the
+        global-state layout (`block_to_global_slice_spec`, which also encodes the
+        per-block vs. concatenated layout), the Gibbs sampling order, and the
+        node-type SD map.
+
+        Keyed on node identity: a spec rebuilt over the *same* nodes and
+        structure compares equal and shares the `eqx.filter_jit` cache. Without
+        this, every `program.with_ebm(...)` — called once per `nrpt` /
+        `nrpt_adaptive` invocation and per discovery probe — builds a fresh spec
+        object that misses the cache and forces a full recompile of the
+        otherwise-identical NRPT round loop. (Specs over *different* node objects
+        stay distinct, which is what we want: the surrounding program's blocks
+        carry those same nodes and are themselves identity-compared in the cache
+        key, so structural-only equality would buy nothing here.)
+        """
+        return (
+            type(self),
+            tuple(tuple(id(n) for n in block.nodes) for block in self.blocks),
+            tuple(tuple(s) for s in self.block_to_global_slice_spec),
+            tuple(tuple(g) for g in getattr(self, "sampling_order", ())),
+            frozenset(self.node_shape_dtypes.items()),
+        )
+
+    def __eq__(self, other):
+        return isinstance(other, BlockSpec) and (
+            self._structure_key() == other._structure_key()
+        )
+
+    def __hash__(self):
+        return hash(self._structure_key())
+
 
 def _stack(*args):
     if eqx.is_array(args[0]):
@@ -270,8 +304,12 @@ def _block_layout(block: Block, spec: BlockSpec) -> tuple[int, int | None, np.nd
     of truth for that check; ``scatter_block_to_global``,
     ``from_global_state``, and ``BlockSamplingProgram`` all use it.
     """
-    node_sds = spec.node_shape_dtypes[block.node_type]
-    sd_ind = spec.sd_index_map[node_sds]
+    # Read the slot from the location map (rather than sd_index_map[node_type])
+    # so this is correct under any layout, including the per-block layout where a
+    # block's slot is its own index rather than its shared structure group. All
+    # of a block's nodes live in one slot, so the first node fixes it. Behaviour
+    # is identical to the structure-group lookup under the default layout.
+    sd_ind = spec.node_global_location_map[block.nodes[0]][0]
     locs = np.array([spec.node_global_location_map[node][1] for node in block])
     start = None
     if locs.size and np.array_equal(locs, np.arange(locs[0], locs[0] + locs.size)):
@@ -317,7 +355,12 @@ def scatter_block_to_global(
     sd_ind, start, locs = _block_layout(block, spec)
 
     new_global = list(global_state)  # shallow copy; only one slot changes
-    if start is not None:
+    if len(spec.block_to_global_slice_spec[sd_ind]) == 1:
+        # The block is the sole occupant of its slot (per-block layout), so the
+        # whole slot is replaced — no slice/scatter and no copy of an unchanged
+        # neighbour.
+        new_global[sd_ind] = new_block_state
+    elif start is not None:
         new_global[sd_ind] = jax.tree.map(
             lambda g, s: jax.lax.dynamic_update_slice_in_dim(g, s, start, axis=0),
             global_state[sd_ind],
@@ -382,29 +425,81 @@ def from_global_state(
     static-offset slice instead of a gather, mirroring
     [`hamon.scatter_block_to_global`][].
     """
+    loc_map = spec_from.node_global_location_map
     out = []
     for block in blocks_to_extract:
-        sd_ind, start, locs = _block_layout(block, spec_from)
-
-        if start is not None:
-            length = int(locs.size)
-            out.append(
-                jax.tree.map(
-                    lambda x, _s=start, _n=length: jax.lax.dynamic_slice_in_dim(
-                        x, _s, _n, axis=0
-                    ),
-                    global_state[sd_ind],
+        slots = [loc_map[node][0] for node in block.nodes]
+        if len(set(slots)) <= 1:
+            # All nodes live in one slot: a static slice (contiguous range) or a
+            # single gather. This is the only path under the default layout.
+            sd_ind, start, locs = _block_layout(block, spec_from)
+            if start is not None:
+                length = int(locs.size)
+                out.append(
+                    jax.tree.map(
+                        lambda x, _s=start, _n=length: jax.lax.dynamic_slice_in_dim(
+                            x, _s, _n, axis=0
+                        ),
+                        global_state[sd_ind],
+                    )
                 )
-            )
+            else:
+                positions = jnp.array(locs)
+                out.append(
+                    jax.tree.map(
+                        lambda x, _p=positions: jnp.take(x, _p, axis=0),
+                        global_state[sd_ind],
+                    )
+                )
         else:
-            positions = jnp.array(locs)
+            # The block spans several slots (e.g. an all-nodes observation block
+            # under the per-block layout). Concatenate the involved slots once and
+            # gather node order from that — two ops regardless of slot count, and
+            # the concatenation is the same per-type view the default layout keeps
+            # resident. Runs only on the (cold) extraction path, never inside the
+            # Gibbs sweep.
+            positions = [loc_map[node][1] for node in block.nodes]
+            involved = sorted(set(slots))
+            offset = {}
+            acc = 0
+            for s in involved:
+                offset[s] = acc
+                acc += int(jax.tree.leaves(global_state[s])[0].shape[0])
+            full = jax.tree.map(
+                lambda *xs: jnp.concatenate(xs, axis=0),
+                *[global_state[s] for s in involved],
+            )
+            flat_pos = jnp.array([offset[s] + p for s, p in zip(slots, positions)])
             out.append(
-                jax.tree.map(
-                    lambda x, _p=positions: jnp.take(x, _p, axis=0),
-                    global_state[sd_ind],
-                )
+                jax.tree.map(lambda x, _p=flat_pos: jnp.take(x, _p, axis=0), full)
             )
     return out
+
+
+def to_per_block_layout(spec):
+    """Return a shallow copy of *spec* whose global state has one slot per block.
+
+    Under the default layout, every block sharing a PyTree structure is
+    concatenated into a single global array, so writing one block's update back
+    is a ``dynamic_update_slice`` into that shared array that also copies the
+    unchanged portion every step. The per-block layout gives each block its own
+    global slot, so a block update replaces its slot outright — no slice/scatter
+    and no copy of the rest, which is the dominant cost in dispatch-bound Gibbs
+    sweeps.
+
+    Only valid when every interaction reads each of its tail blocks from a single
+    block (so the gather's "slot from the first tail node" assumption holds for
+    every tail node). Callers must verify this before transforming; see
+    ``BlockSamplingProgram.__init__``.
+    """
+    new_spec = copy.copy(spec)
+    new_spec.block_to_global_slice_spec = [[i] for i in range(len(spec.blocks))]
+    new_spec.node_global_location_map = {
+        node: (block_idx, k)
+        for block_idx, block in enumerate(spec.blocks)
+        for k, node in enumerate(block.nodes)
+    }
+    return new_spec
 
 
 def make_empty_block_state(

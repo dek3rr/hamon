@@ -5,6 +5,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`sample_states_batched`** — runs several independent single-chain draws in
+  parallel under one `jax.vmap`, and `ising_sample` gains an `n_draw_chains`
+  argument (default `1`, exact previous behaviour) that splits the sample budget
+  across that many chains, each seeded from the equilibrated cold state. The
+  draw is dispatch-bound on an accelerator, so fewer, wider kernels collect the
+  same total samples in less wall time.
+
+### Fixed
+
+- **NRPT round-loop recompiled on every call** — `BlockSpec` now has value-based
+  `__eq__`/`__hash__` keyed on its structure (block partition, global-state
+  layout, sampling order, SD map). `program.with_ebm(...)` rebuilds the spec on
+  every `nrpt` / `nrpt_adaptive` call and every `discover_chain_count` probe;
+  the fresh spec object previously missed the `eqx.filter_jit` cache for
+  `_nrpt_rounds`, forcing a full recompile (~1 s at 484 nodes / 16 chains) even
+  though the round loop itself runs in microseconds. Repeated NRPT runs at the
+  same scale now compile once and reuse the executable (~40–60× faster steady
+  state); a cold `ising_sample` improves ~25–30%.
+
+### Changed
+
+- **Convergence-driven NRPT tuning (default)** — `nrpt_adaptive` and
+  `discover_chain_count` now auto-allocate their tuning budgets instead of
+  running fixed `n_tune` × `rounds_per_tune` phases. Each tuning phase runs only
+  as many rounds as the Λ estimate needs to settle (`round_batch` increments up
+  to the `rounds_per_tune` ceiling); the best-equalised schedule seen is kept
+  for production (not the noisy last one); and phases stop once the ladder is
+  equalised or its movement is at the Monte-Carlo floor for `phase_patience`
+  consecutive phases (capped at `n_tune`). `n_tune`/`rounds_per_tune` become
+  safety caps. Pass `adaptive_tuning=False` for the exact previous behaviour.
+  Evaluated across easy→hard Ising problems (chain/grid, ferro/frustrated):
+  adaptive matches the old fixed-full schedule's correctness (cold-chain
+  marginals vs exact enumeration) and round-trip efficiency while using fewer
+  tuning rounds, stays healthy where an under-budgeted fixed config does not,
+  and is insensitive to a bad initial β ladder. Counts are seed-deterministic
+  but problem-dependent — do not assume a fixed round/phase count.
+
+- **Per-block global-state layout** — when a block-Gibbs program is
+  "split-safe" (every free block reads each of its tail blocks from a single
+  block, e.g. a 2-coloured grid), each free block now occupies its own
+  global-state slot instead of all same-structure blocks being concatenated
+  into one array. A block update then replaces its slot outright rather than
+  `dynamic_update_slice`-ing into a shared array, removing the device-to-device
+  copies of the unchanged portion on every sweep (fewer, cheaper kernels).
+  Sampling output is bit-identical; programs that are not split-safe keep the
+  previous concatenated layout.
+
 ## [0.4.0] — 2026-06-12
 
 ### Added

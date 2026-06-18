@@ -18,6 +18,7 @@ from hamon.block_management import (
     block_state_to_global,
     from_global_state,
     scatter_block_to_global,
+    to_per_block_layout,
     verify_block_state,
 )
 from hamon.device import (
@@ -188,6 +189,9 @@ class BlockSamplingProgram(eqx.Module):
     _block_positions: list[Array]
     _block_output_sds: list[PyTree]
     _block_slice_starts: list[int | None]
+    # True when a free block is the sole occupant of its global slot, so the
+    # write-back replaces the whole slot rather than slicing into it.
+    _block_owns_slot: list[bool]
 
     def __init__(
         self,
@@ -209,10 +213,23 @@ class BlockSamplingProgram(eqx.Module):
             variables in your sampling program affect one another.
         """
 
-        self.gibbs_spec = gibbs_spec
         self.samplers = samplers
 
-        n_free_blocks = len(self.gibbs_spec.free_blocks)
+        # node -> index of the block (free or clamped) it belongs to. Under the
+        # per-block layout this index is also the block's global slot. Used to
+        # test split-safety below; the transform is applied once interaction_inds
+        # is known (the safety test depends on which neighbours each free block
+        # actually reads, not on the factor-level tail block).
+        node_to_block_idx = {
+            node: b_idx
+            for b_idx, block in enumerate(gibbs_spec.blocks)
+            for node in block.nodes
+        }
+        already_one_per_slot = all(
+            len(slot) <= 1 for slot in gibbs_spec.block_to_global_slice_spec
+        )
+
+        n_free_blocks = len(gibbs_spec.free_blocks)
         if len(self.samplers) != n_free_blocks:
             raise ValueError(
                 f"Expected {n_free_blocks} samplers, received {len(self.samplers)}"
@@ -244,6 +261,33 @@ class BlockSamplingProgram(eqx.Module):
             ]
             max_n_interactions.append(this_max_n)
 
+        # The per-block layout is safe iff, for every free block and every tail
+        # block it reads, all the neighbours that block actually gathers live in
+        # one block (hence one global slot). The factor-level tail block may span
+        # several blocks (e.g. both colours of a grid), but a single free block
+        # only reads its own neighbours, which for a valid colouring land in one
+        # block. When safe (and not already one block per slot), switch to the
+        # per-block layout so the write-back replaces whole slots instead of
+        # slicing into a shared array — the main win against dispatch-bound
+        # sweeps. Skipped models keep the default concatenated layout untouched.
+        def _block_split_safe(block_interact_inds) -> bool:
+            for ig, interact_inds in zip(interaction_groups, block_interact_inds):
+                for tail_block in ig.tail_nodes:
+                    used_slots = {
+                        node_to_block_idx.get(tail_block.nodes[ind], -1)
+                        for inds in interact_inds
+                        for ind in inds
+                    }
+                    if -1 in used_slots or len(used_slots) > 1:
+                        return False
+            return True
+
+        split_safe = all(_block_split_safe(b) for b in interaction_inds)
+        if split_safe and not already_one_per_slot:
+            gibbs_spec = to_per_block_layout(gibbs_spec)
+
+        self.gibbs_spec = gibbs_spec
+
         # Build per-block interaction data and global-state slicers.
         per_block_interactions = []
         per_block_interaction_active = []
@@ -264,15 +308,13 @@ class BlockSamplingProgram(eqx.Module):
                     n_nodes = len(block.nodes)
                     interaction_slices = np.zeros((n_nodes, n_interactions), dtype=int)
 
-                    global_inds = []
-                    global_slices = []
-                    for tail_block in interaction_group.tail_nodes:
-                        global_inds.append(
-                            gibbs_spec.node_global_location_map[tail_block.nodes[0]][0]
-                        )
-                        global_slices.append(
-                            np.zeros((n_nodes, n_interactions), dtype=int)
-                        )
+                    global_inds: list[int | None] = [
+                        None for _ in interaction_group.tail_nodes
+                    ]
+                    global_slices = [
+                        np.zeros((n_nodes, n_interactions), dtype=int)
+                        for _ in interaction_group.tail_nodes
+                    ]
 
                     active = np.zeros((n_nodes, n_interactions), dtype=bool)
                     for i, inds in enumerate(interact_inds):
@@ -283,10 +325,33 @@ class BlockSamplingProgram(eqx.Module):
                             for k, tail_block in enumerate(
                                 interaction_group.tail_nodes
                             ):
-                                s = gibbs_spec.node_global_location_map[
+                                loc = gibbs_spec.node_global_location_map[
                                     tail_block.nodes[ind]
-                                ][1]
-                                global_slices[k][i, j] = s
+                                ]
+                                global_slices[k][i, j] = loc[1]
+                                # The gather reads this block's neighbours from a
+                                # single slot, taken from a neighbour actually
+                                # read rather than tail_block.nodes[0]: the
+                                # factor's tail block may span slots, but the
+                                # neighbours one free block reads share a slot
+                                # (the split-safety check guarantees it; under
+                                # the default layout all slots coincide anyway).
+                                if global_inds[k] is None:
+                                    global_inds[k] = loc[0]
+                                elif global_inds[k] != loc[0]:
+                                    raise RuntimeError(
+                                        "Tail neighbours of a free block span "
+                                        "multiple global slots; cannot build a "
+                                        "single-slot gather."
+                                    )
+
+                    # Tail blocks with no active entries never set a slot; fall
+                    # back to the first tail node's slot.
+                    for k, tail_block in enumerate(interaction_group.tail_nodes):
+                        if global_inds[k] is None:
+                            global_inds[k] = gibbs_spec.node_global_location_map[
+                                tail_block.nodes[0]
+                            ][0]
 
                     interaction_slices = jnp.array(interaction_slices)
 
@@ -337,17 +402,25 @@ class BlockSamplingProgram(eqx.Module):
         block_positions = []
         block_output_sds = []
         block_slice_starts = []
+        block_owns_slot = []
         for block in gibbs_spec.free_blocks:
             sd_ind, start, locs = _block_layout(block, gibbs_spec)
             block_sd_inds.append(sd_ind)
             block_positions.append(jnp.array(locs))
             block_slice_starts.append(start)
+            # The block fully owns its slot when it is the only block there, so
+            # the write-back can replace the whole slot instead of slicing into
+            # it (the per-block-layout fast path in _run_blocks).
+            block_owns_slot.append(
+                len(gibbs_spec.block_to_global_slice_spec[sd_ind]) == 1
+            )
             template_sd = gibbs_spec.node_shape_struct[block.node_type]
             block_output_sds.append(_build_output_sd(block, template_sd))
         self._block_sd_inds = block_sd_inds
         self._block_positions = block_positions
         self._block_output_sds = block_output_sds
         self._block_slice_starts = block_slice_starts
+        self._block_owns_slot = block_owns_slot
 
 
 _State: TypeAlias = PyTree[Shaped[Array, "nodes ?*state"], "_State"]
@@ -532,6 +605,7 @@ def _run_blocks(
     block_sd_inds = program._block_sd_inds
     block_positions = program._block_positions
     block_slice_starts = program._block_slice_starts
+    block_owns_slot = program._block_owns_slot
 
     def body_fn(carry, _key):
         sampler_state, global_state = carry
@@ -560,11 +634,17 @@ def _run_blocks(
             ]
             for i in new_states:
                 sd_ind = block_sd_inds[i]
-                start = block_slice_starts[i]
                 new_global = list(global_state)
-                if start is not None:
+                if block_owns_slot[i]:
+                    # The block is the sole occupant of its slot (per-block
+                    # layout), so the whole slot is replaced — no slice/scatter
+                    # and no device copy of an unchanged neighbour. This is the
+                    # main lever against dispatch-bound Gibbs sweeps.
+                    new_global[sd_ind] = new_states[i]
+                elif block_slice_starts[i] is not None:
                     # Contiguous block: a static-offset dynamic_update_slice,
                     # which XLA fuses far better than a gather-index scatter.
+                    start = block_slice_starts[i]
                     new_global[sd_ind] = jax.tree.map(
                         lambda g, s: jax.lax.dynamic_update_slice_in_dim(
                             g, s, start, axis=0
@@ -771,3 +851,76 @@ def sample_states(
     )
 
     return results_out
+
+
+def sample_states_batched(
+    key: Key[Array, ""],
+    program: BlockSamplingProgram,
+    schedule: SamplingSchedule,
+    init_states_free: list[PyTree[Shaped[Array, "chains nodes ?*state"]]],
+    state_clamp: list[_State],
+    nodes_to_sample: list[Block],
+    *,
+    device: DeviceLike = "auto",
+) -> list[PyTree[Shaped[Array, "chains n_samples nodes ?*state"]]]:
+    """Run several independent single-chain draws in parallel via `jax.vmap`.
+
+    A single-chain `sample_states` launches one tiny kernel per Gibbs sweep, so
+    on an accelerator it is dispatch-bound (the GPU sits idle between launches).
+    Running ``n_chains`` chains under one `vmap` keeps the launch count the same
+    while each kernel does ``n_chains`` times the work, so the same wall time
+    yields ``n_chains`` times the samples — or, splitting a fixed sample budget
+    across chains, fewer sample-collection iterations for the same total.
+
+    The chains are independent (separate keys) and share the program, schedule
+    and clamped state. Device routing happens once here with the full
+    ``n_chains × free nodes`` work score; the inner `sample_with_observation`
+    calls see tracers, so their own routing is a no-op.
+
+    **Arguments:**
+
+    - `init_states_free`: per-free-block states with a leading ``n_chains`` axis.
+    - other arguments: as in [`hamon.sample_states`][].
+
+    **Returns:**
+
+    - A list parallel to `nodes_to_sample`; each entry has shape
+      ``(n_chains, schedule.n_samples, ...)``.
+    """
+    leaves = jax.tree.leaves(init_states_free)
+    n_chains = int(leaves[0].shape[0]) if leaves else 1
+
+    dev = resolve_entry_device(
+        device,
+        n_chains=n_chains,
+        n_nodes=free_node_count(program),
+        arrays=(init_states_free, state_clamp, key),
+    )
+    if dev is not None:
+        key, program, init_states_free, state_clamp = tree_device_put(
+            (key, program, init_states_free, state_clamp), dev
+        )
+    device_ctx = (
+        jax.default_device(dev) if dev is not None else contextlib.nullcontext()
+    )
+
+    f_observe = StateObserver(nodes_to_sample)
+    carry_init = f_observe.init()
+    keys = jax.random.split(key, n_chains)
+    n_free = len(program.gibbs_spec.free_blocks)
+
+    def _one_chain(k, init_free):
+        _, results = sample_with_observation(
+            k,
+            program,
+            schedule,
+            init_free,
+            state_clamp,
+            carry_init,
+            f_observe,
+            device=None,
+        )
+        return results
+
+    with device_ctx:
+        return jax.vmap(_one_chain, in_axes=(0, [0] * n_free))(keys, init_states_free)
