@@ -30,6 +30,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Convergence-driven NRPT tuning (default)** — `nrpt_adaptive` and
+  `discover_chain_count` now auto-allocate their tuning budgets instead of
+  running fixed `n_tune` × `rounds_per_tune` phases. Each tuning phase runs only
+  as many rounds as the Λ estimate needs to settle (`round_batch` increments up
+  to the `rounds_per_tune` ceiling); the best-equalised schedule seen is kept
+  for production (not the noisy last one); and phases stop once the ladder is
+  equalised or its movement is at the Monte-Carlo floor for `phase_patience`
+  consecutive phases (capped at `n_tune`). `n_tune`/`rounds_per_tune` become
+  safety caps. Pass `adaptive_tuning=False` for the exact previous behaviour.
+  Evaluated across easy→hard Ising problems (chain/grid, ferro/frustrated):
+  adaptive matches the old fixed-full schedule's correctness (cold-chain
+  marginals vs exact enumeration) and round-trip efficiency while using fewer
+  tuning rounds, stays healthy where an under-budgeted fixed config does not,
+  and is insensitive to a bad initial β ladder. Counts are seed-deterministic
+  but problem-dependent — do not assume a fixed round/phase count.
+
 - **Per-block global-state layout** — when a block-Gibbs program is
   "split-safe" (every free block reads each of its tail blocks from a single
   block, e.g. a 2-coloured grid), each free block now occupies its own

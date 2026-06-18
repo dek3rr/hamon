@@ -849,6 +849,83 @@ def nrpt(
 # Convenience: NRPT with iterative schedule tuning
 # ---------------------------------------------------------------------------
 
+# Default schedule-movement floor used by adaptive tuning when the caller leaves
+# tune_tol unset. In β units: a schedule update that moves every β by less than
+# this is treated as "settled" (at the Monte-Carlo noise floor — the ladder
+# keeps jittering by ~this much even when well tuned, so a much tighter value is
+# never reached). Pair with the equalization check, which catches already-good
+# schedules whose β jitter alone never crosses this floor.
+_DEFAULT_TUNE_TOL = 0.02
+
+
+def _tune_phase_adaptive_rounds(
+    run_phase,
+    key,
+    betas,
+    states,
+    *,
+    round_batch,
+    min_rounds,
+    max_rounds,
+    lambda_rtol,
+    stable_k,
+):
+    """Run one schedule-tuning phase for an adaptive number of rounds.
+
+    Instead of a fixed ``rounds_per_tune``, run ``run_phase`` in fixed-size
+    ``round_batch`` batches (each a separate ``nrpt`` call that reuses the same
+    compiled round loop — see the BlockSpec value-equality cache), threading the
+    chain ``states`` forward and pooling the integer ``accepted``/``attempted``
+    swap counters across batches. Stop once the pooled barrier estimate
+    ``Λ = sum(rejection_rates)`` is stable — ``|ΔΛ|/Λ < lambda_rtol`` for
+    ``stable_k`` consecutive batches — past a ``min_rounds`` floor, or at the
+    ``max_rounds`` ceiling. Pooling reduces the estimate's Monte-Carlo variance
+    (var ~ r(1-r)/n_attempts), so the returned ``rejection_rates`` give
+    ``optimize_schedule`` a clean signal rather than a noisy single-batch one.
+
+    Round-trip continuity is intentionally not preserved across batches (each
+    ``nrpt`` call resets the index process); tuning only needs rejection rates.
+    The single continuous production run keeps round-trip tracking.
+
+    **Returns** ``(states, pooled_stats, rounds_used)`` where ``pooled_stats``
+    mirrors an ``nrpt`` stats dict over the pooled counters.
+    """
+    acc_total = None
+    att_total = None
+    rounds_used = 0
+    lambda_prev = None
+    stable_count = 0
+
+    while rounds_used < max_rounds:
+        key, subkey = jax.random.split(key)
+        batch = min(round_batch, max_rounds - rounds_used)
+        states, stats = run_phase(subkey, betas, states, batch)
+        acc_total = stats["accepted"] if acc_total is None else acc_total + stats["accepted"]
+        att_total = stats["attempted"] if att_total is None else att_total + stats["attempted"]
+        rounds_used += batch
+
+        rate = acc_total.astype(betas.dtype) / jnp.maximum(att_total, 1).astype(
+            betas.dtype
+        )
+        lambda_cur = float(jnp.sum(1.0 - rate))
+        if rounds_used >= min_rounds and lambda_prev is not None:
+            rel = abs(lambda_cur - lambda_prev) / max(lambda_cur, 1e-9)
+            stable_count = stable_count + 1 if rel < lambda_rtol else 0
+            if stable_count >= stable_k:
+                break
+        lambda_prev = lambda_cur
+
+    rate = acc_total.astype(betas.dtype) / jnp.maximum(att_total, 1).astype(betas.dtype)
+    acceptance_rate = jnp.where(att_total > 0, rate, 0.0)
+    pooled_stats = {
+        "accepted": acc_total,
+        "attempted": att_total,
+        "acceptance_rate": acceptance_rate,
+        "rejection_rates": 1.0 - acceptance_rate,
+        "betas": betas,
+    }
+    return states, pooled_stats, rounds_used
+
 
 def nrpt_adaptive(
     key: jax.Array,
@@ -866,24 +943,50 @@ def nrpt_adaptive(
     ebm: AbstractEBM | None = None,
     program: BlockSamplingProgram | None = None,
     observer: AbstractNRPTObserver | None = None,
+    adaptive_tuning: bool = True,
     tune_tol: float | None = None,
+    equalize_tol: float = 0.05,
+    phase_patience: int = 2,
+    min_tune_phases: int = 1,
+    round_batch: int = 50,
+    min_rounds_per_tune: int = 50,
+    round_stable_k: int = 2,
+    lambda_rtol: float = 0.05,
     device: DeviceLike = "auto",
 ) -> tuple[list, dict]:
     """NRPT with iterative schedule optimization (Algorithm 4).
 
-    Runs n_tune adaptation phases, each of rounds_per_tune rounds, updating
-    the β schedule after each phase. Then runs the final n_rounds production
-    phase with the optimized schedule. Each phase logs one INFO line
+    Adapts the β schedule over tuning phases, then runs the final ``n_rounds``
+    production phase with the optimized schedule. Each phase logs one INFO line
     (Λ, mean acceptance, schedule movement) so long runs are not silent.
 
     Instead of providing ``ebm_factory`` and ``program_factory``, you can pass
     a template ``ebm`` and ``program`` and the factories will be built
     internally using ``ebm.with_beta()`` and ``program.with_ebm()``.
 
-    When ``tune_tol`` is set, tuning stops early once the schedule update
-    moves every β by less than ``tune_tol`` — remaining phases are skipped
-    and production starts immediately. The default (``None``) always runs
-    all ``n_tune`` phases.
+    **Convergence-driven tuning (default, ``adaptive_tuning=True``):** budgets
+    are chosen automatically, so callers need not guess them. Each phase runs as
+    many rounds as needed for the Λ estimate to settle (between
+    ``min_rounds_per_tune`` and the ``rounds_per_tune`` ceiling, in
+    ``round_batch`` increments — see ``_tune_phase_adaptive_rounds``), giving a
+    low-variance rejection-rate estimate. The schedule with the **best**
+    (lowest-spread) rejection rates seen across phases is kept for production —
+    not the last, which can be noisier. Tuning stops once the schedule is
+    well-equalized (``std(rejection_rates) < equalize_tol``) OR has settled
+    (``max|Δβ|`` below the effective ``tune_tol`` — its Monte-Carlo floor) for
+    ``phase_patience`` consecutive phases, after at least ``min_tune_phases``,
+    capped at ``n_tune``. (``max|Δβ|`` alone is not a reliable convergence
+    signal: it plateaus at a problem-dependent noise floor rather than going to
+    zero, so the equalization check is what stops already-good schedules.) When
+    ``tune_tol`` is left ``None`` it defaults to ``_DEFAULT_TUNE_TOL`` here.
+    Counts are deterministic for a given seed but problem-dependent — do not
+    assume a fixed round/phase count.
+
+    **Legacy mode (``adaptive_tuning=False``):** runs exactly ``n_tune`` phases
+    of exactly ``rounds_per_tune`` rounds and uses the last schedule.
+    ``tune_tol`` then behaves as the optional early-stop it always was (``None``
+    ⇒ run all ``n_tune`` phases). ``n_tune`` and ``rounds_per_tune`` act as
+    safety caps in both modes.
 
     Returns ``(states, stats)`` where stats includes tuning history in
     ``stats["tuning_history"]`` (each entry records ``max_beta_shift``).
@@ -935,43 +1038,107 @@ def nrpt_adaptive(
     current_states = init_states
     tuning_history = []
 
-    for tune_iter in range(n_tune):
+    # In adaptive mode an unset tune_tol means "use the default β-movement
+    # floor"; in legacy mode an unset tune_tol means "never early-stop".
+    effective_tol = (
+        (tune_tol if tune_tol is not None else _DEFAULT_TUNE_TOL)
+        if adaptive_tuning
+        else tune_tol
+    )
+
+    # Keep the best-equalized schedule actually evaluated (adaptive mode), so a
+    # noisy late phase can't hand a worse ladder to production.
+    best_betas = betas
+    best_quality = float("inf")
+    stop_streak = 0
+
+    phase = 0
+    while phase < n_tune:
         key, subkey = jax.random.split(key)
-        states, stats = _run_phase(subkey, betas, current_states, rounds_per_tune)
+        if adaptive_tuning:
+            current_states, stats, rounds_used = _tune_phase_adaptive_rounds(
+                _run_phase,
+                subkey,
+                betas,
+                current_states,
+                round_batch=round_batch,
+                min_rounds=min_rounds_per_tune,
+                max_rounds=rounds_per_tune,
+                lambda_rtol=lambda_rtol,
+                stable_k=round_stable_k,
+            )
+        else:
+            current_states, stats = _run_phase(
+                subkey, betas, current_states, rounds_per_tune
+            )
+            rounds_used = rounds_per_tune
+
+        rej = stats["rejection_rates"]
+        # Equalization quality of the schedule just evaluated: lower spread of
+        # per-pair rejection rates = better tuned. Drives keep-best and the
+        # equalization stop.
+        quality = float(jnp.std(rej))
         old_betas = betas
-        betas = optimize_schedule(stats["rejection_rates"], betas)
-        current_states = states
+        if adaptive_tuning and quality < best_quality:
+            best_quality = quality
+            best_betas = old_betas
+        betas = optimize_schedule(rej, betas)
 
         max_beta_shift = float(jnp.max(jnp.abs(betas - old_betas)))
-        phase_lambda = float(jnp.sum(stats["rejection_rates"]))
+        phase_lambda = float(jnp.sum(rej))
         tuning_history.append(
             {
-                "iteration": tune_iter,
+                "iteration": phase,
                 "betas": old_betas,
-                "rejection_rates": stats["rejection_rates"],
+                "rejection_rates": rej,
                 "acceptance_rate": stats["acceptance_rate"],
                 "Lambda": phase_lambda,
                 "max_beta_shift": max_beta_shift,
+                "rej_std": quality,
+                "rounds_used": rounds_used,
             }
         )
+        phase += 1
         logger.info(
-            "nrpt_adaptive tune %d/%d: Lambda=%.3f mean_acceptance=%.3f max|dbeta|=%.4g",
-            tune_iter + 1,
+            "nrpt_adaptive tune %d/%d: Lambda=%.3f mean_acceptance=%.3f "
+            "rej_std=%.4g max|dbeta|=%.4g rounds=%d",
+            phase,
             n_tune,
             phase_lambda,
             float(jnp.mean(stats["acceptance_rate"])),
+            quality,
             max_beta_shift,
+            rounds_used,
         )
 
-        if tune_tol is not None and max_beta_shift < tune_tol:
+        if adaptive_tuning:
+            # Combined stop: well-equalized OR schedule movement at its noise
+            # floor, sustained for phase_patience consecutive phases.
+            equalized = quality < equalize_tol
+            settled = effective_tol is not None and max_beta_shift < effective_tol
+            stop_streak = stop_streak + 1 if (equalized or settled) else 0
+            if phase >= min_tune_phases and stop_streak >= phase_patience:
+                logger.info(
+                    "nrpt_adaptive: schedule converged after %d phase(s) "
+                    "(rej_std=%.4g, max|dbeta|=%.4g); skipping remaining tuning",
+                    phase,
+                    quality,
+                    max_beta_shift,
+                )
+                break
+        elif effective_tol is not None and max_beta_shift < effective_tol:
+            # Legacy early-stop (unchanged semantics).
             logger.info(
                 "nrpt_adaptive: schedule converged after %d phase(s) "
                 "(max|dbeta|=%.4g < tune_tol=%.4g); skipping remaining tuning",
-                tune_iter + 1,
+                phase,
                 max_beta_shift,
-                tune_tol,
+                effective_tol,
             )
             break
+
+    if adaptive_tuning:
+        betas = best_betas
 
     # Production run
     key, subkey = jax.random.split(key)
@@ -1006,6 +1173,7 @@ def discover_chain_count(
     *,
     ebm: AbstractEBM | None = None,
     program: BlockSamplingProgram | None = None,
+    tune_tol: float | None = None,
     device: DeviceLike = "auto",
 ) -> dict:
     """Iteratively discover the right chain count for a given target acceptance.
@@ -1101,9 +1269,12 @@ def discover_chain_count(
         programs = source.programs_for_init(n_current, ebms)
         inits = init_factory(n_current, ebms, programs)
 
-        # Early iterations: cheap probes. Final: full budget.
+        # Cheap Λ estimate on early iterations, full estimate on the final one.
+        # Schedule tuning inside each probe is adaptive: it auto-allocates phases
+        # and per-phase rounds (up to n_tune_per_probe / rounds_per_probe) and
+        # stops once the ladder is equalized, so wrong-N early probes stay cheap
+        # without the old hand-tuned //2 / //3 heuristics.
         is_early = iteration < max_iters - 1
-        probe_tune = max(2, n_tune_per_probe // 2) if is_early else n_tune_per_probe
         probe_rounds = max(50, rounds_per_probe // 3) if is_early else rounds_per_probe
 
         # Forward whichever route the caller used; nrpt_adaptive re-dispatches
@@ -1118,8 +1289,11 @@ def discover_chain_count(
             n_rounds=probe_rounds,
             gibbs_steps_per_round=gibbs_steps_per_round,
             initial_betas=betas,
-            n_tune=probe_tune,
-            rounds_per_tune=probe_rounds,
+            n_tune=n_tune_per_probe,
+            rounds_per_tune=rounds_per_probe,
+            adaptive_tuning=True,
+            tune_tol=tune_tol,
+            lambda_rtol=lambda_rtol,
             ebm=ebm,
             program=program,
             device=dev,

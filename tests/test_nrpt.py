@@ -966,6 +966,10 @@ class TestStackedInitStates:
 
 
 class TestTuneEarlyStop:
+    # These exercise the *legacy* (adaptive_tuning=False) tune_tol early-stop:
+    # a fixed n_tune phases with an immediate break when max|Δβ| < tune_tol.
+    # The adaptive default has different (keep-best + patience) semantics, tested
+    # in test_adaptive_rounds.py.
     def _run(self, tune_tol):
         betas = jnp.array([0.5, 1.0, 1.5])
         nodes, _, fb, ebms, progs = _make_ising(4, [float(b) for b in betas])
@@ -981,6 +985,7 @@ class TestTuneEarlyStop:
             initial_betas=betas,
             n_tune=4,
             rounds_per_tune=10,
+            adaptive_tuning=False,
             tune_tol=tune_tol,
         )
         return stats
