@@ -30,6 +30,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`discover_chain_count` rewritten with an extrapolation-based policy** —
+  replaces the fixed "step halfway toward the max-Λ recommendation" loop. It now takes a
+  cheap, ceiling-independent pilot probe (so `initial_n` defaults to `None` — no
+  initial guess needed), extrapolates Λ to N→∞ from the two latest probes,
+  recommends N with a margin sized to the observed rejection-rate spread and
+  barrier growth, and returns that recommendation directly (no monotone ratchet
+  up to the last probed N, which previously caused systematic overshoot). On a
+  surrogate suite of varied barriers this converges in ~2 probes and roughly
+  doubles the fraction of problems that land within tolerance of the target
+  acceptance, without undershooting.
 - **Convergence-driven NRPT tuning (default)** — `nrpt_adaptive` and
   `discover_chain_count` now auto-allocate their tuning budgets instead of
   running fixed `n_tune` × `rounds_per_tune` phases. Each tuning phase runs only
