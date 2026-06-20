@@ -330,8 +330,65 @@ def _make_swap_branch(
 # ---------------------------------------------------------------------------
 
 
+def _pchip_slopes(h: jax.Array, delta: jax.Array) -> jax.Array:
+    """Fritsch–Carlson (PCHIP) monotone-cubic tangents at the knots.
+
+    ``h`` are the knot spacings and ``delta`` the secant slopes (both length
+    ``n - 1`` for ``n`` knots). Interior tangents use the weighted harmonic mean
+    of the two adjacent secants — zeroed at local extrema — which guarantees the
+    cubic Hermite interpolant is monotone; the endpoints use Fritsch's one-sided
+    estimate with the standard clamping. Returns ``n`` tangents.
+    """
+    dtype = delta.dtype
+    h0, h1 = h[:-1], h[1:]
+    d0, d1 = delta[:-1], delta[1:]
+    w1 = 2.0 * h1 + h0
+    w2 = h1 + 2.0 * h0
+    same_sign = (d0 * d1) > 0
+    # Guard the unused (opposite-sign) branch against division by zero.
+    safe0 = jnp.where(d0 == 0, 1.0, d0)
+    safe1 = jnp.where(d1 == 0, 1.0, d1)
+    denom = w1 / safe0 + w2 / safe1
+    interior = jnp.where(same_sign, (w1 + w2) / jnp.where(same_sign, denom, 1.0), 0.0)
+
+    def _edge(hh0, hh1, m0, m1):
+        d = ((2.0 * hh0 + hh1) * m0 - hh0 * m1) / (hh0 + hh1)
+        d = jnp.where(jnp.sign(d) != jnp.sign(m0), 0.0, d)
+        clamp = (jnp.sign(m0) != jnp.sign(m1)) & (jnp.abs(d) > 3.0 * jnp.abs(m0))
+        return jnp.where(clamp, 3.0 * m0, d)
+
+    left = _edge(h[0], h[1], delta[0], delta[1]).astype(dtype)
+    right = _edge(h[-1], h[-2], delta[-1], delta[-2]).astype(dtype)
+    return jnp.concatenate([left[None], interior.astype(dtype), right[None]])
+
+
+def _pchip_interp(xq: jax.Array, x: jax.Array, y: jax.Array) -> jax.Array:
+    """Evaluate the Fritsch–Carlson monotone cubic through ``(x, y)`` at ``xq``."""
+    h = jnp.maximum(x[1:] - x[:-1], jnp.finfo(x.dtype).eps)  # eps guards ties
+    delta = (y[1:] - y[:-1]) / h
+    d = _pchip_slopes(h, delta)
+    n = x.shape[0]
+    idx = jnp.clip(jnp.searchsorted(x, xq, side="right") - 1, 0, n - 2)
+    hx = h[idx]
+    t = (xq - x[idx]) / hx
+    t2 = t * t
+    t3 = t2 * t
+    h00 = 2.0 * t3 - 3.0 * t2 + 1.0
+    h10 = t3 - 2.0 * t2 + t
+    h01 = -2.0 * t3 + 3.0 * t2
+    h11 = t3 - t2
+    return h00 * y[idx] + h10 * hx * d[idx] + h01 * y[idx + 1] + h11 * hx * d[idx + 1]
+
+
 def optimize_schedule(rejection_rates: jax.Array, betas: jax.Array) -> jax.Array:
     """Equalize per-pair rejection rates by redistributing β values.
+
+    Estimates the cumulative communication barrier Λ(β_k) = Σ_{i≤k} r_i, then
+    places the new ladder at a regular grid of Λ (the equi-acceptance schedule of
+    Syed et al. 2021, Algorithm 2: β*_k = Λ⁻¹(k/N · Λ)). The inverse Λ⁻¹ is taken
+    as a **Fritsch–Carlson monotone cubic** of β against the cumulative barrier —
+    smoother than the previous piecewise-linear inverse while staying monotone
+    (no overshoot), which the paper recommends over linear interpolation.
 
     The result keeps the dtype of ``betas`` so repeated tuning phases do not
     drift to float64 when x64 is enabled."""
@@ -339,7 +396,10 @@ def optimize_schedule(rejection_rates: jax.Array, betas: jax.Array) -> jax.Array
     rej = jnp.asarray(rejection_rates, dtype=betas.dtype)
     cum = jnp.concatenate([jnp.zeros(1, dtype=betas.dtype), jnp.cumsum(rej)])
     target = jnp.linspace(0.0, cum[-1], len(betas), dtype=betas.dtype)
-    new = jnp.interp(target, cum, betas)
+    if betas.shape[0] >= 3:
+        new = _pchip_interp(target, cum, betas)
+    else:  # fewer than 3 knots: monotone cubic degenerates to linear
+        new = jnp.interp(target, cum, betas)
     return new.at[0].set(betas[0]).at[-1].set(betas[-1])
 
 
@@ -1171,7 +1231,7 @@ def discover_chain_count(
     clamp_state: list | None = None,
     beta_range: tuple[float, float] = (0.0, 1.0),
     gibbs_steps_per_round: int = 0,
-    initial_n: int = 8,
+    initial_n: int | None = None,
     target_acceptance: float = 0.6,
     rounds_per_probe: int = 200,
     n_tune_per_probe: int = 4,
@@ -1183,25 +1243,27 @@ def discover_chain_count(
     ebm: AbstractEBM | None = None,
     program: BlockSamplingProgram | None = None,
     tune_tol: float | None = None,
+    safety_margin: float = 0.05,
     device: DeviceLike = "auto",
 ) -> dict:
     """Iteratively discover the right chain count for a given target acceptance.
 
-    The bootstrapping problem: Λ estimated with too few chains is biased low
-    because the schedule can't resolve the peak in λ(β). Each iteration:
+    Follows the N-tuning method of Syed et al. (2021): the global communication
+    barrier Λ is a schedule invariant (Σ rejection_rates ≈ Λ at any chain count),
+    so it is estimated at a single fixed N from a schedule-tuned run rather than
+    searched for by probing many chain counts.
 
-    1. Build N chains, run a short schedule optimization to estimate Λ.
-    2. Update the running max-Λ (conservative: never underestimate).
-    3. Compute N_rec from max-Λ, step halfway toward it.
-    4. Stop when EITHER:
-       - N_rec ≈ N (chain count converged), OR
-       - Λ has stabilized (|ΔΛ/Λ| < lambda_rtol for 2 consecutive iters)
+    1. Estimate Λ̂ = Σ rejection_rates at the current N (each probe runs
+       ``nrpt_adaptive``, which tunes the schedule toward equi-acceptance).
+    2. Recommend N* = ceil(Λ̂·(1 + safety_margin) / r_target) + 1 — the
+       round-trip-optimal 2Λ + 1 chains at r* = 1/2 (target_acceptance = 0.5).
+    3. Iterate this fixed point (re-estimate Λ̂ at N*) until N* stops moving.
 
-    Using max-Λ prevents the "overshoot then drop" pattern where a noisy
-    high estimate at iteration k inflates the recommendation, then a lower
-    estimate at k+1 can't undo the damage. Stabilization detection catches
-    the case where Λ is already well-resolved but N_rec still differs from
-    N by a few chains.
+    Because Λ̂ comes from the current probe (not a running maximum), the result is
+    essentially independent of the starting N — discovery from ``initial_n=None``
+    (a small pilot) and from a reasonable guess converge to the same count. With
+    no ``initial_n`` the first estimate is taken at a cheap pilot of
+    ``min_chains + 16`` chains.
 
     Instead of providing ``ebm_factory`` and ``program_factory``, you can pass
     a template ``ebm`` and ``program`` and the factories will be built
@@ -1219,14 +1281,19 @@ def discover_chain_count(
         clamp_state: clamped block states
         beta_range: (β_min, β_max) for the temperature range
         gibbs_steps_per_round: Gibbs sweeps between swap attempts
-        initial_n: starting chain count
+        initial_n: starting chain count. The default ``None`` estimates a
+            starting point from a cheap pilot probe (no initial guess needed);
+            pass an int to start there instead.
         target_acceptance: desired per-pair swap acceptance rate
-        rounds_per_probe: rounds for the final production probe
+        rounds_per_probe: rounds per probe (and for the final production probe)
         n_tune_per_probe: schedule tuning iterations for the final probe
         max_iters: maximum discovery iterations
         min_chains: floor on chain count
         max_chains: ceiling on chain count
         lambda_rtol: relative tolerance for Λ stabilization (default 5%)
+        safety_margin: small fractional pad on N* (default 0.05) covering residual
+            barrier bias and ELE-assumption violations; 0.0 gives the bare
+            round-trip-optimal count
 
     Returns:
         dict with keys:
@@ -1235,8 +1302,8 @@ def discover_chain_count(
             Lambda: conservative (max) barrier estimate
             Lambda_raw: last raw estimate (may be lower than Lambda)
             target_acceptance: the target used
-            converged_reason: "chain_count" | "lambda_stable" | "no_progress" | "max_iters"
-            history: list of per-iteration dicts
+            converged_reason: "chain_count" | "lambda_stable" | "max_iters"
+            history: list of per-probe dicts
     """
     source = _ChainSource(ebm_factory, program_factory, ebm, program)
 
@@ -1245,59 +1312,57 @@ def discover_chain_count(
     if clamp_state is None:
         clamp_state = []
 
-    r_target = 1.0 - target_acceptance
-    n_current = initial_n
-    history = []
-    best_betas = None
-    lambda_max = 0.0
-    lambda_raw = 0.0
-    lambda_prev = 0.0
-    stable_count = 0
-    converged_reason = "max_iters"
+    r_target = max(1.0 - target_acceptance, 1e-3)
+    min_chains = int(min_chains)
+    max_chains = int(max_chains)
+    max_probes = int(max_iters)
+
+    def _clamp(n):
+        return max(min_chains, min(max_chains, int(n)))
 
     # Resolve the device once for all probes. Chain counts vary across probes
     # (each recompiles regardless), but a single device avoids transfer thrash;
-    # the conservative score uses the starting chain count. Borderline
+    # the conservative score uses the (pilot) starting chain count. Borderline
     # workloads can pass an explicit device.
+    _pilot_n = initial_n if initial_n is not None else min_chains + 16
     _meta_betas = jnp.linspace(beta_range[0], beta_range[1], 1)
     dev = resolve_entry_device(
         device,
-        n_chains=initial_n,
+        n_chains=_clamp(_pilot_n),
         n_nodes=source.metadata_free_nodes(_meta_betas, device),
         arrays=(key,),
     )
 
-    for iteration in range(max_iters):
-        betas = jnp.linspace(beta_range[0], beta_range[1], n_current)
+    history: list[dict[str, Any]] = []
+    probed: dict[int, dict[str, Any]] = {}
 
-        key, k_probe = jax.random.split(key)
-        # init_factory receives a programs list for free-block extraction; on
-        # the template route every entry is the template program (identical
+    def probe(n: int) -> dict[str, Any]:
+        """One schedule-tuned NRPT probe at ``n`` chains, cached by ``n``."""
+        nonlocal key
+        n = _clamp(n)
+        if n in probed:
+            return probed[n]
+        betas0 = jnp.linspace(beta_range[0], beta_range[1], n)
+        # init_factory receives a programs list for free-block extraction; on the
+        # template route every entry is the template program (identical
         # gibbs_spec) and no per-chain programs are constructed.
-        ebms = source.ebms_for_init(betas)
-        programs = source.programs_for_init(n_current, ebms)
-        inits = init_factory(n_current, ebms, programs)
-
-        # Cheap Λ estimate on early iterations, full estimate on the final one.
-        # Schedule tuning inside each probe is adaptive: it auto-allocates phases
-        # and per-phase rounds (up to n_tune_per_probe / rounds_per_probe) and
-        # stops once the ladder is equalized, so wrong-N early probes stay cheap
-        # without the old hand-tuned //2 / //3 heuristics.
-        is_early = iteration < max_iters - 1
-        probe_rounds = max(50, rounds_per_probe // 3) if is_early else rounds_per_probe
-
+        ebms = source.ebms_for_init(betas0)
+        programs = source.programs_for_init(n, ebms)
+        inits = init_factory(n, ebms, programs)
+        key, k_probe = jax.random.split(key)
         # Forward whichever route the caller used; nrpt_adaptive re-dispatches
-        # through its own _ChainSource. The concrete device (or None) bypasses
-        # its heuristic, so probes never flip devices.
+        # through its own _ChainSource. The concrete device (or None) bypasses its
+        # heuristic, so probes never flip devices. Tuning is adaptive, so a
+        # wrong-N probe still self-limits its rounds.
         _, stats = nrpt_adaptive(
             k_probe,
             ebm_factory,
             program_factory,
             inits,
             clamp_state,
-            n_rounds=probe_rounds,
+            n_rounds=rounds_per_probe,
             gibbs_steps_per_round=gibbs_steps_per_round,
-            initial_betas=betas,
+            initial_betas=betas0,
             n_tune=n_tune_per_probe,
             rounds_per_tune=rounds_per_probe,
             adaptive_tuning=True,
@@ -1307,59 +1372,96 @@ def discover_chain_count(
             program=program,
             device=dev,
         )
+        rej = np.asarray(stats["rejection_rates"])
+        out: dict[str, Any] = {
+            "n": n,
+            "Lambda_raw": float(np.sum(rej)),
+            "rejection_rates": rej,
+            "betas": np.asarray(stats["betas"]),
+        }
+        probed[n] = out
+        return out
 
-        lambda_raw = float(jnp.sum(stats["rejection_rates"]))
+    if max_probes <= 0:
+        n_final = _clamp(initial_n if initial_n is not None else min_chains)
+        return {
+            "n_chains": int(n_final),
+            "betas": np.asarray(jnp.linspace(beta_range[0], beta_range[1], n_final)),
+            "Lambda": 0.0,
+            "Lambda_raw": 0.0,
+            "target_acceptance": target_acceptance,
+            "converged_reason": "max_iters",
+            "history": history,
+        }
+
+    # --- N tuning (Syed et al. 2021, Sec. "Tuning N") -----------------------
+    # Λ is a schedule invariant: Λ̂ = Σ rejection_rates ≈ Λ at any chain count
+    # (each probe runs nrpt_adaptive, which tunes the schedule to equi-
+    # acceptance). Estimate Λ̂ at the current N, set N* = ceil(Λ̂·margin/r) + 1
+    # (= 2Λ + 1 at r* = 1/2), and iterate this fixed point until N* settles.
+    # Using the current-N estimate (not a running maximum) makes the result
+    # independent of the starting N.
+    margin = 1.0 + max(0.0, float(safety_margin))
+    n = _clamp(initial_n) if initial_n is not None else _clamp(min_chains + 16)
+    lambda_raw = 0.0  # last current-N barrier estimate; drives N*
+    lambda_max = 0.0  # running max, reported as the conservative Λ
+    best_betas = None
+    n_star = n
+    seen: set[int] = set()
+    reason = "max_iters"
+
+    for _ in range(max_probes):
+        res = probe(n)
+        n = res["n"]
+        lambda_raw = float(res["Lambda_raw"])
         lambda_max = max(lambda_max, lambda_raw)
-        best_betas = stats["betas"]
-
-        n_recommended = max(min_chains, int(np.ceil(lambda_max / max(r_target, 0.01))))
-        n_recommended = min(n_recommended, max_chains)
-
+        best_betas = res["betas"]
+        seen.add(n)
+        n_star = _clamp(int(np.ceil(lambda_raw * margin / r_target)) + 1)
         history.append(
             {
-                "iteration": iteration,
-                "n": n_current,
+                "iteration": len(history),
+                "n": n,
                 "Lambda_raw": lambda_raw,
                 "Lambda_max": lambda_max,
-                "n_recommended": n_recommended,
-                "rejection_rates": np.array(stats["rejection_rates"]),
-                "betas": np.array(stats["betas"]),
+                "n_recommended": n_star,
+                "rejection_rates": res["rejection_rates"],
+                "betas": res["betas"],
+            }
+        )
+        if abs(n_star - n) <= 1:
+            reason = "chain_count"
+            break
+        if n_star in seen:  # 2-cycle: the barrier estimate has settled
+            reason = "lambda_stable"
+            n_star = max(n_star, n)  # conservative against undershoot
+            break
+        n = n_star
+
+    # Produce the returned schedule at the final count (reuse a cached probe).
+    n_final = _clamp(n_star)
+    final_stats = probed[n_final] if n_final in probed else probe(n_final)
+    best_betas = final_stats["betas"]
+    lambda_max = max(lambda_max, float(final_stats["Lambda_raw"]))
+    if n_final not in seen:
+        history.append(
+            {
+                "iteration": len(history),
+                "n": int(n_final),
+                "Lambda_raw": float(final_stats["Lambda_raw"]),
+                "Lambda_max": float(lambda_max),
+                "n_recommended": int(n_final),
+                "rejection_rates": final_stats["rejection_rates"],
+                "betas": final_stats["betas"],
             }
         )
 
-        if abs(n_recommended - n_current) <= 1:
-            converged_reason = "chain_count"
-            break
-
-        if iteration > 0 and lambda_max > 0:
-            rel_change = abs(lambda_raw - lambda_prev) / lambda_max
-            if rel_change < lambda_rtol:
-                stable_count += 1
-            else:
-                stable_count = 0
-            if stable_count >= 2:
-                n_current = n_recommended
-                converged_reason = "lambda_stable"
-                break
-
-        lambda_prev = lambda_raw
-
-        step = int(np.ceil((n_recommended - n_current) / 2))
-        n_next = n_current + step
-        n_next = max(min_chains, min(n_next, max_chains))
-
-        if n_next == n_current:
-            converged_reason = "no_progress"
-            break
-
-        n_current = n_next
-
     return {
-        "n_chains": n_current,
+        "n_chains": int(n_final),
         "betas": best_betas,
-        "Lambda": lambda_max,
-        "Lambda_raw": lambda_raw,
+        "Lambda": float(lambda_max),
+        "Lambda_raw": float(lambda_raw),
         "target_acceptance": target_acceptance,
-        "converged_reason": converged_reason,
+        "converged_reason": reason,
         "history": history,
     }

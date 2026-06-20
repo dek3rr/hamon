@@ -30,6 +30,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`discover_chain_count` reworked to follow Syed et al. (2021) N-tuning** —
+  replaces the fixed "step halfway toward the max-Λ recommendation" loop. The
+  global barrier Λ is a schedule invariant (`Σ rejection_rates ≈ Λ` at any chain
+  count), so it is estimated at a single fixed N from a schedule-tuned
+  `nrpt_adaptive` run and the optimal count taken directly as
+  `N* = ceil(Λ̂·(1 + safety_margin) / r_target) + 1` (the round-trip-optimal
+  `2Λ + 1` at `r* = 1/2`), iterating that fixed point until `N*` settles. Because
+  the estimate uses the current-N rejection rates rather than a running maximum,
+  the result is essentially independent of the starting `N` — discovery from
+  `initial_n=None` (a small pilot) and from a reasonable guess converge to the
+  same count (≤ 1 chain apart on Ising chains). `initial_n` defaults to `None`
+  (no initial guess needed) and a new `safety_margin` (default 0.05) pads `N*`
+  against residual bias / ELE-assumption violations.
+- **Monotone-cubic schedule optimization** — `optimize_schedule` now places the
+  equi-acceptance ladder using a Fritsch–Carlson (PCHIP) monotone-cubic inverse
+  of the cumulative barrier instead of piecewise-linear interpolation (Syed et
+  al. 2021, Algorithm 2), giving a smoother schedule while staying monotone (no
+  overshoot).
 - **Convergence-driven NRPT tuning (default)** — `nrpt_adaptive` and
   `discover_chain_count` now auto-allocate their tuning budgets instead of
   running fixed `n_tune` × `rounds_per_tune` phases. Each tuning phase runs only
