@@ -1,5 +1,4 @@
 from collections import defaultdict
-from typing import Type
 
 import equinox as eqx
 import jax
@@ -82,7 +81,7 @@ class DiscreteEBMFactor(EBMFactor, WeightedFactor):
     spin_node_groups: list[Block]
     categorical_node_groups: list[Block]
     weights: Array
-    is_spin: dict[Type[AbstractNode], bool]
+    is_spin: dict[type[AbstractNode], bool]
 
     def __init__(
         self,
@@ -313,9 +312,9 @@ def _split_states(states, n_spin):
     def _validate(check_states, name, ex_type):
         for state in check_states:
             if not (len(state.shape) == 2):
-                raise RuntimeError("{} states must be scalar.".format(name))
+                raise RuntimeError(f"{name} states must be scalar.")
             if not jnp.isdtype(state.dtype, ex_type):
-                raise RuntimeError("{} states must be {}.".format(name, ex_type))
+                raise RuntimeError(f"{name} states must be {ex_type}.")
 
     _validate(states_spin, "Spin", "bool")
     _validate(states_cat, "Categorical", "unsigned integer")

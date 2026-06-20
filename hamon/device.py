@@ -23,7 +23,7 @@ under ``jax.default_device``; outputs come back committed to that device.
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Any, TypeVar, Union
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import jax
 import jax.core
@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 else:
     JaxDevice = jax.Device
 
-DeviceLike = Union[str, JaxDevice, None]
+DeviceLike = str | JaxDevice | None
 _T = TypeVar("_T")
 
 # Steady-state crossover measured on an RTX 5080 (benchmarks/device_crossover.py,
@@ -81,7 +81,7 @@ def work_score(n_chains: int, n_nodes: int) -> int:
     return int(n_chains) * int(n_nodes)
 
 
-def device_threshold(threshold: "float | None" = None) -> float:
+def device_threshold(threshold: float | None = None) -> float:
     """Resolve the auto-routing threshold: argument > env > default."""
     if threshold is not None:
         return float(threshold)
@@ -98,8 +98,8 @@ def _contains_tracer(trees: Any) -> bool:
 def resolve_device(
     device: DeviceLike = "auto",
     *,
-    score: "int | None" = None,
-    threshold: "float | None" = None,
+    score: int | None = None,
+    threshold: float | None = None,
 ) -> JaxDevice | None:
     """Resolve a device spec into a concrete ``jax.Device`` or ``None``.
 

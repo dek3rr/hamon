@@ -92,9 +92,14 @@ packages = { find = { include = ["hamon", "hamon.*"] } }
 extend-include = ["*.ipynb"]
 src = []
 line-length = 120
+target-version = "py312"
 
 [tool.ruff.lint]
-ignore = ["F722"]
+# ruff's pyupgrade ("UP") rules replace the standalone pyupgrade hook.
+# PEP 695 rewrites (type-alias statement / type parameters) are outside
+# pyupgrade's scope, so they stay disabled.
+extend-select = ["UP"]
+ignore = ["F722", "UP040", "UP046", "UP047"]
 
 [tool.pytest.ini_options]
 markers = [

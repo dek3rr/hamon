@@ -3,14 +3,10 @@
 import copy
 from typing import (
     Generic,
-    Iterator,
-    Mapping,
-    Optional,
-    Sequence,
-    Type,
     TypeAlias,
     TypeVar,
 )
+from collections.abc import Iterator, Mapping, Sequence
 
 import equinox as eqx
 import jax
@@ -27,7 +23,7 @@ _PyTreeStruct: TypeAlias = tuple[
 ]
 _GlobalState: TypeAlias = PyTree[Shaped[Array, "nodes_global ?*state"], "_GlobalState"]
 _State = PyTree[Shaped[Array, "nodes ?*state"], "State"]
-_Node_SD = Mapping[Type[AbstractNode], PyTree[jax.ShapeDtypeStruct]]
+_Node_SD = Mapping[type[AbstractNode], PyTree[jax.ShapeDtypeStruct]]
 
 
 class Block(Generic[_Node]):
@@ -53,7 +49,7 @@ class Block(Generic[_Node]):
         self.nodes = nodes_tuple
 
     @property
-    def node_type(self) -> Type[_Node]:
+    def node_type(self) -> type[_Node]:
         if not self.nodes:
             raise ValueError(
                 "Block is empty and doesn't have a node type. Most methods in hamon do not support empty blocks."
@@ -135,8 +131,8 @@ class BlockSpec:
     sd_index_map: dict[_PyTreeStruct, int]
     node_global_location_map: dict[AbstractNode, tuple[int, int]]
     block_to_global_slice_spec: list[list[int]]
-    node_shape_dtypes: dict[Type[AbstractNode], _PyTreeStruct]
-    node_shape_struct: dict[Type[AbstractNode], PyTree[jax.ShapeDtypeStruct]]
+    node_shape_dtypes: dict[type[AbstractNode], _PyTreeStruct]
+    node_shape_struct: dict[type[AbstractNode], PyTree[jax.ShapeDtypeStruct]]
 
     def __init__(
         self,
@@ -505,7 +501,7 @@ def to_per_block_layout(spec):
 def make_empty_block_state(
     blocks: list[Block],
     node_shape_dtypes: _Node_SD,
-    batch_shape: Optional[tuple] = None,
+    batch_shape: tuple | None = None,
 ) -> list[_State]:
     """
     Allocate a zero-initialised block state.
@@ -597,7 +593,7 @@ def verify_block_state(
     blocks: list[Block],
     states: list[_State],
     node_shape_dtypes: _Node_SD,
-    block_axis: Optional[int] = None,
+    block_axis: int | None = None,
 ) -> None:
     """
     Check that a state is what it should be given some blocks and node shape/dtypes.

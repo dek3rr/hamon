@@ -1,5 +1,5 @@
 import abc
-from typing import Sequence
+from collections.abc import Sequence
 
 import equinox as eqx
 from jaxtyping import Array

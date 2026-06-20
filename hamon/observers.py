@@ -3,7 +3,8 @@
 
 import abc
 from collections import defaultdict
-from typing import TYPE_CHECKING, Callable, Optional, Sequence, TypeVar
+from typing import TYPE_CHECKING, TypeVar
+from collections.abc import Callable, Sequence
 
 import equinox as eqx
 import jax
@@ -38,7 +39,7 @@ class AbstractObserver(eqx.Module):
         state_clamped: list[PyTree[Array]],
         carry: ObserveCarry,
         iteration: Int[Array, ""],
-        global_state: Optional[list[PyTree[Array]]] = None,
+        global_state: list[PyTree[Array]] | None = None,
     ) -> tuple[ObserveCarry, PyTree]:
         """Make an observation.
 
@@ -90,7 +91,7 @@ class StateObserver(AbstractObserver):
         state_clamped: list["_State"],
         carry: None,
         iteration: Int[Array, ""],
-        global_state: Optional[list[PyTree[Array]]] = None,
+        global_state: list[PyTree[Array]] | None = None,
     ) -> tuple[None, PyTree]:
         """Simply returns the state of the blocks that are being logged to be recorded by the sampler."""
         if global_state is None:
@@ -260,7 +261,7 @@ class MomentAccumulatorObserver(AbstractObserver):
         state_clamped: list[PyTree[Array]],
         carry: list[Array],
         iteration: Int[Array, ""],
-        global_state: Optional[list[PyTree[Array]]] = None,
+        global_state: list[PyTree[Array]] | None = None,
     ) -> tuple[list[Array], PyTree]:
         """Accumulate the moments via `carry`. Does not return anything for the sampler to write down."""
         if global_state is None:

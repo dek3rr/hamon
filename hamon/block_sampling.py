@@ -3,7 +3,8 @@
 import contextlib
 import dataclasses
 from collections import defaultdict
-from typing import Mapping, Sequence, Type, TypeAlias
+from typing import TypeAlias
+from collections.abc import Mapping, Sequence
 
 import equinox as eqx
 import jax
@@ -35,7 +36,7 @@ from .observers import AbstractObserver, ObserveCarry, StateObserver
 
 # A SuperBlock is a tuple of Blocks that share the same global state during sampling.
 SuperBlock: TypeAlias = tuple[Block, ...] | Block
-_SD: TypeAlias = Mapping[Type[AbstractNode], PyTree[jax.ShapeDtypeStruct]]
+_SD: TypeAlias = Mapping[type[AbstractNode], PyTree[jax.ShapeDtypeStruct]]
 
 
 class BlockGibbsSpec(BlockSpec):

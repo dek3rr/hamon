@@ -1,5 +1,5 @@
 import unittest
-from typing import Sequence, Type
+from collections.abc import Sequence
 
 import equinox as eqx
 import jax
@@ -25,7 +25,7 @@ def get_double_grid(
     side_len: int,
     jumps: Sequence[int],
     n_visible: int,
-    node: Type[AbstractNode],
+    node: type[AbstractNode],
     key: Key[Array, ""],
 ) -> tuple[Block, Block, Block, Block, list[AbstractNode], list[Edge]]:
     # n_groups = 2

@@ -216,7 +216,7 @@ class TestSampling(unittest.TestCase):
             key, ebm, prog, clamp_vals, sched, 0
         )
 
-        error = jnp.max(jnp.abs((empirical - exact))) / jnp.max(jnp.abs(exact))
+        error = jnp.max(jnp.abs(empirical - exact)) / jnp.max(jnp.abs(exact))
 
         self.assertLess(error, 0.02)
 
@@ -272,7 +272,7 @@ class TestSampling(unittest.TestCase):
             key, ebm, prog, clamp_vals, sched, n_cats
         )
 
-        error = jnp.max(jnp.abs((empirical - exact))) / jnp.max(jnp.abs(exact))
+        error = jnp.max(jnp.abs(empirical - exact)) / jnp.max(jnp.abs(exact))
 
         self.assertLess(error, 0.02)
 
@@ -335,7 +335,7 @@ class TestSampling(unittest.TestCase):
             key, ebm, prog, [], sched, n_cats
         )
 
-        error = jnp.max(jnp.abs((empirical - exact))) / jnp.max(jnp.abs(exact))
+        error = jnp.max(jnp.abs(empirical - exact)) / jnp.max(jnp.abs(exact))
 
         # larger graph so harder to converge. Error goes down if you increase number of samples
         self.assertLess(error, 0.05)
@@ -1074,7 +1074,7 @@ class TestHeteroGrid(unittest.TestCase):
             key, ebm, prog, [], sched, n_cats
         )
 
-        error = jnp.max(jnp.abs((empirical - exact))) / jnp.max(jnp.abs(exact))
+        error = jnp.max(jnp.abs(empirical - exact)) / jnp.max(jnp.abs(exact))
 
         # large grid so takes a while to converge
         # error goes down if you use more samples

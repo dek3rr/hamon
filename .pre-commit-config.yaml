@@ -1,30 +1,23 @@
 repos:
-  # 1. Modernise syntax to the minimum supported Python first, so the lint and
-  #    format passes operate on already-upgraded code.
-  - repo: https://github.com/asottile/pyupgrade
-    rev: v3.21.2
-    hooks:
-      - id: pyupgrade
-        args: [--py312-plus]
-
-  # 2. Lint with autofix on the upgraded code.
+  # 1. Lint with autofix. ruff's "UP" rules modernise syntax to the minimum
+  #    supported Python (py312), replacing a standalone pyupgrade hook.
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.17
     hooks:
       - id: ruff-check
         args: [--fix]
 
-  # 3. Type-check the result.
+  # 2. Format the result of the fixer.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.17
+    hooks:
+      - id: ruff-format
+        args: [--line-length=88]
+
+  # 3. Type-check last.
   - repo: https://github.com/RobertCraigie/pyright-python
     rev: v1.1.410
     hooks:
       - id: pyright
         additional_dependencies: [equinox, jaxtyping, networkx]
         files: hamon/
-
-  # 4. Format last, so it has the final say after every code-rewriting hook.
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.17
-    hooks:
-      - id: ruff-format
-        args: [--line-length=88]

@@ -25,7 +25,7 @@ graph topologies.
 """
 
 from collections import defaultdict
-from typing import Sequence
+from collections.abc import Sequence
 
 from hamon.block_management import Block
 from hamon.interaction import InteractionGroup

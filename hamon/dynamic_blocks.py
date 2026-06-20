@@ -10,7 +10,7 @@ All operate at Python level (compile-time block construction, not JIT-traced).
 
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Sequence
 
 import jax
 import jax.numpy as jnp
