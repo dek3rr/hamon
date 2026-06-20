@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **Minimum supported Python is now 3.12** (was 3.11). Current Ubuntu releases
+  ship 3.12 as their default interpreter, so 3.11 was dropped from the CI test
+  and example matrices (now 3.12–3.14).
+
 ### Added
 
 - **`sample_states_batched`** — runs several independent single-chain draws in
