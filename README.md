@@ -54,7 +54,7 @@ cd hamon
 pip install -e ".[development,testing,examples]"
 ```
 
-Requires Python ≥ 3.11 and a JAX installation ([GPU setup guide](https://jax.readthedocs.io/en/latest/installation.html)).
+Requires Python ≥ 3.12 and a JAX installation ([GPU setup guide](https://jax.readthedocs.io/en/latest/installation.html)).
 
 ## Device routing
 
