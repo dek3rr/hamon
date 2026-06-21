@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-06-21
+
 ### Breaking
 
 - **Minimum supported Python is now 3.12** (was 3.11). Current Ubuntu releases
@@ -79,6 +81,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   copies of the unchanged portion on every sweep (fewer, cheaper kernels).
   Sampling output is bit-identical; programs that are not split-safe keep the
   previous concatenated layout.
+- **Refreshed example notebooks** — re-ran and updated all example notebooks so
+  their output reflects the algorithm improvements in this release (NRPT chain
+  discovery, monotone-cubic schedule, convergence-driven tuning) and for
+  consistency across the example set.
 
 ## [0.4.0] — 2026-06-12
 
