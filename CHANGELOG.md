@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Faster NRPT cold start** — the per-phase schedule-tuning math in
+  `nrpt_adaptive` (the `optimize_schedule` monotone-cubic interpolation, the
+  swap-rate statistics, and the per-phase Λ / rejection-spread / ladder-movement
+  diagnostics) now runs inside `jax.jit` instead of as dozens of eager
+  op-by-op dispatches, so each tuning phase compiles a single fused kernel
+  rather than recompiling tiny primitives one shape at a time. In addition, when
+  no observer is attached the round loop now runs as a dynamic-trip-count
+  `lax.fori_loop` (with `n_rounds` passed as a traced value), which makes the
+  `_nrpt_rounds` compilation independent of the round count, so a tuning batch
+  and the production run — and discovery probes at the same chain count — share
+  one compiled executable. Together these cut a cold `nrpt_adaptive` by ~40%
+  (5.2 s → 3.1 s at 484 nodes / 8 chains; ~120 → ~56 XLA compilations) and a
+  cold `ising_sample` by ~30% (30 s → 21 s at 22×22). Steady-state (warm) time
+  is unchanged and outputs are bit-identical. With an observer the round loop
+  still uses `lax.scan` to collect the per-round output stack.
+
 ## [0.5.0] — 2026-06-21
 
 ### Breaking
