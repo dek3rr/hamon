@@ -23,6 +23,9 @@ import jax.numpy as jnp
 import numpy as np
 from jax import lax
 
+from hamon._nrpt_energy import _compute_base_energies, _make_reference_ebm
+from hamon._nrpt_schedule import _pchip_interp
+from hamon._nrpt_swap import _make_swap_branch
 from hamon.block_sampling import _run_blocks, BlockSamplingProgram
 from hamon.device import (
     DeviceLike,
@@ -34,7 +37,6 @@ from hamon.models.ebm import AbstractEBM
 from hamon.observers import AbstractNRPTObserver
 from hamon.round_trips import (
     init_index_state,
-    update_index_state,
     round_trip_summary,
 )
 
@@ -187,198 +189,8 @@ def _interaction_float_dtype(pbi) -> jnp.dtype:
 
 
 # ---------------------------------------------------------------------------
-# Core: energy computation
-# ---------------------------------------------------------------------------
-
-
-def _compute_base_energies(
-    ebm_ref: AbstractEBM,
-    beta_ref: jax.Array,
-    spec,
-    stacked_states: list,
-    clamp_state: list,
-) -> jax.Array:
-    """Compute E_base(x) for all chains via vmap. Shape: (n_chains,).
-
-    E_base = ebm_ref.energy(x, spec) / β_ref (temperature linearity).
-    β_ref must be nonzero; callers should prefer a β=1 reference EBM so the
-    division is exact (see `_make_reference_ebm`).
-    """
-
-    def _energy_one_chain(*block_slices):
-        state = list(block_slices) + clamp_state
-        return ebm_ref.energy(state, spec)
-
-    return jax.vmap(_energy_one_chain)(*stacked_states) / beta_ref
-
-
-def _make_reference_ebm(
-    ebms: Sequence[AbstractEBM], betas: jax.Array
-) -> tuple[AbstractEBM, jax.Array]:
-    """Pick the (EBM, β) pair used to recover base energies E_base = E(x)/β.
-
-    Using the hottest chain (β₀) breaks when β₀ = 0 — a standard NRPT ladder
-    anchored at the reference distribution — because E(x) is then identically
-    0 and the division yields NaN, which silently rejects every swap. Prefer
-    an exact β=1 copy of the EBM so no division error is possible; for EBM
-    classes that do not implement `with_beta()`, fall back to the coldest
-    chain, whose β is the largest (best-conditioned) divisor in the ladder.
-    """
-    try:
-        return ebms[-1].with_beta(jnp.asarray(1.0)), jnp.asarray(1.0)
-    except NotImplementedError:
-        if float(betas[-1]) == 0.0:
-            raise ValueError(
-                "Cannot compute base energies: the coldest chain has β = 0 and "
-                f"{type(ebms[-1]).__name__} does not implement with_beta(). "
-                "Either implement with_beta() or use a ladder whose coldest "
-                "chain has β > 0."
-            )
-        return ebms[-1], betas[-1]
-
-
-# ---------------------------------------------------------------------------
-# Core: vectorized swap pass
-# ---------------------------------------------------------------------------
-
-
-def _vectorized_swap(
-    key: jax.Array,
-    stacked_states: list,
-    betas: jax.Array,
-    base_energies: jax.Array,
-    pair_indices: jax.Array,
-    n_active: int,
-    n_chains: int,
-    n_pairs: int,
-    n_free_blocks: int,
-    base_perm: jax.Array,
-) -> tuple[list, jax.Array, jax.Array]:
-    """Execute all swaps for one set of non-overlapping pairs.
-
-    Returns (new_states, accept_counts, permutation).
-    """
-    i_idx = pair_indices
-    j_idx = pair_indices + 1
-
-    log_r = (betas[i_idx] - betas[j_idx]) * (
-        base_energies[i_idx] - base_energies[j_idx]
-    )
-    accept_probs = jnp.exp(jnp.minimum(0.0, log_r))
-    u = jax.random.uniform(key, shape=(n_active,), dtype=accept_probs.dtype)
-    accepted = u < accept_probs
-
-    perm = base_perm
-    perm = perm.at[i_idx].set(jnp.where(accepted, j_idx, i_idx))
-    perm = perm.at[j_idx].set(jnp.where(accepted, i_idx, j_idx))
-    new_states = [stacked_states[b][perm] for b in range(n_free_blocks)]
-
-    acc = (
-        jnp.zeros(n_pairs, dtype=jnp.int32)
-        .at[pair_indices]
-        .set(accepted.astype(jnp.int32))
-    )
-
-    return new_states, acc, perm
-
-
-def _make_swap_branch(
-    pair_indices: jax.Array,
-    n_active: int,
-    att_mask: jax.Array,
-    betas: jax.Array,
-    n_chains: int,
-    n_pairs: int,
-    n_free_blocks: int,
-    base_perm: jax.Array,
-    track_round_trips: bool,
-):
-    """Build a lax.cond branch for even or odd swap pass.
-
-    Returns (states, acc, att, idx_state, perm).
-    """
-
-    def _branch(args):
-        ss, ac, at, sk, bE, ist = args
-        ss2, ac2, pm = _vectorized_swap(
-            sk,
-            ss,
-            betas,
-            bE,
-            pair_indices,
-            n_active,
-            n_chains,
-            n_pairs,
-            n_free_blocks,
-            base_perm,
-        )
-        # Static flag: with round-trip tracking disabled, the index-process
-        # update is dropped from the compiled program entirely.
-        new_ist = update_index_state(ist, pm, n_chains) if track_round_trips else ist
-        return (
-            ss2,
-            ac + ac2,
-            at + att_mask,
-            new_ist,
-            pm,
-        )
-
-    return _branch
-
-
-# ---------------------------------------------------------------------------
 # Adaptive schedule (Section 5.4)
 # ---------------------------------------------------------------------------
-
-
-def _pchip_slopes(h: jax.Array, delta: jax.Array) -> jax.Array:
-    """Fritsch–Carlson (PCHIP) monotone-cubic tangents at the knots.
-
-    ``h`` are the knot spacings and ``delta`` the secant slopes (both length
-    ``n - 1`` for ``n`` knots). Interior tangents use the weighted harmonic mean
-    of the two adjacent secants — zeroed at local extrema — which guarantees the
-    cubic Hermite interpolant is monotone; the endpoints use Fritsch's one-sided
-    estimate with the standard clamping. Returns ``n`` tangents.
-    """
-    dtype = delta.dtype
-    h0, h1 = h[:-1], h[1:]
-    d0, d1 = delta[:-1], delta[1:]
-    w1 = 2.0 * h1 + h0
-    w2 = h1 + 2.0 * h0
-    same_sign = (d0 * d1) > 0
-    # Guard the unused (opposite-sign) branch against division by zero.
-    safe0 = jnp.where(d0 == 0, 1.0, d0)
-    safe1 = jnp.where(d1 == 0, 1.0, d1)
-    denom = w1 / safe0 + w2 / safe1
-    interior = jnp.where(same_sign, (w1 + w2) / jnp.where(same_sign, denom, 1.0), 0.0)
-
-    def _edge(hh0, hh1, m0, m1):
-        d = ((2.0 * hh0 + hh1) * m0 - hh0 * m1) / (hh0 + hh1)
-        d = jnp.where(jnp.sign(d) != jnp.sign(m0), 0.0, d)
-        clamp = (jnp.sign(m0) != jnp.sign(m1)) & (jnp.abs(d) > 3.0 * jnp.abs(m0))
-        return jnp.where(clamp, 3.0 * m0, d)
-
-    left = _edge(h[0], h[1], delta[0], delta[1]).astype(dtype)
-    right = _edge(h[-1], h[-2], delta[-1], delta[-2]).astype(dtype)
-    return jnp.concatenate([left[None], interior.astype(dtype), right[None]])
-
-
-def _pchip_interp(xq: jax.Array, x: jax.Array, y: jax.Array) -> jax.Array:
-    """Evaluate the Fritsch–Carlson monotone cubic through ``(x, y)`` at ``xq``."""
-    h = jnp.maximum(x[1:] - x[:-1], jnp.finfo(x.dtype).eps)  # eps guards ties
-    delta = (y[1:] - y[:-1]) / h
-    d = _pchip_slopes(h, delta)
-    n = x.shape[0]
-    idx = jnp.clip(jnp.searchsorted(x, xq, side="right") - 1, 0, n - 2)
-    hx = h[idx]
-    t = (xq - x[idx]) / hx
-    t2 = t * t
-    t3 = t2 * t
-    h00 = 2.0 * t3 - 3.0 * t2 + 1.0
-    h10 = t3 - 2.0 * t2 + t
-    h01 = -2.0 * t3 + 3.0 * t2
-    h11 = t3 - t2
-    return h00 * y[idx] + h10 * hx * d[idx] + h01 * y[idx + 1] + h11 * hx * d[idx + 1]
 
 
 def optimize_schedule(rejection_rates: jax.Array, betas: jax.Array) -> jax.Array:
@@ -404,6 +216,11 @@ def optimize_schedule(rejection_rates: jax.Array, betas: jax.Array) -> jax.Array
     return new.at[0].set(betas[0]).at[-1].set(betas[-1])
 
 
+# ---------------------------------------------------------------------------
+# Core: NRPT round loop
+# ---------------------------------------------------------------------------
+
+
 class NRPTCarry(NamedTuple):
     """Scan carry for the NRPT inner loop."""
 
@@ -422,38 +239,21 @@ class NRPTCarry(NamedTuple):
 _nrpt_rounds_trace_count = [0]
 
 
-@eqx.filter_jit
-def _nrpt_rounds(
-    key: jax.Array,
+def _build_gibbs_runner(
     run_program: BlockSamplingProgram,
-    ebm_ref: AbstractEBM,
-    beta_ref: jax.Array,
+    clamp_state: list,
+    gibbs_steps_per_round: int,
     base_pbi,
     chain_data,
-    stacked_states: list,
-    clamp_state: list,
-    betas: jax.Array,
-    n_rounds: int,
-    gibbs_steps_per_round: int,
-    energy_delta_fn: Callable | None,
-    observer: AbstractNRPTObserver | None,
-    track_round_trips: bool,
-) -> tuple[NRPTCarry, Any]:
-    """The jitted NRPT round loop: vmapped Gibbs sweeps + DEO swaps via scan.
+    n_free_blocks: int,
+):
+    """Build the vmapped per-chain Gibbs kernel for one round.
 
-    Module-level and ``eqx.filter_jit``-decorated so the compilation cache
-    persists across calls: repeated invocations with the same program/observer
-    structure and array shapes (e.g. the tuning phases of ``nrpt_adaptive``)
-    reuse the compiled executable. Arrays — including ``betas`` — are traced
-    data, so schedule updates between phases do not retrigger compilation.
+    Temperature-linear mode (``base_pbi`` set) scales the shared β = 1
+    interaction arrays by each chain's β inside the kernel; the per-chain
+    sequence mode maps over the stacked interaction pytree. Returns the vmapped
+    ``run_chains(gibbs_keys, states_free, chain_data)``.
     """
-    _nrpt_rounds_trace_count[0] += 1
-
-    n_chains = betas.shape[0]
-    n_free_blocks = len(stacked_states)
-    base_spec = run_program.gibbs_spec
-
-    # --- Vmapped Gibbs kernel -------------------------------------------------
     null_ss = [None] * n_free_blocks
 
     def _run_one(gibbs_key, state_free, pbi):
@@ -490,12 +290,23 @@ def _nrpt_rounds(
         def _chain_step(gibbs_key, state_free, chain_input):
             return _run_one(gibbs_key, state_free, chain_input)
 
-    run_chains = jax.vmap(
+    return jax.vmap(
         _chain_step,
         in_axes=(0, [0] * n_free_blocks, chain_in_axes),
     )
 
-    # --- Swap setup -----------------------------------------------------------
+
+def _build_swap_passes(
+    betas: jax.Array,
+    n_chains: int,
+    n_free_blocks: int,
+    track_round_trips: bool,
+):
+    """Build the even/odd DEO swap branches for ``lax.cond``.
+
+    Returns ``(do_even, do_odd)`` — the two parity branches the round loop
+    alternates between (single-pass DEO preserves non-reversibility).
+    """
     n_pairs = n_chains - 1
     even_pairs = jnp.arange(0, n_pairs, 2, dtype=jnp.int32)
     odd_pairs = jnp.arange(1, n_pairs, 2, dtype=jnp.int32)
@@ -504,56 +315,104 @@ def _nrpt_rounds(
     base_perm = jnp.arange(n_chains, dtype=jnp.int32)
 
     swap_args = (betas, n_chains, n_pairs, n_free_blocks, base_perm, track_round_trips)
-    do_even = _make_swap_branch(
-        even_pairs,
-        len(even_pairs),
-        att_even,
-        *swap_args,
-    )
-    do_odd = _make_swap_branch(
-        odd_pairs,
-        len(odd_pairs),
-        att_odd,
-        *swap_args,
-    )
+    do_even = _make_swap_branch(even_pairs, len(even_pairs), att_even, *swap_args)
+    do_odd = _make_swap_branch(odd_pairs, len(odd_pairs), att_odd, *swap_args)
+    return do_even, do_odd
 
-    # --- Energy strategy (cached vs recomputed) -------------------------------
+
+def _build_energy_compute(
+    energy_delta_fn: Callable | None,
+    ebm_ref: AbstractEBM,
+    beta_ref: jax.Array,
+    base_spec,
+    clamp_state: list,
+):
+    """Build the per-round base-energy update.
+
+    With ``energy_delta_fn`` set, energies are advanced by boundary-only deltas
+    off the cached value; otherwise they are recomputed from scratch each round.
+    Signature: ``(new_states, old_states, cached_base_E) -> base_E``.
+    """
     if energy_delta_fn is not None:
         _delta_fn = energy_delta_fn
 
         def _energy_cached(st_states, old_states, cached_bE):
             return cached_bE + _delta_fn(old_states, st_states)
 
-        energy_compute = _energy_cached
-    else:
+        return _energy_cached
 
-        def _energy_fresh(st_states, old_states, cached_bE):
-            return _compute_base_energies(
-                ebm_ref, beta_ref, base_spec, st_states, clamp_state
-            )
+    def _energy_fresh(st_states, old_states, cached_bE):
+        return _compute_base_energies(
+            ebm_ref, beta_ref, base_spec, st_states, clamp_state
+        )
 
-        energy_compute = _energy_fresh
+    return _energy_fresh
 
-    # --- Observer strategy (present vs absent) --------------------------------
+
+def _build_observer_hooks(observer: AbstractNRPTObserver | None):
+    """Build ``(init, step)`` observer hooks; no-ops when ``observer`` is None."""
     if observer is not None:
-        observer_init, observer_step = observer.init, observer
-    else:
+        return observer.init, observer
 
-        def _obs_init():
-            return None
+    def _obs_init():
+        return None
 
-        def _obs_step(stacked_states, base_energies, round_idx, carry):
-            return carry, None
+    def _obs_step(stacked_states, base_energies, round_idx, carry):
+        return carry, None
 
-        observer_init, observer_step = _obs_init, _obs_step
+    return _obs_init, _obs_step
 
-    # --- Initial energy -------------------------------------------------------
-    base_E = _compute_base_energies(
-        ebm_ref,
-        beta_ref,
-        base_spec,
-        stacked_states,
+
+@eqx.filter_jit
+def _nrpt_rounds(
+    key: jax.Array,
+    run_program: BlockSamplingProgram,
+    ebm_ref: AbstractEBM,
+    beta_ref: jax.Array,
+    base_pbi,
+    chain_data,
+    stacked_states: list,
+    clamp_state: list,
+    betas: jax.Array,
+    n_rounds: int,
+    gibbs_steps_per_round: int,
+    energy_delta_fn: Callable | None,
+    observer: AbstractNRPTObserver | None,
+    track_round_trips: bool,
+) -> tuple[NRPTCarry, Any]:
+    """The jitted NRPT round loop: vmapped Gibbs sweeps + DEO swaps via scan.
+
+    Module-level and ``eqx.filter_jit``-decorated so the compilation cache
+    persists across calls: repeated invocations with the same program/observer
+    structure and array shapes (e.g. the tuning phases of ``nrpt_adaptive``)
+    reuse the compiled executable. Arrays — including ``betas`` — are traced
+    data, so schedule updates between phases do not retrigger compilation.
+    """
+    _nrpt_rounds_trace_count[0] += 1
+
+    n_chains = betas.shape[0]
+    n_free_blocks = len(stacked_states)
+    n_pairs = n_chains - 1
+    base_spec = run_program.gibbs_spec
+
+    run_chains = _build_gibbs_runner(
+        run_program,
         clamp_state,
+        gibbs_steps_per_round,
+        base_pbi,
+        chain_data,
+        n_free_blocks,
+    )
+    do_even, do_odd = _build_swap_passes(
+        betas, n_chains, n_free_blocks, track_round_trips
+    )
+    energy_compute = _build_energy_compute(
+        energy_delta_fn, ebm_ref, beta_ref, base_spec, clamp_state
+    )
+    observer_init, observer_step = _build_observer_hooks(observer)
+
+    base_E = _compute_base_energies(
+        ebm_ref, beta_ref, base_spec, stacked_states, clamp_state
     )
 
     # --- Scan body ------------------------------------------------------------
@@ -591,6 +450,211 @@ def _nrpt_rounds(
     )
 
     return lax.scan(one_round, init_carry, jnp.arange(n_rounds))
+
+
+# ---------------------------------------------------------------------------
+# Run-input resolution and per-call helpers
+# ---------------------------------------------------------------------------
+
+
+def _acceptance_rate(accepted: jax.Array, attempted: jax.Array, dtype) -> jax.Array:
+    """Per-pair acceptance rate, 0 where a pair was never attempted.
+
+    Computed in the model compute ``dtype`` so the int/int division does not
+    promote to float64 when x64 is enabled.
+    """
+    rate = accepted.astype(dtype) / jnp.maximum(attempted, 1).astype(dtype)
+    return jnp.where(attempted > 0, rate, 0.0)
+
+
+def _swap_rate_stats(
+    accepted: jax.Array, attempted: jax.Array, betas: jax.Array
+) -> dict[str, Any]:
+    """The base NRPT stats dict shared by the production run and tuning batches."""
+    acceptance_rate = _acceptance_rate(accepted, attempted, betas.dtype)
+    return {
+        "accepted": accepted,
+        "attempted": attempted,
+        "acceptance_rate": acceptance_rate,
+        "rejection_rates": 1.0 - acceptance_rate,
+        "betas": betas,
+    }
+
+
+class _RunInputs(NamedTuple):
+    """Resolved per-call NRPT inputs, common to both input modes."""
+
+    run_program: BlockSamplingProgram
+    n_free_blocks: int
+    n_chains: int
+    betas: jax.Array
+    chain_data: Any
+    base_pbi: Any  # set only in temperature-linear mode
+    ebm_ref: AbstractEBM
+    beta_ref: jax.Array
+    compute_dtype: Any
+
+
+def _resolve_run_inputs(
+    ebms: Sequence[AbstractEBM] | AbstractEBM,
+    programs: Sequence[BlockSamplingProgram] | BlockSamplingProgram,
+    init_states: Sequence[list],
+    betas: jax.Array | None,
+    stacked_init: bool,
+) -> _RunInputs:
+    """Resolve the two input modes into a common ``_RunInputs``.
+
+    Temperature-linear mode (single template ``ebms``/``programs``) rebases to a
+    β = 1 base pair and scales interactions by β in the kernel; the per-chain
+    sequence mode stacks each chain's interaction tensors. Both yield the
+    reference (EBM, β) used to recover base energies and the model compute dtype
+    (kept off float64 so x64 host apps don't promote a float32 model).
+    """
+    base_pbi = None  # set in temperature-linear mode only
+    if isinstance(ebms, AbstractEBM) and isinstance(programs, BlockSamplingProgram):
+        if betas is None:
+            raise ValueError(
+                "betas is required when passing single template ebm/program objects (temperature-linear mode)."
+            )
+        betas = jnp.asarray(betas)
+        n_chains = len(betas)
+        if not stacked_init and len(init_states) != n_chains:
+            raise ValueError(
+                "len(init_states) must equal len(betas) in temperature-linear mode."
+            )
+        beta_attr = getattr(ebms, "beta", None)
+        if beta_attr is not None and float(beta_attr) == 1.0:
+            # Already a β = 1 base pair. Reuse it as-is so repeated calls
+            # (e.g. nrpt_adaptive tuning phases) present identical static
+            # structure to the jit cache and skip retracing entirely.
+            base_ebm = ebms
+            run_program = programs
+        else:
+            base_ebm = ebms.with_beta(jnp.asarray(1.0))
+            run_program = programs.with_ebm(base_ebm)
+        base_spec = run_program.gibbs_spec
+        n_free_blocks = len(base_spec.free_blocks)
+        base_pbi = run_program.per_block_interactions
+        compute_dtype = _interaction_float_dtype(base_pbi)
+        betas = betas.astype(compute_dtype)
+        chain_data: object = betas
+        ebm_ref, beta_ref = base_ebm, jnp.asarray(1.0, dtype=compute_dtype)
+    elif isinstance(ebms, AbstractEBM) or isinstance(programs, BlockSamplingProgram):
+        raise ValueError(
+            "Pass ebms and programs either both as per-chain sequences, or "
+            "both as single template objects (temperature-linear mode)."
+        )
+    else:
+        if not stacked_init and not (len(ebms) == len(programs) == len(init_states)):
+            raise ValueError(
+                "ebms, programs, and init_states must have the same length."
+            )
+        if len(ebms) != len(programs):
+            raise ValueError("ebms and programs must have the same length.")
+
+        base_spec = programs[0].gibbs_spec
+        n_free_blocks = len(base_spec.free_blocks)
+        base_clamped = len(base_spec.clamped_blocks)
+        base_nodes = [
+            set(id(n) for n in block.nodes) for block in base_spec.free_blocks
+        ]
+        for i, prog in enumerate(programs[1:], 1):
+            if (
+                len(prog.gibbs_spec.free_blocks) != n_free_blocks
+                or len(prog.gibbs_spec.clamped_blocks) != base_clamped
+            ):
+                raise ValueError("All programs must share the same block structure.")
+            for b, block in enumerate(prog.gibbs_spec.free_blocks):
+                prog_nodes = set(id(n) for n in block.nodes)
+                if prog_nodes != base_nodes[b]:
+                    raise ValueError(
+                        f"programs[{i}] free block {b} contains different node "
+                        f"objects than programs[0]. All programs must share the "
+                        f"same node instances. When using factories, ensure "
+                        f"with_beta() / with_ebm() reuse the original nodes."
+                    )
+
+        n_chains = len(ebms)
+        if betas is None:
+            betas = jnp.array([float(getattr(ebm, "beta")) for ebm in ebms])
+        run_program = programs[0]
+        stacked_pbi = [
+            [
+                _stack_pbi_across_chains(
+                    [programs[c].per_block_interactions[b][g] for c in range(n_chains)]
+                )
+                for g in range(len(programs[0].per_block_interactions[b]))
+            ]
+            for b in range(n_free_blocks)
+        ]
+        chain_data = stacked_pbi
+        compute_dtype = _interaction_float_dtype(stacked_pbi)
+        betas = jnp.asarray(betas).astype(compute_dtype)
+        ebm_ref, beta_ref = _make_reference_ebm(ebms, betas)
+        beta_ref = jnp.asarray(beta_ref, dtype=compute_dtype)
+
+    return _RunInputs(
+        run_program=run_program,
+        n_free_blocks=n_free_blocks,
+        n_chains=n_chains,
+        betas=betas,
+        chain_data=chain_data,
+        base_pbi=base_pbi,
+        ebm_ref=ebm_ref,
+        beta_ref=beta_ref,
+        compute_dtype=compute_dtype,
+    )
+
+
+def _validate_beta_ladder(betas: jax.Array, n_chains: int) -> None:
+    """Validate the β ladder is 1-D, one entry per chain, and ascending.
+
+    Everything downstream — adjacent-pair DEO swaps, the cold-chain convention
+    (states[-1]), the round-trip diagnostics — assumes the ladder is sorted
+    hottest to coldest. A shuffled or descending ladder runs without error but
+    silently hands back the wrong chains.
+    """
+    betas_np = np.asarray(betas)
+    if betas_np.ndim != 1 or betas_np.size != n_chains:
+        raise ValueError(
+            f"betas must be a 1D array with one entry per chain (got shape {betas_np.shape} for {n_chains} chains)."
+        )
+    if np.any(np.diff(betas_np) < 0):
+        raise ValueError(
+            "betas must be in ascending order (hottest chain first, coldest "
+            "chain last). Sort the ladder — and the matching ebms/programs/"
+            "init_states — before calling nrpt."
+        )
+
+
+def _stack_init_states(
+    init_states: Sequence[list],
+    stacked_init: bool,
+    n_chains: int,
+    n_free_blocks: int,
+) -> list:
+    """Stack per-chain init states into ``(n_chains, ...)`` arrays per free block.
+
+    ``init_states`` is either already-stacked (one array per free block with a
+    leading n_chains axis) or a sequence of per-chain block-state lists.
+    """
+    if stacked_init:
+        stacked_states = list(init_states)
+        if len(stacked_states) != n_free_blocks:
+            raise ValueError(
+                f"Stacked init_states must have one entry per free block "
+                f"({n_free_blocks}), got {len(stacked_states)}."
+            )
+        for leaf in jax.tree.leaves(stacked_states):
+            if leaf.shape[0] != n_chains:
+                raise ValueError(
+                    f"Stacked init_states leaves must have leading dimension n_chains={n_chains}, got {leaf.shape}."
+                )
+        return stacked_states
+    states = [list(s) for s in init_states]
+    return [
+        jnp.stack([states[c][b] for c in range(n_chains)]) for b in range(n_free_blocks)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -676,105 +740,18 @@ def nrpt(
     # lists, so the formats are unambiguous.
     stacked_init = bool(init_states) and not isinstance(init_states[0], (list, tuple))
 
-    base_pbi = None  # set in temperature-linear mode only
-    if isinstance(ebms, AbstractEBM) and isinstance(programs, BlockSamplingProgram):
-        if betas is None:
-            raise ValueError(
-                "betas is required when passing single template ebm/program objects (temperature-linear mode)."
-            )
-        betas = jnp.asarray(betas)
-        n_chains = len(betas)
-        if not stacked_init and len(init_states) != n_chains:
-            raise ValueError(
-                "len(init_states) must equal len(betas) in temperature-linear mode."
-            )
-        beta_attr = getattr(ebms, "beta", None)
-        if beta_attr is not None and float(beta_attr) == 1.0:
-            # Already a β = 1 base pair. Reuse it as-is so repeated calls
-            # (e.g. nrpt_adaptive tuning phases) present identical static
-            # structure to the jit cache and skip retracing entirely.
-            base_ebm = ebms
-            run_program = programs
-        else:
-            base_ebm = ebms.with_beta(jnp.asarray(1.0))
-            run_program = programs.with_ebm(base_ebm)
-        base_spec = run_program.gibbs_spec
-        n_free_blocks = len(base_spec.free_blocks)
-        base_pbi = run_program.per_block_interactions
-        compute_dtype = _interaction_float_dtype(base_pbi)
-        betas = betas.astype(compute_dtype)
-        chain_data: object = betas
-        ebm_ref, beta_ref = base_ebm, jnp.asarray(1.0, dtype=compute_dtype)
-    elif isinstance(ebms, AbstractEBM) or isinstance(programs, BlockSamplingProgram):
-        raise ValueError(
-            "Pass ebms and programs either both as per-chain sequences, or "
-            "both as single template objects (temperature-linear mode)."
-        )
-    else:
-        if not stacked_init and not (len(ebms) == len(programs) == len(init_states)):
-            raise ValueError(
-                "ebms, programs, and init_states must have the same length."
-            )
-        if len(ebms) != len(programs):
-            raise ValueError("ebms and programs must have the same length.")
+    ri = _resolve_run_inputs(ebms, programs, init_states, betas, stacked_init)
+    run_program = ri.run_program
+    n_free_blocks = ri.n_free_blocks
+    n_chains = ri.n_chains
+    betas = ri.betas
+    chain_data = ri.chain_data
+    base_pbi = ri.base_pbi
+    ebm_ref = ri.ebm_ref
+    beta_ref = ri.beta_ref
+    compute_dtype = ri.compute_dtype
 
-        base_spec = programs[0].gibbs_spec
-        n_free_blocks = len(base_spec.free_blocks)
-        base_clamped = len(base_spec.clamped_blocks)
-        base_nodes = [
-            set(id(n) for n in block.nodes) for block in base_spec.free_blocks
-        ]
-        for i, prog in enumerate(programs[1:], 1):
-            if (
-                len(prog.gibbs_spec.free_blocks) != n_free_blocks
-                or len(prog.gibbs_spec.clamped_blocks) != base_clamped
-            ):
-                raise ValueError("All programs must share the same block structure.")
-            for b, block in enumerate(prog.gibbs_spec.free_blocks):
-                prog_nodes = set(id(n) for n in block.nodes)
-                if prog_nodes != base_nodes[b]:
-                    raise ValueError(
-                        f"programs[{i}] free block {b} contains different node "
-                        f"objects than programs[0]. All programs must share the "
-                        f"same node instances. When using factories, ensure "
-                        f"with_beta() / with_ebm() reuse the original nodes."
-                    )
-
-        n_chains = len(ebms)
-        if betas is None:
-            betas = jnp.array([float(getattr(ebm, "beta")) for ebm in ebms])
-        run_program = programs[0]
-        stacked_pbi = [
-            [
-                _stack_pbi_across_chains(
-                    [programs[c].per_block_interactions[b][g] for c in range(n_chains)]
-                )
-                for g in range(len(programs[0].per_block_interactions[b]))
-            ]
-            for b in range(n_free_blocks)
-        ]
-        chain_data = stacked_pbi
-        compute_dtype = _interaction_float_dtype(stacked_pbi)
-        betas = jnp.asarray(betas).astype(compute_dtype)
-        ebm_ref, beta_ref = _make_reference_ebm(ebms, betas)
-        beta_ref = jnp.asarray(beta_ref, dtype=compute_dtype)
-
-    # --- Beta ladder validation ------------------------------------------------
-    # Everything downstream — adjacent-pair DEO swaps, the cold-chain
-    # convention (states[-1]), the round-trip diagnostics — assumes the
-    # ladder is sorted hottest to coldest. A shuffled or descending ladder
-    # runs without error but silently hands back the wrong chains.
-    betas_np = np.asarray(betas)
-    if betas_np.ndim != 1 or betas_np.size != n_chains:
-        raise ValueError(
-            f"betas must be a 1D array with one entry per chain (got shape {betas_np.shape} for {n_chains} chains)."
-        )
-    if np.any(np.diff(betas_np) < 0):
-        raise ValueError(
-            "betas must be in ascending order (hottest chain first, coldest "
-            "chain last). Sort the ladder — and the matching ebms/programs/"
-            "init_states — before calling nrpt."
-        )
+    _validate_beta_ladder(betas, n_chains)
 
     # --- Device routing --------------------------------------------------------
     dev = resolve_entry_device(
@@ -817,25 +794,9 @@ def nrpt(
     )
 
     with device_ctx:
-        # --- Stack states -----------------------------------------------------
-        if stacked_init:
-            stacked_states = list(init_states)
-            if len(stacked_states) != n_free_blocks:
-                raise ValueError(
-                    f"Stacked init_states must have one entry per free block "
-                    f"({n_free_blocks}), got {len(stacked_states)}."
-                )
-            for leaf in jax.tree.leaves(stacked_states):
-                if leaf.shape[0] != n_chains:
-                    raise ValueError(
-                        f"Stacked init_states leaves must have leading dimension n_chains={n_chains}, got {leaf.shape}."
-                    )
-        else:
-            states = [list(s) for s in init_states]
-            stacked_states = [
-                jnp.stack([states[c][b] for c in range(n_chains)])
-                for b in range(n_free_blocks)
-            ]
+        stacked_states = _stack_init_states(
+            init_states, stacked_init, n_chains, n_free_blocks
+        )
 
         # --- Run --------------------------------------------------------------
         n_pairs = n_chains - 1
@@ -872,23 +833,8 @@ def nrpt(
     states_out = [
         [final.states[b][c] for b in range(n_free_blocks)] for c in range(n_chains)
     ]
-    # Rates are reported in the model's compute dtype; the plain int/int
-    # division would yield float64 under x64.
-    acceptance_rate = jnp.where(
-        final.attempted > 0,
-        final.accepted.astype(betas.dtype)
-        / jnp.maximum(final.attempted, 1).astype(betas.dtype),
-        0.0,
-    )
-    rejection_rates = 1.0 - acceptance_rate
-
-    stats: dict[str, Any] = {
-        "accepted": final.accepted,
-        "attempted": final.attempted,
-        "acceptance_rate": acceptance_rate,
-        "rejection_rates": rejection_rates,
-        "betas": betas,
-    }
+    stats: dict[str, Any] = _swap_rate_stats(final.accepted, final.attempted, betas)
+    rejection_rates = stats["rejection_rates"]
 
     if track_round_trips:
         stats["round_trip_diagnostics"] = round_trip_summary(
@@ -953,7 +899,6 @@ def _tune_phase_adaptive_rounds(
     """
     acc_total = None
     att_total = None
-    acceptance_rate = None
     rounds_used = 0
     lambda_prev = None
     stable_count = 0
@@ -971,10 +916,7 @@ def _tune_phase_adaptive_rounds(
         )
         rounds_used += batch
 
-        rate = acc_total.astype(betas.dtype) / jnp.maximum(att_total, 1).astype(
-            betas.dtype
-        )
-        acceptance_rate = jnp.where(att_total > 0, rate, 0.0)
+        acceptance_rate = _acceptance_rate(acc_total, att_total, betas.dtype)
         lambda_cur = float(jnp.sum(1.0 - acceptance_rate))
         if rounds_used >= min_rounds and lambda_prev is not None:
             rel = abs(lambda_cur - lambda_prev) / max(lambda_cur, 1e-9)
@@ -986,14 +928,7 @@ def _tune_phase_adaptive_rounds(
             break
 
     assert acc_total is not None and att_total is not None
-    assert acceptance_rate is not None
-    pooled_stats = {
-        "accepted": acc_total,
-        "attempted": att_total,
-        "acceptance_rate": acceptance_rate,
-        "rejection_rates": 1.0 - acceptance_rate,
-        "betas": betas,
-    }
+    pooled_stats = _swap_rate_stats(acc_total, att_total, betas)
     return states, pooled_stats, rounds_used
 
 
@@ -1224,6 +1159,27 @@ def nrpt_adaptive(
 # ---------------------------------------------------------------------------
 
 
+def _probe_history_entry(
+    iteration: int,
+    n: int,
+    lambda_raw: float,
+    lambda_max: float,
+    n_recommended: int,
+    rejection_rates,
+    betas,
+) -> dict[str, Any]:
+    """One ``discover_chain_count`` per-probe history record."""
+    return {
+        "iteration": iteration,
+        "n": int(n),
+        "Lambda_raw": float(lambda_raw),
+        "Lambda_max": float(lambda_max),
+        "n_recommended": int(n_recommended),
+        "rejection_rates": rejection_rates,
+        "betas": betas,
+    }
+
+
 def discover_chain_count(
     key: jax.Array,
     ebm_factory: Callable | None = None,
@@ -1420,15 +1376,15 @@ def discover_chain_count(
         seen.add(n)
         n_star = _clamp(int(np.ceil(lambda_raw * margin / r_target)) + 1)
         history.append(
-            {
-                "iteration": len(history),
-                "n": n,
-                "Lambda_raw": lambda_raw,
-                "Lambda_max": lambda_max,
-                "n_recommended": n_star,
-                "rejection_rates": res["rejection_rates"],
-                "betas": res["betas"],
-            }
+            _probe_history_entry(
+                len(history),
+                n,
+                lambda_raw,
+                lambda_max,
+                n_star,
+                res["rejection_rates"],
+                res["betas"],
+            )
         )
         if abs(n_star - n) <= 1:
             reason = "chain_count"
@@ -1446,15 +1402,15 @@ def discover_chain_count(
     lambda_max = max(lambda_max, float(final_stats["Lambda_raw"]))
     if n_final not in seen:
         history.append(
-            {
-                "iteration": len(history),
-                "n": int(n_final),
-                "Lambda_raw": float(final_stats["Lambda_raw"]),
-                "Lambda_max": float(lambda_max),
-                "n_recommended": int(n_final),
-                "rejection_rates": final_stats["rejection_rates"],
-                "betas": final_stats["betas"],
-            }
+            _probe_history_entry(
+                len(history),
+                n_final,
+                final_stats["Lambda_raw"],
+                lambda_max,
+                n_final,
+                final_stats["rejection_rates"],
+                final_stats["betas"],
+            )
         )
 
     return {
