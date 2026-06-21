@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import logging
 from collections.abc import Sequence
+from functools import partial
 from typing import Any, NamedTuple
 from collections.abc import Callable
 
@@ -193,6 +194,7 @@ def _interaction_float_dtype(pbi) -> jnp.dtype:
 # ---------------------------------------------------------------------------
 
 
+@jax.jit
 def optimize_schedule(rejection_rates: jax.Array, betas: jax.Array) -> jax.Array:
     """Equalize per-pair rejection rates by redistributing β values.
 
@@ -374,19 +376,28 @@ def _nrpt_rounds(
     stacked_states: list,
     clamp_state: list,
     betas: jax.Array,
-    n_rounds: int,
+    n_rounds: int | jax.Array,
     gibbs_steps_per_round: int,
     energy_delta_fn: Callable | None,
     observer: AbstractNRPTObserver | None,
     track_round_trips: bool,
 ) -> tuple[NRPTCarry, Any]:
-    """The jitted NRPT round loop: vmapped Gibbs sweeps + DEO swaps via scan.
+    """The jitted NRPT round loop: vmapped Gibbs sweeps + DEO swaps.
 
     Module-level and ``eqx.filter_jit``-decorated so the compilation cache
     persists across calls: repeated invocations with the same program/observer
     structure and array shapes (e.g. the tuning phases of ``nrpt_adaptive``)
     reuse the compiled executable. Arrays — including ``betas`` — are traced
     data, so schedule updates between phases do not retrigger compilation.
+
+    Without an observer (the common case) the loop is a dynamic-trip-count
+    ``lax.fori_loop`` and ``n_rounds`` arrives as a **traced** scalar, so the
+    compiled executable is independent of the round count: the tuning batches
+    and the production run of ``nrpt_adaptive``, and discovery probes at the
+    same chain count, all share a single compile. With an observer we must
+    collect a per-round output stack, which needs ``lax.scan``'s static length,
+    so ``n_rounds`` arrives as a static ``int`` and each distinct value compiles
+    separately.
     """
     _nrpt_rounds_trace_count[0] += 1
 
@@ -449,6 +460,19 @@ def _nrpt_rounds(
         obs_carry=observer_init(),
     )
 
+    # No observer ⇒ no per-round outputs needed, so use a dynamic-trip-count
+    # fori_loop (n_rounds is a traced scalar here): the compile is reused across
+    # round counts. With an observer, scan's static length is required to build
+    # the stacked per-round output.
+    if observer is None:
+
+        def _loop_body(_round_idx, carry):
+            new_carry, _ = one_round(carry, _round_idx)
+            return new_carry
+
+        final_carry = lax.fori_loop(0, n_rounds, _loop_body, init_carry)
+        return final_carry, None
+
     return lax.scan(one_round, init_carry, jnp.arange(n_rounds))
 
 
@@ -467,10 +491,15 @@ def _acceptance_rate(accepted: jax.Array, attempted: jax.Array, dtype) -> jax.Ar
     return jnp.where(attempted > 0, rate, 0.0)
 
 
+@jax.jit
 def _swap_rate_stats(
     accepted: jax.Array, attempted: jax.Array, betas: jax.Array
 ) -> dict[str, Any]:
-    """The base NRPT stats dict shared by the production run and tuning batches."""
+    """The base NRPT stats dict shared by the production run and tuning batches.
+
+    Jitted so the handful of reductions fuse into a single dispatch/compile
+    rather than running as separate eager ops on every phase (see
+    ``_phase_diagnostics`` for the same motivation)."""
     acceptance_rate = _acceptance_rate(accepted, attempted, betas.dtype)
     return {
         "accepted": accepted,
@@ -479,6 +508,37 @@ def _swap_rate_stats(
         "rejection_rates": 1.0 - acceptance_rate,
         "betas": betas,
     }
+
+
+@jax.jit
+def _phase_diagnostics(
+    rej: jax.Array,
+    old_betas: jax.Array,
+    new_betas: jax.Array,
+    acceptance_rate: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    """The per-phase scalar diagnostics of ``nrpt_adaptive``'s tuning loop.
+
+    Returns ``(rej_std, max_beta_shift, Lambda, mean_acceptance)`` in one fused
+    kernel. Computing them as separate eager ``jnp.std`` / ``jnp.max`` /
+    ``jnp.sum`` / ``jnp.mean`` calls makes each its own XLA dispatch (and a
+    separate compile the first time a shape is seen), which dominates the
+    cold-start cost of an otherwise tiny per-phase computation. ``rej_std`` is
+    the equalization quality (keep-best + equalize-stop); ``max_beta_shift`` is
+    the ladder movement (settle check)."""
+    return (
+        jnp.std(rej),
+        jnp.max(jnp.abs(new_betas - old_betas)),
+        jnp.sum(rej),
+        jnp.mean(acceptance_rate),
+    )
+
+
+@partial(jax.jit, static_argnums=(2,))
+def _pooled_lambda(accepted: jax.Array, attempted: jax.Array, dtype) -> jax.Array:
+    """Pooled barrier estimate ``Λ = Σ(1 − acceptance_rate)`` for one tuning
+    batch, fused into a single dispatch (called once per ``round_batch``)."""
+    return jnp.sum(1.0 - _acceptance_rate(accepted, attempted, dtype))
 
 
 class _RunInputs(NamedTuple):
@@ -801,6 +861,13 @@ def nrpt(
         # --- Run --------------------------------------------------------------
         n_pairs = n_chains - 1
         if n_rounds > 0:
+            # Without an observer the round loop is compile-independent of the
+            # round count, so hand it a traced scalar (different n_rounds reuse
+            # one compile). The observer path needs scan's static length, so
+            # pass the Python int.
+            n_rounds_arg: int | jax.Array = (
+                jnp.asarray(n_rounds, dtype=jnp.int32) if observer is None else n_rounds
+            )
             final, observations = _nrpt_rounds(
                 key,
                 run_program,
@@ -811,7 +878,7 @@ def nrpt(
                 stacked_states,
                 clamp_state,
                 betas,
-                n_rounds,
+                n_rounds_arg,
                 gibbs_steps_per_round,
                 energy_delta_fn,
                 observer,
@@ -916,8 +983,7 @@ def _tune_phase_adaptive_rounds(
         )
         rounds_used += batch
 
-        acceptance_rate = _acceptance_rate(acc_total, att_total, betas.dtype)
-        lambda_cur = float(jnp.sum(1.0 - acceptance_rate))
+        lambda_cur = float(_pooled_lambda(acc_total, att_total, betas.dtype))
         if rounds_used >= min_rounds and lambda_prev is not None:
             rel = abs(lambda_cur - lambda_prev) / max(lambda_cur, 1e-9)
             stable_count = stable_count + 1 if rel < lambda_rtol else 0
@@ -1079,18 +1145,24 @@ def nrpt_adaptive(
             rounds_used = rounds_per_tune
 
         rej = stats["rejection_rates"]
-        # Equalization quality of the schedule just evaluated: lower spread of
-        # per-pair rejection rates = better tuned. Drives keep-best and the
-        # equalization stop.
-        quality = float(jnp.std(rej))
         old_betas = betas
+        new_betas = optimize_schedule(rej, betas)
+        # Equalization quality (lower spread of per-pair rejection rates = better
+        # tuned; drives keep-best and the equalization stop), ladder movement,
+        # Λ, and mean acceptance — all in one fused kernel instead of separate
+        # eager reductions. rej_std depends only on the pre-update rates, so
+        # keep-best still records old_betas.
+        rej_std_a, shift_a, lambda_a, mean_acc_a = _phase_diagnostics(
+            rej, old_betas, new_betas, stats["acceptance_rate"]
+        )
+        quality = float(rej_std_a)
         if adaptive_tuning and quality < best_quality:
             best_quality = quality
             best_betas = old_betas
-        betas = optimize_schedule(rej, betas)
+        betas = new_betas
 
-        max_beta_shift = float(jnp.max(jnp.abs(betas - old_betas)))
-        phase_lambda = float(jnp.sum(rej))
+        max_beta_shift = float(shift_a)
+        phase_lambda = float(lambda_a)
         tuning_history.append(
             {
                 "iteration": phase,
@@ -1110,7 +1182,7 @@ def nrpt_adaptive(
             phase,
             n_tune,
             phase_lambda,
-            float(jnp.mean(stats["acceptance_rate"])),
+            float(mean_acc_a),
             quality,
             max_beta_shift,
             rounds_used,
