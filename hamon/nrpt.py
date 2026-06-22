@@ -1138,7 +1138,11 @@ def nrpt_adaptive(
             _return_stacked=return_stacked,
         )
 
-    betas = initial_betas
+    # Pin the working schedule to the resolved device so optimize_schedule (and
+    # the other per-phase reductions) see a committed array every phase. Phase 0
+    # would otherwise pass the caller's uncommitted initial_betas, and jit would
+    # build a second, single-use executable keyed on the uncommitted input.
+    betas = jax.device_put(initial_betas, dev) if dev is not None else initial_betas
     current_states = init_states
     tuning_history = []
 

@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **One fewer schedule-optimizer compile per tuning run** — `optimize_schedule`
+  is `jax.jit`-compiled, and a jit cache keys on input *commitment* as well as
+  shape and dtype. The first tuning phase passed the caller's uncommitted
+  `initial_betas` while later phases passed the committed output of the previous
+  phase, so XLA built two executables for the same computation and used the
+  uncommitted one exactly once. `nrpt_adaptive` now pins the working schedule to
+  the resolved device up front, so every phase shares one compile (~330 ms per
+  probe, plus a couple of other betas-derived ops that were splitting the same
+  way). Outputs are bit-identical.
 - **Faster NRPT cold start** — the per-phase schedule-tuning math in
   `nrpt_adaptive` (the `optimize_schedule` monotone-cubic interpolation, the
   swap-rate statistics, and the per-phase Λ / rejection-spread / ladder-movement
