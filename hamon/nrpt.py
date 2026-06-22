@@ -65,7 +65,9 @@ def _resolve_factories(
         _prog = program
 
         def _make_ebms(betas):
-            return [_ebm.with_beta(jnp.array(float(b))) for b in betas]
+            # Keep each β on its current device; jnp.array(float(b)) would force a
+            # blocking device→host transfer per chain when betas is a device array.
+            return [_ebm.with_beta(jnp.asarray(b)) for b in betas]
 
         def _make_programs(ebms):
             return [_prog.with_ebm(e) for e in ebms]
@@ -735,6 +737,8 @@ def nrpt(
     energy_delta_fn: Callable | None = None,
     observer: AbstractNRPTObserver | None = None,
     device: DeviceLike = "auto",
+    _emit_diagnostics: bool = True,
+    _return_stacked: bool = False,
 ) -> tuple[list, dict]:
     """Non-Reversible Parallel Tempering with vectorized swaps.
 
@@ -897,13 +901,27 @@ def nrpt(
             observations = None
 
     # --- Unstack --------------------------------------------------------------
-    states_out = [
-        [final.states[b][c] for b in range(n_free_blocks)] for c in range(n_chains)
-    ]
+    # The public return is per-chain [chain][block] lists. ``_return_stacked``
+    # (set by nrpt_adaptive's tuning loop) instead hands back the stacked
+    # [block]-of-(n_chains, ...) carry as-is, so threading states across the many
+    # tuning batches skips the n_chains × n_free_blocks eager slices this
+    # unstack would otherwise dispatch every call. nrpt re-ingests the stacked
+    # form directly (see ``_stack_init_states``).
+    if _return_stacked:
+        states_out = final.states
+    else:
+        states_out = [
+            [final.states[b][c] for b in range(n_free_blocks)] for c in range(n_chains)
+        ]
     stats: dict[str, Any] = _swap_rate_stats(final.accepted, final.attempted, betas)
     rejection_rates = stats["rejection_rates"]
 
-    if track_round_trips:
+    # ``_emit_diagnostics=False`` (set by nrpt_adaptive's tuning batches) skips
+    # this eager per-call summary — a handful of host-dispatched reductions that
+    # tuning never reads. ``track_round_trips`` itself is left untouched so the
+    # in-loop index tracking stays in the jitted body and the compiled round loop
+    # is still shared with the production run.
+    if track_round_trips and _emit_diagnostics:
         stats["round_trip_diagnostics"] = round_trip_summary(
             final.idx_state,
             rejection_rates,
@@ -974,7 +992,7 @@ def _tune_phase_adaptive_rounds(
     while True:
         key, subkey = jax.random.split(key)
         batch = min(round_batch, max_rounds - rounds_used)
-        states, stats = run_phase(subkey, betas, states, batch)
+        states, stats = run_phase(subkey, betas, states, batch, return_stacked=True)
         acc_total = (
             stats["accepted"] if acc_total is None else acc_total + stats["accepted"]
         )
@@ -1089,7 +1107,20 @@ def nrpt_adaptive(
     )
     source.device_put_template(dev)
 
-    def _run_phase(phase_key, phase_betas, phase_states, rounds, phase_observer=None):
+    def _run_phase(
+        phase_key,
+        phase_betas,
+        phase_states,
+        rounds,
+        phase_observer=None,
+        emit_diag=False,
+        return_stacked=False,
+    ):
+        # Tuning batches default to emit_diag=False (they only read swap rates,
+        # so the eager round-trip summary is skipped) and return_stacked=True
+        # (states are threaded in stacked form, skipping the per-call unstack).
+        # The production run passes emit_diag=True and keeps the public
+        # per-chain return.
         chain_ebms, chain_programs = source.nrpt_args(phase_betas)
         return nrpt(
             phase_key,
@@ -1103,6 +1134,8 @@ def nrpt_adaptive(
             track_round_trips=track_round_trips,
             observer=phase_observer,
             device=dev,
+            _emit_diagnostics=emit_diag,
+            _return_stacked=return_stacked,
         )
 
     betas = initial_betas
@@ -1140,7 +1173,7 @@ def nrpt_adaptive(
             )
         else:
             current_states, stats = _run_phase(
-                subkey, betas, current_states, rounds_per_tune
+                subkey, betas, current_states, rounds_per_tune, return_stacked=True
             )
             rounds_used = rounds_per_tune
 
@@ -1217,10 +1250,11 @@ def nrpt_adaptive(
     if adaptive_tuning:
         betas = best_betas
 
-    # Production run
+    # Production run — emit the full round-trip diagnostics (tuning batches skip
+    # them).
     key, subkey = jax.random.split(key)
     states, stats = _run_phase(
-        subkey, betas, current_states, n_rounds, phase_observer=observer
+        subkey, betas, current_states, n_rounds, phase_observer=observer, emit_diag=True
     )
     stats["tuning_history"] = tuning_history
     return states, stats
