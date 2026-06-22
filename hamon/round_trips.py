@@ -136,6 +136,7 @@ def empirical_round_trip_rate(
 # ---------------------------------------------------------------------------
 
 
+@jax.jit
 def round_trip_summary(
     index_state: dict,
     rejection_rates: jax.Array,
@@ -143,6 +144,12 @@ def round_trip_summary(
     n_rounds: int,
 ) -> dict:
     """Compute full diagnostic summary for NRPT run.
+
+    Jitted so the handful of reductions below (Λ, τ̄, the local-barrier profile,
+    the round-trip rate) fuse into a single compiled kernel instead of ~8 eager
+    op-by-op dispatches, each of which otherwise pays a first-shape XLA compile
+    when called once per probe at a new chain count. ``n_rounds`` is traced (not
+    static), so the compile is shared across round counts.
 
     Returns dict with:
         Lambda: global communication barrier estimate
