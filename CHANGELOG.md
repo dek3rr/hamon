@@ -24,6 +24,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cold `ising_sample` by ~30% (30 s → 21 s at 22×22). Steady-state (warm) time
   is unchanged and outputs are bit-identical. With an observer the round loop
   still uses `lax.scan` to collect the per-round output stack.
+- **Less host↔device traffic in `ising_sample` / `nrpt_adaptive`** — the
+  remaining non-compile overhead was dominated by blocking device→host
+  transfers and eager op-by-op dispatch. `ising_sample` built its graph by
+  indexing the edge array on the host (`int(e[0])` per endpoint); the array is
+  now pulled to host once with `np.asarray` instead of forcing ~2·n_edges
+  blocking transfers. The adaptive tuning loop now threads chain states in
+  their stacked form across batches (avoiding an `n_chains × n_blocks` eager
+  slice unstack/restack on every batch), skips the eager round-trip summary on
+  tuning batches that never read it, and keeps per-chain β values on-device.
+  Together these cut host syncs ~3950 → ~210 and eager dispatches ~12.6k →
+  ~0.6k, shaving a further ~40% off a cold `ising_sample` (≈19.5 s → ≈11.5 s at
+  22×22). Outputs remain bit-identical.
 
 ## [0.5.0] — 2026-06-21
 

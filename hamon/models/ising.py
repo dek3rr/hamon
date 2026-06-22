@@ -5,6 +5,7 @@ import logging
 
 import equinox as eqx
 import jax
+import numpy as np
 from jax import numpy as jnp
 from jaxtyping import Array, Bool, Key, Shaped
 
@@ -462,7 +463,11 @@ def ising_sample(
     biases = jnp.asarray(biases)
     weights = jnp.asarray(weights)
     n = biases.shape[0]
-    edges_np = jnp.asarray(edges)
+    # Host (numpy) array: the graph is built on the host by indexing every edge
+    # endpoint (``int(e[0])``). Keeping this on-device would make each of those
+    # ~2·n_edges indexing ops a blocking device→host transfer (and an eager
+    # slice dispatch); np.asarray pulls it to the host once instead.
+    edges_np = np.asarray(edges)
 
     # --- degenerate model checks ---
     if edges_np.shape[0] == 0:
