@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Round-trip diagnostics fused into one compile** — `round_trip_summary` (the
+  Λ / τ̄ / efficiency / local-barrier summary emitted by each production NRPT
+  phase) ran as ~8 eager `jnp` reductions, each paying a first-shape XLA compile
+  the first time it was seen at a new chain count. It is now `jax.jit`-compiled,
+  folding those into a single kernel (~13 compiles → 1, ~300 ms → ~37 ms per
+  chain count); `n_rounds` is traced so the compile is shared across round
+  counts. Outputs are bit-identical. Together with the schedule-commitment fix
+  below, a cold `ising_sample` drops ~9.7 s → ~8.0 s at 22×22.
 - **One fewer schedule-optimizer compile per tuning run** — `optimize_schedule`
   is `jax.jit`-compiled, and a jit cache keys on input *commitment* as well as
   shape and dtype. The first tuning phase passed the caller's uncommitted
