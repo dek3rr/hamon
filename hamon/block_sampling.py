@@ -134,6 +134,178 @@ def _build_output_sd(block: Block, template_sd: PyTree) -> PyTree:
     return jax.tree.map(_resize, template_sd)
 
 
+@dataclasses.dataclass
+class _BlockStructure:
+    """Weight-independent result of building a :class:`BlockSamplingProgram`.
+
+    Every field here is fixed by the *graph* (the spec partition + the
+    interaction-group node structure), not by the interaction weight *values*.
+    Caching it lets ``program.with_ebm(...)`` — same graph, β-scaled weights —
+    skip the ``O(nodes × interactions)`` host construction loops and only re-bind
+    the weight tensors. ``weight_recipe[b]`` lists, for free block ``b``, one
+    ``(group_index, interaction_slices, active_arr, global_inds, global_slices)``
+    tuple per interaction group it reads.
+    """
+
+    gibbs_spec: "BlockGibbsSpec"
+    weight_recipe: list
+    block_sd_inds: list
+    block_positions: list
+    block_output_sds: list
+    block_slice_starts: list
+    block_owns_slot: list
+
+
+# Keyed on the spec's node-identity structure (same scheme as BlockSpec._
+# structure_key) plus the interaction groups' node structure; the weight values
+# are deliberately excluded. The cached value holds the spec, which keeps its
+# nodes alive, so the id()-based key cannot suffer reuse-after-GC false hits.
+_STRUCTURE_CACHE: dict = {}
+
+
+def _structure_cache_key(gibbs_spec: "BlockGibbsSpec", interaction_groups):
+    return (
+        gibbs_spec._structure_key(),
+        tuple(
+            (
+                type(ig),
+                tuple(id(n) for n in ig.head_nodes.nodes),
+                tuple(tuple(id(n) for n in tb.nodes) for tb in ig.tail_nodes),
+            )
+            for ig in interaction_groups
+        ),
+    )
+
+
+def _build_block_structure(
+    gibbs_spec: "BlockGibbsSpec", interaction_groups
+) -> _BlockStructure:
+    """Run the weight-independent block-structure construction (see __init__)."""
+    node_to_block_idx = {
+        node: b_idx
+        for b_idx, block in enumerate(gibbs_spec.blocks)
+        for node in block.nodes
+    }
+    already_one_per_slot = all(
+        len(slot) <= 1 for slot in gibbs_spec.block_to_global_slice_spec
+    )
+
+    head_node_map = defaultdict(list)
+    for i, interaction_group in enumerate(interaction_groups):
+        for j, node in enumerate(interaction_group.head_nodes.nodes):
+            head_node_map[node].append((i, j))
+
+    interaction_inds = []
+    max_n_interactions = []
+    for block in gibbs_spec.free_blocks:
+        this_block_interaction_info = [
+            [[] for _ in range(len(block.nodes))]
+            for _ in range(len(interaction_groups))
+        ]
+        for j, node in enumerate(block.nodes):
+            for info in head_node_map[node]:
+                this_block_interaction_info[info[0]][j].append(info[1])
+        interaction_inds.append(this_block_interaction_info)
+        max_n_interactions.append(
+            [
+                max([len(x) for x in this_int])
+                for this_int in this_block_interaction_info
+            ]
+        )
+
+    def _block_split_safe(block_interact_inds) -> bool:
+        for ig, interact_inds in zip(interaction_groups, block_interact_inds):
+            for tail_block in ig.tail_nodes:
+                used_slots = {
+                    node_to_block_idx.get(tail_block.nodes[ind], -1)
+                    for inds in interact_inds
+                    for ind in inds
+                }
+                if -1 in used_slots or len(used_slots) > 1:
+                    return False
+        return True
+
+    split_safe = all(_block_split_safe(b) for b in interaction_inds)
+    if split_safe and not already_one_per_slot:
+        gibbs_spec = to_per_block_layout(gibbs_spec)
+
+    weight_recipe = []
+    for block, block_interact_inds, block_n_interactions in zip(
+        gibbs_spec.free_blocks, interaction_inds, max_n_interactions
+    ):
+        block_recipe = []
+        for g_idx, (interaction_group, interact_inds, n_interactions) in enumerate(
+            zip(interaction_groups, block_interact_inds, block_n_interactions)
+        ):
+            if n_interactions > 0:
+                n_nodes = len(block.nodes)
+                interaction_slices = np.zeros((n_nodes, n_interactions), dtype=int)
+                global_inds: list[int | None] = [
+                    None for _ in interaction_group.tail_nodes
+                ]
+                global_slices = [
+                    np.zeros((n_nodes, n_interactions), dtype=int)
+                    for _ in interaction_group.tail_nodes
+                ]
+                active = np.zeros((n_nodes, n_interactions), dtype=bool)
+                for i, inds in enumerate(interact_inds):
+                    for j, ind in enumerate(inds):
+                        interaction_slices[i, j] = ind
+                        active[i, j] = 1
+                        for k, tail_block in enumerate(interaction_group.tail_nodes):
+                            loc = gibbs_spec.node_global_location_map[
+                                tail_block.nodes[ind]
+                            ]
+                            global_slices[k][i, j] = loc[1]
+                            if global_inds[k] is None:
+                                global_inds[k] = loc[0]
+                            elif global_inds[k] != loc[0]:
+                                raise RuntimeError(
+                                    "Tail neighbours of a free block span "
+                                    "multiple global slots; cannot build a "
+                                    "single-slot gather."
+                                )
+                for k, tail_block in enumerate(interaction_group.tail_nodes):
+                    if global_inds[k] is None:
+                        global_inds[k] = gibbs_spec.node_global_location_map[
+                            tail_block.nodes[0]
+                        ][0]
+                block_recipe.append(
+                    (
+                        g_idx,
+                        jnp.array(interaction_slices),
+                        jnp.array(active),
+                        global_inds,
+                        [jnp.array(x) for x in global_slices],
+                    )
+                )
+        weight_recipe.append(block_recipe)
+
+    block_sd_inds = []
+    block_positions = []
+    block_output_sds = []
+    block_slice_starts = []
+    block_owns_slot = []
+    for block in gibbs_spec.free_blocks:
+        sd_ind, start, locs = _block_layout(block, gibbs_spec)
+        block_sd_inds.append(sd_ind)
+        block_positions.append(jnp.array(locs))
+        block_slice_starts.append(start)
+        block_owns_slot.append(len(gibbs_spec.block_to_global_slice_spec[sd_ind]) == 1)
+        template_sd = gibbs_spec.node_shape_struct[block.node_type]
+        block_output_sds.append(_build_output_sd(block, template_sd))
+
+    return _BlockStructure(
+        gibbs_spec=gibbs_spec,
+        weight_recipe=weight_recipe,
+        block_sd_inds=block_sd_inds,
+        block_positions=block_positions,
+        block_output_sds=block_output_sds,
+        block_slice_starts=block_slice_starts,
+        block_owns_slot=block_owns_slot,
+    )
+
+
 class BlockSamplingProgram(eqx.Module):
     """A PGM block-sampling program.
 
@@ -216,175 +388,60 @@ class BlockSamplingProgram(eqx.Module):
 
         self.samplers = samplers
 
-        # node -> index of the block (free or clamped) it belongs to. Under the
-        # per-block layout this index is also the block's global slot. Used to
-        # test split-safety below; the transform is applied once interaction_inds
-        # is known (the safety test depends on which neighbours each free block
-        # actually reads, not on the factor-level tail block).
-        node_to_block_idx = {
-            node: b_idx
-            for b_idx, block in enumerate(gibbs_spec.blocks)
-            for node in block.nodes
-        }
-        already_one_per_slot = all(
-            len(slot) <= 1 for slot in gibbs_spec.block_to_global_slice_spec
-        )
-
         n_free_blocks = len(gibbs_spec.free_blocks)
         if len(self.samplers) != n_free_blocks:
             raise ValueError(
                 f"Expected {n_free_blocks} samplers, received {len(self.samplers)}"
             )
 
-        # Map every head node to (interaction_group_index, position_within_group).
-        head_node_map = defaultdict(list)
+        # The block structure (layout, gather/slice indices, scatter positions)
+        # is fixed by the graph, not the interaction weight values, so cache it
+        # and reuse across program.with_ebm(...) rebuilds (same graph, β-scaled
+        # weights) — only the weight tensors below are re-bound per construction.
+        key = _structure_cache_key(gibbs_spec, interaction_groups)
+        struct = _STRUCTURE_CACHE.get(key)
+        if struct is None:
+            struct = _build_block_structure(gibbs_spec, interaction_groups)
+            _STRUCTURE_CACHE[key] = struct
 
-        for i, interaction_group in enumerate(interaction_groups):
-            for j, node in enumerate(interaction_group.head_nodes.nodes):
-                head_node_map[node].append((i, j))
+        self.gibbs_spec = struct.gibbs_spec
 
-        interaction_inds = []
-        max_n_interactions = []
-
-        for block in gibbs_spec.free_blocks:
-            this_block_interaction_info = [
-                [[] for _ in range(len(block.nodes))]
-                for _ in range(len(interaction_groups))
-            ]
-            for j, node in enumerate(block.nodes):
-                this_node_interaction_info = head_node_map[node]
-                for info in this_node_interaction_info:
-                    this_block_interaction_info[info[0]][j].append(info[1])
-            interaction_inds.append(this_block_interaction_info)
-            this_max_n = [
-                max([len(x) for x in this_int])
-                for this_int in this_block_interaction_info
-            ]
-            max_n_interactions.append(this_max_n)
-
-        # The per-block layout is safe iff, for every free block and every tail
-        # block it reads, all the neighbours that block actually gathers live in
-        # one block (hence one global slot). The factor-level tail block may span
-        # several blocks (e.g. both colours of a grid), but a single free block
-        # only reads its own neighbours, which for a valid colouring land in one
-        # block. When safe (and not already one block per slot), switch to the
-        # per-block layout so the write-back replaces whole slots instead of
-        # slicing into a shared array — the main win against dispatch-bound
-        # sweeps. Skipped models keep the default concatenated layout untouched.
-        def _block_split_safe(block_interact_inds) -> bool:
-            for ig, interact_inds in zip(interaction_groups, block_interact_inds):
-                for tail_block in ig.tail_nodes:
-                    used_slots = {
-                        node_to_block_idx.get(tail_block.nodes[ind], -1)
-                        for inds in interact_inds
-                        for ind in inds
-                    }
-                    if -1 in used_slots or len(used_slots) > 1:
-                        return False
-            return True
-
-        split_safe = all(_block_split_safe(b) for b in interaction_inds)
-        if split_safe and not already_one_per_slot:
-            gibbs_spec = to_per_block_layout(gibbs_spec)
-
-        self.gibbs_spec = gibbs_spec
-
-        # Build per-block interaction data and global-state slicers.
+        # Bind the weights: slice each interaction group's weight tensor by the
+        # cached per-node indices and pre-zero padded entries with the cached
+        # active mask. This reproduces the original inline computation exactly.
         per_block_interactions = []
         per_block_interaction_active = []
         per_block_interaction_global_inds = []
         per_block_interaction_global_slices = []
-
-        for block, block_interact_inds, block_n_interactions in zip(
-            gibbs_spec.free_blocks, interaction_inds, max_n_interactions
-        ):
+        for block_recipe in struct.weight_recipe:
             this_block_interactions = []
             this_block_active = []
             this_block_global_inds = []
             this_block_global_slices = []
-            for interaction_group, interact_inds, n_interactions in zip(
-                interaction_groups, block_interact_inds, block_n_interactions
-            ):
-                if n_interactions > 0:
-                    n_nodes = len(block.nodes)
-                    interaction_slices = np.zeros((n_nodes, n_interactions), dtype=int)
+            for (
+                g_idx,
+                interaction_slices,
+                active_arr,
+                global_inds,
+                global_slices,
+            ) in block_recipe:
+                sliced_interaction = jax.tree.map(
+                    lambda x, _sl=interaction_slices: _tree_slice(x, _sl),
+                    interaction_groups[g_idx].interaction,
+                )
 
-                    global_inds: list[int | None] = [
-                        None for _ in interaction_group.tail_nodes
-                    ]
-                    global_slices = [
-                        np.zeros((n_nodes, n_interactions), dtype=int)
-                        for _ in interaction_group.tail_nodes
-                    ]
+                def _premask(x, _mask=active_arr):
+                    if eqx.is_array(x):
+                        mask = _mask.astype(x.dtype)
+                        return x * mask.reshape(mask.shape + (1,) * (x.ndim - 2))
+                    return x
 
-                    active = np.zeros((n_nodes, n_interactions), dtype=bool)
-                    for i, inds in enumerate(interact_inds):
-                        for j, ind in enumerate(inds):
-                            interaction_slices[i, j] = ind
-                            active[i, j] = 1
+                sliced_interaction = jax.tree.map(_premask, sliced_interaction)
 
-                            for k, tail_block in enumerate(
-                                interaction_group.tail_nodes
-                            ):
-                                loc = gibbs_spec.node_global_location_map[
-                                    tail_block.nodes[ind]
-                                ]
-                                global_slices[k][i, j] = loc[1]
-                                # The gather reads this block's neighbours from a
-                                # single slot, taken from a neighbour actually
-                                # read rather than tail_block.nodes[0]: the
-                                # factor's tail block may span slots, but the
-                                # neighbours one free block reads share a slot
-                                # (the split-safety check guarantees it; under
-                                # the default layout all slots coincide anyway).
-                                if global_inds[k] is None:
-                                    global_inds[k] = loc[0]
-                                elif global_inds[k] != loc[0]:
-                                    raise RuntimeError(
-                                        "Tail neighbours of a free block span "
-                                        "multiple global slots; cannot build a "
-                                        "single-slot gather."
-                                    )
-
-                    # Tail blocks with no active entries never set a slot; fall
-                    # back to the first tail node's slot.
-                    for k, tail_block in enumerate(interaction_group.tail_nodes):
-                        if global_inds[k] is None:
-                            global_inds[k] = gibbs_spec.node_global_location_map[
-                                tail_block.nodes[0]
-                            ][0]
-
-                    interaction_slices = jnp.array(interaction_slices)
-
-                    sliced_interaction = jax.tree.map(
-                        lambda x: _tree_slice(
-                            x, interaction_slices
-                        ),  # shape -> (n, m, …)
-                        interaction_group.interaction,
-                    )
-
-                    # Pre-zero padded entries: inactive slots gathered junk
-                    # data (index-0 rows) during slicing. The active mask is a
-                    # compile-time constant, so masking here once removes a
-                    # multiply and an operand load from every sampler step.
-                    # Samplers may rely on inactive entries being zero; the
-                    # flags are still passed for samplers that need them.
-                    active_arr = jnp.array(active)
-
-                    def _premask(x, _mask=active_arr):
-                        if eqx.is_array(x):
-                            mask = _mask.astype(x.dtype)
-                            return x * mask.reshape(mask.shape + (1,) * (x.ndim - 2))
-                        return x
-
-                    sliced_interaction = jax.tree.map(_premask, sliced_interaction)
-
-                    this_block_interactions.append(sliced_interaction)
-                    this_block_active.append(active_arr)
-                    this_block_global_inds.append(global_inds)
-                    this_block_global_slices.append(
-                        [jnp.array(x) for x in global_slices]
-                    )
+                this_block_interactions.append(sliced_interaction)
+                this_block_active.append(active_arr)
+                this_block_global_inds.append(global_inds)
+                this_block_global_slices.append(global_slices)
             per_block_interactions.append(this_block_interactions)
             per_block_interaction_active.append(this_block_active)
             per_block_interaction_global_inds.append(this_block_global_inds)
@@ -394,34 +451,11 @@ class BlockSamplingProgram(eqx.Module):
         self.per_block_interaction_active = per_block_interaction_active
         self.per_block_interaction_global_inds = per_block_interaction_global_inds
         self.per_block_interaction_global_slices = per_block_interaction_global_slices
-
-        # Precompute scatter indices and output SDs per free block. BlockSpec
-        # assigns each block a contiguous run of global indices, so the slice
-        # start is expected to always be static; _block_layout keeps a scatter
-        # fallback for any exotic layout.
-        block_sd_inds = []
-        block_positions = []
-        block_output_sds = []
-        block_slice_starts = []
-        block_owns_slot = []
-        for block in gibbs_spec.free_blocks:
-            sd_ind, start, locs = _block_layout(block, gibbs_spec)
-            block_sd_inds.append(sd_ind)
-            block_positions.append(jnp.array(locs))
-            block_slice_starts.append(start)
-            # The block fully owns its slot when it is the only block there, so
-            # the write-back can replace the whole slot instead of slicing into
-            # it (the per-block-layout fast path in _run_blocks).
-            block_owns_slot.append(
-                len(gibbs_spec.block_to_global_slice_spec[sd_ind]) == 1
-            )
-            template_sd = gibbs_spec.node_shape_struct[block.node_type]
-            block_output_sds.append(_build_output_sd(block, template_sd))
-        self._block_sd_inds = block_sd_inds
-        self._block_positions = block_positions
-        self._block_output_sds = block_output_sds
-        self._block_slice_starts = block_slice_starts
-        self._block_owns_slot = block_owns_slot
+        self._block_sd_inds = struct.block_sd_inds
+        self._block_positions = struct.block_positions
+        self._block_output_sds = struct.block_output_sds
+        self._block_slice_starts = struct.block_slice_starts
+        self._block_owns_slot = struct.block_owns_slot
 
 
 _State: TypeAlias = PyTree[Shaped[Array, "nodes ?*state"], "_State"]
