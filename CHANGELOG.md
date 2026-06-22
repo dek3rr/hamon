@@ -36,6 +36,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Together these cut host syncs ~3950 → ~210 and eager dispatches ~12.6k →
   ~0.6k, shaving a further ~40% off a cold `ising_sample` (≈19.5 s → ≈11.5 s at
   22×22). Outputs remain bit-identical.
+- **Sample-quality diagnostics now run on the host in numpy** — the
+  `report_nrpt_diagnostics` health report and its helpers (`sample_convergence`,
+  `marginal_entropy`, `energy_balance`) computed their small one-shot reductions
+  in `jax.numpy` on the accelerator, where each first-seen array shape triggered
+  a separate XLA kernel compile and every `float()` / `.tolist()` forced a
+  blocking device→host transfer (~31 compiles + ~16 syncs, ≈1 s spent compiling
+  ≈25 ms of arithmetic). These are tiny post-hoc summaries over the returned
+  samples, so they now run in plain `numpy`: no per-shape compilation, and a
+  single `np.asarray(samples)` transfer instead of one sync per reduction. The
+  in-pipeline health report drops from ≈1.4 s to ≈14 ms. Samples are untouched
+  and every health-verdict field is unchanged; only the reported
+  `acceptance_mean` / `Lambda` scalars may differ by ≤6e-7 (float32 host vs
+  accelerator rounding).
+- **The sample-collection draw compiles once instead of on every call** — the
+  warmup and sampling `lax.scan`s in `sample_with_observation` ran on the eager
+  (un-jitted) path, so XLA recompiled both scans on every `sample_states` /
+  `sample_with_observation` call (~0.9 s at 484 nodes), even though the on-device
+  sampling itself takes single-digit milliseconds. The compute core is now a
+  module-level `eqx.filter_jit` function (device placement stays in the
+  un-jitted wrapper, where it is a no-op under `jit` / `vmap`), with the
+  `SamplingSchedule` as a static argument so distinct warmup/sample/step counts
+  specialize and identical ones reuse the cache. Repeated draws with a fixed
+  program now compile once and reuse the executable (≈1.0 s → ≈7 ms; one XLA
+  compilation instead of ~20 across a handful of calls). Outputs are
+  bit-identical.
 
 ## [0.5.0] — 2026-06-21
 
