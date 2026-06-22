@@ -49,6 +49,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and every health-verdict field is unchanged; only the reported
   `acceptance_mean` / `Lambda` scalars may differ by ≤6e-7 (float32 host vs
   accelerator rounding).
+- **The sample-collection draw compiles once instead of on every call** — the
+  warmup and sampling `lax.scan`s in `sample_with_observation` ran on the eager
+  (un-jitted) path, so XLA recompiled both scans on every `sample_states` /
+  `sample_with_observation` call (~0.9 s at 484 nodes), even though the on-device
+  sampling itself takes single-digit milliseconds. The compute core is now a
+  module-level `eqx.filter_jit` function (device placement stays in the
+  un-jitted wrapper, where it is a no-op under `jit` / `vmap`), with the
+  `SamplingSchedule` as a static argument so distinct warmup/sample/step counts
+  specialize and identical ones reuse the cache. Repeated draws with a fixed
+  program now compile once and reuse the executable (≈1.0 s → ≈7 ms; one XLA
+  compilation instead of ~20 across a handful of calls). Outputs are
+  bit-identical.
 
 ## [0.5.0] — 2026-06-21
 

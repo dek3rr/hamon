@@ -757,68 +757,102 @@ def sample_with_observation(
         jax.default_device(dev) if dev is not None else contextlib.nullcontext()
     )
 
+    # Device placement is a host-only routing decision and stays out here (it is
+    # a no-op under jit/vmap). The compute core below is jitted so the warmup and
+    # sampling scans compile ONCE and are reused across calls; the previous eager
+    # path re-compiled both scans on every invocation (~0.9 s of XLA per call at
+    # 484 nodes), which dominated the draw — the device sampling itself is only
+    # single-digit ms. `schedule` is a static (hashable) argument, so distinct
+    # warmup/sample/step counts specialize into their own cached executables.
     with device_ctx:
-        sampler_states = [s.init() for s in program.samplers]
-
-        key, subkey = jax.random.split(key)
-        warmup_state, warmup_sampler_states, warmup_global = _run_blocks(
-            subkey,
+        return _sample_with_observation_core(
+            key,
             program,
+            schedule,
             init_chain_state,
             state_clamp,
-            schedule.n_warmup,
-            sampler_states,
-        )
-        mem, warmup_observation = f_observe(
-            program,
-            warmup_state,
-            state_clamp,
             observation_carry_init,
-            jnp.array(0),
-            warmup_global,
+            f_observe,
         )
 
-        if schedule.n_samples <= 1:
-            warmup_observation = jax.tree.map(lambda x: x[None], warmup_observation)
-            return mem, warmup_observation
 
-        def body_fn(carry, input):
-            (prev_state, prev_sampler_state), _mem = carry
+@eqx.filter_jit
+def _sample_with_observation_core(
+    key: Key[Array, ""],
+    program: BlockSamplingProgram,
+    schedule: SamplingSchedule,
+    init_chain_state: list[PyTree[Shaped[Array, "nodes ?*state"]]],
+    state_clamp: list[_State],
+    observation_carry_init: ObserveCarry,
+    f_observe: AbstractObserver,
+) -> tuple[ObserveCarry, list[PyTree[Shaped[Array, "n_samples nodes ?*state"]]]]:
+    """Jitted compute core of :func:`sample_with_observation`.
 
-            _key, i = input
+    Split out so the warmup + sampling scans compile once and reuse the cache;
+    `schedule` is a non-array (static) argument that keys the cache, and all
+    placement happens in the caller before this runs.
+    """
+    sampler_states = [s.init() for s in program.samplers]
 
-            new_state, new_sampler_state, new_global = _run_blocks(
-                _key,
-                program,
-                prev_state,
-                state_clamp,
-                schedule.steps_per_sample,
-                prev_sampler_state,
-            )
-            _mem, observe_out = f_observe(
-                program, new_state, state_clamp, _mem, i, new_global
-            )
-            new_carry = ((new_state, new_sampler_state), _mem)
-            return new_carry, observe_out
+    key, subkey = jax.random.split(key)
+    warmup_state, warmup_sampler_states, warmup_global = _run_blocks(
+        subkey,
+        program,
+        init_chain_state,
+        state_clamp,
+        schedule.n_warmup,
+        sampler_states,
+    )
+    mem, warmup_observation = f_observe(
+        program,
+        warmup_state,
+        state_clamp,
+        observation_carry_init,
+        jnp.array(0),
+        warmup_global,
+    )
 
-        keys = jax.random.split(key, schedule.n_samples - 1)
-        outer_iters = jnp.arange(1, schedule.n_samples)
+    if schedule.n_samples <= 1:
+        warmup_observation = jax.tree.map(lambda x: x[None], warmup_observation)
+        return mem, warmup_observation
 
-        inputs = (keys, outer_iters)
+    def body_fn(carry, input):
+        (prev_state, prev_sampler_state), _mem = carry
 
-        (_, mem_out), observed_results = jax.lax.scan(
-            body_fn, ((warmup_state, warmup_sampler_states), mem), inputs
+        _key, i = input
+
+        new_state, new_sampler_state, new_global = _run_blocks(
+            _key,
+            program,
+            prev_state,
+            state_clamp,
+            schedule.steps_per_sample,
+            prev_sampler_state,
         )
-
-        # need to prepend the first observation from the warmup
-        def prepend_warmup_observation(_warmup, _rest):
-            return jnp.concatenate([_warmup[None], _rest], axis=0)
-
-        observed_results = jax.tree.map(
-            prepend_warmup_observation, warmup_observation, observed_results
+        _mem, observe_out = f_observe(
+            program, new_state, state_clamp, _mem, i, new_global
         )
+        new_carry = ((new_state, new_sampler_state), _mem)
+        return new_carry, observe_out
 
-        return mem_out, observed_results
+    keys = jax.random.split(key, schedule.n_samples - 1)
+    outer_iters = jnp.arange(1, schedule.n_samples)
+
+    inputs = (keys, outer_iters)
+
+    (_, mem_out), observed_results = jax.lax.scan(
+        body_fn, ((warmup_state, warmup_sampler_states), mem), inputs
+    )
+
+    # need to prepend the first observation from the warmup
+    def prepend_warmup_observation(_warmup, _rest):
+        return jnp.concatenate([_warmup[None], _rest], axis=0)
+
+    observed_results = jax.tree.map(
+        prepend_warmup_observation, warmup_observation, observed_results
+    )
+
+    return mem_out, observed_results
 
 
 def sample_states(
