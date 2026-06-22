@@ -5,10 +5,21 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-import jax.numpy as jnp
+import numpy as np
 from jaxtyping import Array, Bool, Shaped
 
 logger = logging.getLogger(__name__)
+
+# These diagnostics are one-shot host-side summaries over small arrays (a few
+# hundred samples × a few hundred variables, plus length-n_chains stat vectors).
+# Running them in numpy on the host — rather than jax.numpy on an accelerator —
+# avoids the dominant cost, which is per-op XLA compilation: each first-seen
+# shape triggers a separate kernel compile (~40 ms each), so the jax path spent
+# ~1 s compiling ~25 ms of arithmetic. numpy has no compile step and needs a
+# single device→host transfer of `samples` instead of one sync per reduction.
+# Inputs may be jax arrays; ``np.asarray`` pulls them to the host once.
+# (If these were ever run on very large inputs, the host transfer + host compute
+# could flip this trade-off and a jitted jax implementation would win.)
 
 
 # ---------------------------------------------------------------------------
@@ -58,27 +69,28 @@ def sample_convergence(
     Returns:
         A :class:`ConvergenceReport`.
     """
-    samples = jnp.asarray(samples)
-    n_samples, n_vars = samples.shape
+    s = np.asarray(samples)
+    n_samples, n_vars = s.shape
     target_k = min(target_k, n_vars)
 
     quartile_indices = [n_samples * q // 4 for q in range(1, 5)]
     marginals = [
-        jnp.mean(samples[:idx].astype(jnp.float32), axis=0) for idx in quartile_indices
+        np.mean(s[:idx].astype(np.float32), axis=0) for idx in quartile_indices
     ]
 
     drifts = [
-        float(jnp.mean(jnp.abs(marginals[i + 1] - marginals[i])))
+        float(np.mean(np.abs(marginals[i + 1] - marginals[i])))
         for i in range(len(marginals) - 1)
     ]
 
     # Rank stability: Jaccard of top-k between first and second half.
     half = n_samples // 2
-    m_first = jnp.mean(samples[:half].astype(jnp.float32), axis=0)
-    m_second = jnp.mean(samples[half:].astype(jnp.float32), axis=0)
+    m_first = np.mean(s[:half].astype(np.float32), axis=0)
+    m_second = np.mean(s[half:].astype(np.float32), axis=0)
 
-    top_first = set(jnp.argsort(-m_first)[:target_k].tolist())
-    top_second = set(jnp.argsort(-m_second)[:target_k].tolist())
+    # stable sort matches jax.numpy.argsort's default tie-breaking.
+    top_first = set(np.argsort(-m_first, kind="stable")[:target_k].tolist())
+    top_second = set(np.argsort(-m_second, kind="stable")[:target_k].tolist())
     jaccard = len(top_first & top_second) / len(top_first | top_second)
 
     final_drift = drifts[-1]
@@ -112,13 +124,17 @@ def marginal_entropy(
     Returns:
         Scalar in [0, 1].
     """
-    p = jnp.mean(jnp.asarray(samples).astype(jnp.float32), axis=0)
-    # Use jnp.where to handle p=0 and p=1 without NaN from 0*log(0).
-    safe_p = jnp.clip(p, 1e-10, 1.0 - 1e-10)
-    h = -(safe_p * jnp.log2(safe_p) + (1 - safe_p) * jnp.log2(1 - safe_p))
+    p = np.mean(np.asarray(samples).astype(np.float32), axis=0)
+    # In float32 the upper clip 1.0 - 1e-10 rounds to exactly 1.0, so a frozen
+    # variable gives 1 - safe_p == 0 -> log2(0) == -inf -> 0 * -inf == NaN. The
+    # np.where below masks those entries to 0; errstate just silences the
+    # transient warnings (jax produced the same NaN-then-mask silently).
+    safe_p = np.clip(p, 1e-10, 1.0 - 1e-10)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        h = -(safe_p * np.log2(safe_p) + (1 - safe_p) * np.log2(1 - safe_p))
     # Zero out entropy for variables that are truly frozen.
-    h = jnp.where((p == 0.0) | (p == 1.0), 0.0, h)
-    return float(jnp.mean(h))
+    h = np.where((p == 0.0) | (p == 1.0), 0.0, h)
+    return float(np.mean(h))
 
 
 # ---------------------------------------------------------------------------
@@ -171,20 +187,21 @@ def energy_balance(
     Returns:
         An :class:`EnergyBalanceReport`.
     """
-    biases = jnp.asarray(biases)
-    edges = jnp.asarray(edges)
-    weights = jnp.asarray(weights)
-    n = biases.shape[0]
+    biases_np = np.asarray(biases)
+    edges_np = np.asarray(edges)
+    weights_np = np.asarray(weights)
+    n = biases_np.shape[0]
 
-    bias_contributions = beta * jnp.abs(biases)
-    bias_spread = float(jnp.max(bias_contributions) - jnp.min(bias_contributions))
+    bias_contributions = beta * np.abs(biases_np)
+    bias_spread = float(np.max(bias_contributions) - np.min(bias_contributions))
 
-    # Sum of absolute coupling weights incident on each node.
-    abs_w = beta * jnp.abs(weights)
-    coupling_per_node = jnp.zeros(n)
-    coupling_per_node = coupling_per_node.at[edges[:, 0]].add(abs_w)
-    coupling_per_node = coupling_per_node.at[edges[:, 1]].add(abs_w)
-    coupling_per_spin = float(jnp.mean(coupling_per_node))
+    # Sum of absolute coupling weights incident on each node. np.add.at is the
+    # unbuffered scatter-add matching jax's coupling_per_node.at[idx].add(...).
+    abs_w = beta * np.abs(weights_np)
+    coupling_per_node = np.zeros(n, dtype=abs_w.dtype)
+    np.add.at(coupling_per_node, edges_np[:, 0], abs_w)
+    np.add.at(coupling_per_node, edges_np[:, 1], abs_w)
+    coupling_per_spin = float(np.mean(coupling_per_node))
 
     if bias_spread > 0:
         ratio = coupling_per_spin / bias_spread
@@ -344,16 +361,16 @@ def report_nrpt_diagnostics(
     issues: list[str] = []
     warnings: list[str] = []
 
-    acc = jnp.asarray(stats["acceptance_rate"])
-    rej = jnp.asarray(stats["rejection_rates"])
-    attempted = jnp.asarray(stats["attempted"])
-    acceptance_mean = float(jnp.mean(acc))
-    rejection_std = float(jnp.std(rej))
+    acc = np.asarray(stats["acceptance_rate"])
+    rej = np.asarray(stats["rejection_rates"])
+    attempted = np.asarray(stats["attempted"])
+    acceptance_mean = float(np.mean(acc))
+    rejection_std = float(np.std(rej))
 
-    insufficient = bool(jnp.min(attempted) < min_attempts)
+    insufficient = bool(np.min(attempted) < min_attempts)
     if insufficient:
         warnings.append(
-            f"insufficient swap attempts (min {int(jnp.min(attempted))} < {min_attempts}); pass/fail verdict withheld"
+            f"insufficient swap attempts (min {int(np.min(attempted))} < {min_attempts}); pass/fail verdict withheld"
         )
 
     def _flag(message: str) -> None:
@@ -377,7 +394,7 @@ def report_nrpt_diagnostics(
         report.tau_observed = float(rt["tau_observed"])
         report.tau_predicted = float(rt["tau_predicted"])
         report.efficiency = float(rt["efficiency"])
-        report.total_round_trips = int(jnp.sum(rt["round_trips_per_chain"]))
+        report.total_round_trips = int(np.sum(np.asarray(rt["round_trips_per_chain"])))
 
         if report.tau_observed < tau_min:
             _flag(
@@ -397,12 +414,12 @@ def report_nrpt_diagnostics(
                 f"round-trip efficiency below {efficiency_warn} ({report.efficiency:.3f})"
             )
 
-        lam_profile = jnp.asarray(rt["lambda_profile"])
-        peak_val = float(jnp.max(lam_profile))
-        mean_val = float(jnp.mean(lam_profile))
+        lam_profile = np.asarray(rt["lambda_profile"])
+        peak_val = float(np.max(lam_profile))
+        mean_val = float(np.mean(lam_profile))
         if mean_val > 0 and peak_val > 3 * mean_val:
-            peak_idx = int(jnp.argmax(lam_profile))
-            betas = jnp.asarray(stats["betas"])
+            peak_idx = int(np.argmax(lam_profile))
+            betas = np.asarray(stats["betas"])
             report.barrier_peak_beta = float(
                 (betas[peak_idx] + betas[peak_idx + 1]) / 2
             )
