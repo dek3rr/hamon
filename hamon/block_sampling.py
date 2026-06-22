@@ -710,10 +710,15 @@ def _run_blocks(
     return final_state_free, final_sampler_states, final_global
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(frozen=True)
 class SamplingSchedule:
     """
     Represents a sampling schedule for a process.
+
+    Frozen so it is safely hashable as a static ``jit`` argument: ``frozen=True``
+    auto-generates a value-based ``__hash__`` and makes the schedule immutable,
+    so one already used as a compilation cache key cannot be mutated out from
+    under the cache.
 
     **Attributes:**
 
@@ -725,9 +730,6 @@ class SamplingSchedule:
     n_warmup: int
     n_samples: int
     steps_per_sample: int
-
-    def __hash__(self) -> int:
-        return hash((self.n_warmup, self.n_samples, self.steps_per_sample))
 
 
 def sample_with_observation(
