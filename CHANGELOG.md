@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`BlockSamplingProgram` caches its weight-independent structure** — the block
+  layout, per-node gather/slice index arrays, and scatter positions are fixed by
+  the graph, not the interaction weight values, but were recomputed from scratch
+  on every construction — including each `program.with_ebm(...)`. They are now
+  cached (keyed on the spec plus the interaction groups' node structure, the same
+  node-identity scheme `BlockSpec` uses; the cached value holds the spec so the
+  key's nodes stay alive and `id()` cannot be reused) so `with_ebm` only re-binds
+  the weight tensors — ~16 ms → ~2 ms per rebuild, which compounds across
+  repeated `nrpt` / `nrpt_adaptive` calls (training, sweeps). Bit-identical.
+- **`ising_sample` no longer rebuilds the sampling program per chain** — after
+  chain-count discovery it built one `IsingSamplingProgram` per chain
+  (`[program.with_ebm(e) for e in init_ebms]`) only to read
+  `programs[0].free_blocks`, re-running the full block-structure construction
+  ~`n_chains` times for a structure that never changes. It now reuses the
+  template program, removing ~`n_chains` redundant rebuilds (~200–380 ms of host
+  time at 22×22). Outputs are bit-identical.
 - **Round-trip diagnostics fused into one compile** — `round_trip_summary` (the
   Λ / τ̄ / efficiency / local-barrier summary emitted by each production NRPT
   phase) ran as ~8 eager `jnp` reductions, each paying a first-shape XLA compile
