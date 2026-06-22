@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`SamplingSchedule` is frozen** — it is passed as a static `jit` argument (its
+  hash keys the compiled draw), so it is now
+  `@dataclasses.dataclass(frozen=True)`: the value-based `__hash__` is
+  auto-generated and the schedule is immutable, so one already used as a
+  compilation cache key cannot be mutated out from under the cache. No behavior
+  change.
+
 - **`BlockSamplingProgram` caches its weight-independent structure** — the block
   layout, per-node gather/slice index arrays, and scatter positions are fixed by
   the graph, not the interaction weight values, but were recomputed from scratch
