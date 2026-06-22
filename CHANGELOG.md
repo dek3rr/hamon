@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`ising_sample` no longer rebuilds the sampling program per chain** — after
+  chain-count discovery it built one `IsingSamplingProgram` per chain
+  (`[program.with_ebm(e) for e in init_ebms]`) only to read
+  `programs[0].free_blocks`, re-running the full block-structure construction
+  ~`n_chains` times for a structure that never changes. It now reuses the
+  template program, removing ~`n_chains` redundant rebuilds (~200–380 ms of host
+  time at 22×22). Outputs are bit-identical.
 - **Faster NRPT cold start** — the per-phase schedule-tuning math in
   `nrpt_adaptive` (the `optimize_schedule` monotone-cubic interpolation, the
   swap-rate statistics, and the per-phase Λ / rejection-spread / ladder-movement

@@ -541,8 +541,12 @@ def ising_sample(
         dev = resolve_device("auto", score=work_score(n_chains, n))
 
     init_ebms = [ebm.with_beta(jnp.array(float(b))) for b in betas]
-    init_progs = [program.with_ebm(e) for e in init_ebms]
-    init_states = _init_factory(n_chains, init_ebms, init_progs)
+    # _init_factory only reads programs[0].gibbs_spec.free_blocks, which is the
+    # same block structure as the template program (with_ebm changes only the
+    # β-scaled weights, not the spec). Reuse the template instead of rebuilding
+    # n_chains identical programs — each rebuild reruns the full block-structure
+    # construction (~16 ms) for a structure that never changes.
+    init_states = _init_factory(n_chains, init_ebms, [program])
 
     warm_states, nrpt_stats = nrpt_adaptive(
         k_nrpt,
