@@ -123,7 +123,7 @@ def auto_color_blocks(
     A list of ``SuperBlock`` values.  Pass this directly to
     ``BlockGibbsSpec(free_super_blocks=..., ...)``.
 
-    **Example** — Ising checkerboard::
+    **Example** — 1-D Ising chain::
 
         nodes  = [SpinNode() for _ in range(5)]
         edges  = [(nodes[i], nodes[i + 1]) for i in range(4)]
@@ -132,15 +132,17 @@ def auto_color_blocks(
         even   = Block(nodes[::2])   # {0, 2, 4}
         odd    = Block(nodes[1::2])  # {1, 3}
 
-        # Without auto_color_blocks the user must know that even/odd are
-        # independent and manually write:
-        #   free_super_blocks = [(even, odd)]
+        # Each of even/odd is internally an independent set, but every chain
+        # edge links an even node to an odd one, so the two blocks conflict and
+        # cannot share a sampling group — they must be updated sequentially. By
+        # hand you would have to reason this out and write:
+        #   free_super_blocks = [even, odd]   # two separate groups
         #
-        # With auto_color_blocks:
+        # auto_color_blocks derives the same order from the interaction groups:
         igs    = [f.to_interaction_groups() for f in model.factors]
         igs    = [g for sublist in igs for g in sublist]
         super_blocks = auto_color_blocks([even, odd], igs)
-        # => [(even, odd)]  — detected automatically
+        # => [even, odd]  — the conflict is detected; two sequential groups
         spec   = BlockGibbsSpec(super_blocks, clamped_blocks=[])
     """
     free_blocks = list(free_blocks)
