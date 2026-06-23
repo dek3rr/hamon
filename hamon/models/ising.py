@@ -456,8 +456,7 @@ def ising_sample(
         unnecessary) or if all biases are identical (model has no
         per-variable preference).
     """
-    import networkx as nx
-
+    from hamon.graph_utils import rlf_coloring
     from hamon.nrpt import discover_chain_count, nrpt_adaptive
 
     biases = jnp.asarray(biases)
@@ -490,14 +489,17 @@ def ising_sample(
     nodes: list[AbstractNode] = [SpinNode() for _ in range(n)]
     node_edges: list[Edge] = [(nodes[int(e[0])], nodes[int(e[1])]) for e in edges_np]
 
-    g = nx.Graph()
-    g.add_nodes_from(range(n))
-    g.add_edges_from([(int(e[0]), int(e[1])) for e in edges_np])
-    coloring = nx.coloring.greedy_color(g, strategy="DSATUR")
-    n_colors = max(coloring.values()) + 1 if coloring else 1
+    # Recursive-Largest-First colouring of the variable graph: each colour class
+    # is an independent set and becomes one block-Gibbs group. The colour count
+    # is the number of sequential sample groups in the NRPT round loop, which
+    # sets its XLA compile cost, so minimising colours directly cuts compile —
+    # RLF does that more aggressively than greedy heuristics on dense graphs and
+    # matches them on sparse/bipartite ones.
+    coloring = rlf_coloring(n, ((int(e[0]), int(e[1])) for e in edges_np))
+    n_colors = (max(coloring) + 1) if n else 1
     color_groups: list[list[AbstractNode]] = [[] for _ in range(n_colors)]
-    for idx, color in coloring.items():
-        color_groups[color].append(nodes[idx])
+    for idx in range(n):
+        color_groups[coloring[idx]].append(nodes[idx])
     free_blocks: list[SuperBlock] = [Block(group) for group in color_groups]
 
     # --- template EBM & program ---

@@ -25,13 +25,69 @@ graph topologies.
 """
 
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 
 from hamon.block_management import Block
 from hamon.interaction import InteractionGroup
 
 # Re-export the SuperBlock type alias so callers only need one import.
 from hamon.block_sampling import SuperBlock  # noqa: F401
+
+
+def rlf_coloring(n_nodes: int, edges: Iterable[tuple[int, int]]) -> list[int]:
+    """Colour an integer-indexed graph with Recursive Largest First (RLF).
+
+    Nodes are ``0 .. n_nodes - 1``; ``edges`` are (u, v) index pairs (direction
+    and duplicates ignored, self-loops dropped). Returns ``colors`` where
+    ``colors[i]`` is the colour class of node ``i``.
+
+    RLF builds each colour class as a maximal independent set, repeatedly adding
+    the vertex with the most neighbours already excluded from the class (ties
+    broken toward fewest remaining-candidate neighbours, then smallest index).
+    It minimises the number of colours more aggressively than first-fit/greedy
+    heuristics on dense graphs and matches them on sparse/bipartite ones — and
+    in hamon the colour count is the number of sequential block-Gibbs groups,
+    which sets the NRPT round-loop XLA compile cost. Runtime is O(|V|·|E|);
+    deterministic (index tie-breaking) so colourings are reproducible.
+    """
+    adj: list[set[int]] = [set() for _ in range(n_nodes)]
+    for u, v in edges:
+        if u != v:
+            adj[u].add(v)
+            adj[v].add(u)
+
+    colors = [-1] * n_nodes
+    uncolored = set(range(n_nodes))
+    k = 0
+    while uncolored:
+        # U: vertices that may still join this colour class; W: their already-
+        # excluded neighbours (each adjacent to a class member).
+        U = set(uncolored)
+        W: set[int] = set()
+
+        # Seed with the highest-degree vertex in the remaining subgraph.
+        seed = min(U, key=lambda x, U=U: (-len(adj[x] & U), x))
+        colors[seed] = k
+        nbrs = adj[seed] & U
+        U -= nbrs
+        U.discard(seed)
+        W |= nbrs
+
+        while U:
+            chosen = min(
+                U,
+                key=lambda x, U=U, W=W: (-len(adj[x] & W), len(adj[x] & U), x),
+            )
+            colors[chosen] = k
+            nbrs = adj[chosen] & U
+            U -= nbrs
+            U.discard(chosen)
+            W |= nbrs
+
+        uncolored = {v for v in uncolored if colors[v] == -1}
+        k += 1
+
+    return colors
 
 
 def auto_color_blocks(
@@ -136,28 +192,21 @@ def auto_color_blocks(
                     conflicts.add((t, h))  # symmetric
 
     # -------------------------------------------------------------------------
-    # Step 3 — greedy graph colouring.
+    # Step 3 — colour the block-conflict graph with Recursive Largest First.
     #
-    # Process blocks in their original order.  Assign each block the smallest
-    # colour not used by any of its conflicting neighbours that have already
-    # been coloured.  This produces the chromatic number for bipartite graphs
-    # and a good (not necessarily optimal) colouring for general graphs.
+    # RLF minimises the colour count (= number of sequential sampling groups,
+    # which sets the round-loop compile cost) more aggressively than first-fit,
+    # especially on dense conflict graphs, and matches it on sparse/bipartite
+    # ones. Optimal for bipartite graphs; a good heuristic otherwise.
     # -------------------------------------------------------------------------
-    color: dict[int, int] = {}
-    for i in range(n):
-        neighbour_colors = {color[j] for j in range(i) if (i, j) in conflicts}
-        # Smallest non-negative integer not in neighbour_colors.
-        c = 0
-        while c in neighbour_colors:
-            c += 1
-        color[i] = c
+    color = rlf_coloring(n, conflicts)
 
     # -------------------------------------------------------------------------
     # Step 4 — group blocks by colour, preserving original order within groups.
     # -------------------------------------------------------------------------
     color_groups: dict[int, list[Block]] = defaultdict(list)
-    for block_idx, c in sorted(color.items()):  # sorted preserves original order
-        color_groups[c].append(free_blocks[block_idx])
+    for block_idx in range(n):  # ascending index preserves original order
+        color_groups[color[block_idx]].append(free_blocks[block_idx])
 
     # Return colour groups in ascending colour order so the sampling sequence
     # is deterministic and independent of dict iteration order.

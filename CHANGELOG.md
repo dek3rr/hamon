@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Block colouring now uses Recursive Largest First (RLF).** `ising_sample`
+  previously coloured the variable graph with networkx DSATUR, and the
+  `auto_color_blocks` helper used a first-fit greedy. Both now use RLF
+  (`hamon.graph_utils.rlf_coloring`), which minimises the colour count more
+  aggressively on dense graphs (a 484-node 6-/12-regular graph drops 5→4 / 7→6
+  colours) and matches DSATUR on sparse/bipartite ones. The colour count is the
+  number of sequential block-Gibbs groups in the NRPT round loop, which sets its
+  XLA compile cost, so fewer colours directly cuts compile on dense models. RLF
+  is O(|V|·|E|) (~tens of ms, one-time) and deterministic, and the change also
+  drops the networkx dependency from the `ising_sample` path. **Because the
+  block partition changes, samples from `ising_sample` differ byte-for-byte from
+  previous releases** — still a correct draw from the same target distribution,
+  but no longer bit-identical across this version boundary.
+
 - **`SamplingSchedule` is frozen** — it is passed as a static `jit` argument (its
   hash keys the compiled draw), so it is now
   `@dataclasses.dataclass(frozen=True)`: the value-based `__hash__` is
