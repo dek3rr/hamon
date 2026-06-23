@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`discover_chain_count` reuses a cached probe on convergence.** When the
+  chain-count search converges via `|n_star - n| <= 1` but the recommended
+  `n_star` was never probed, it now returns the last probed count `n` (always
+  cached) instead of running a full extra probe at `n_star`. That probe
+  recompiled the NRPT round loop at a brand-new chain count just to land on a
+  count within the convergence tolerance of one already in hand — costing ~2-4 s
+  on roughly half of all discovery runs (those that converge one step off the
+  last probe). This also makes the probe count robust across equally-good
+  colourings. The returned `n_chains` may be 1 lower than before (within the
+  existing tolerance), so `ising_sample` results can differ for affected models;
+  the impact is small — the cold-chain draw is robust to ±1 ladder rung and the
+  22x22 grid bench is unchanged.
 - **Block colouring now uses Recursive Largest First (RLF).** `ising_sample`
   previously coloured the variable graph with networkx DSATUR, and the
   `auto_color_blocks` helper used a first-fit greedy. Both now use RLF

@@ -1505,8 +1505,18 @@ def discover_chain_count(
             break
         n = n_star
 
-    # Produce the returned schedule at the final count (reuse a cached probe).
-    n_final = _clamp(n_star)
+    # Produce the returned schedule at the final count, reusing a cached probe
+    # where possible. On chain_count convergence n_star is within 1 of the last
+    # probed n (always cached), so when n_star itself was never probed, return n
+    # instead of running a full extra probe — that probe would recompile the
+    # round loop at a brand-new chain count (~1s) just to land on a count within
+    # the convergence tolerance of one already in hand. (Whether n_star equals
+    # the last probed n or is off by 1 is incidental to the Λ estimate, so this
+    # also makes the probe count robust across equally-good colourings.)
+    if reason == "chain_count" and _clamp(n_star) not in probed:
+        n_final = n
+    else:
+        n_final = _clamp(n_star)
     final_stats = probed[n_final] if n_final in probed else probe(n_final)
     best_betas = final_stats["betas"]
     lambda_max = max(lambda_max, float(final_stats["Lambda_raw"]))
