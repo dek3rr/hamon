@@ -9,7 +9,7 @@ from jax import numpy as jnp
 class _CounterMeta(abc.ABCMeta):
     """Metaclass that automatically calls __post_init__ and provides unique ordering.
 
-    Used internally by THRML for node identification and ordering.
+    Used internally by hamon for node identification and ordering.
     """
 
     def __call__(cls, *args, **kwargs):
@@ -21,7 +21,11 @@ class _CounterMeta(abc.ABCMeta):
         return instance
 
     def __lt__(cls, other):
-        # todo: make sure this is sufficient to distinguish and be unique for JAX
+        # Order node *types* by (module, qualname): a deterministic,
+        # process-stable key (unlike id()), so any sort of node types is
+        # reproducible across runs. It is unique for normally-defined classes;
+        # two distinct classes sharing a module+qualname (e.g. dynamically
+        # generated) would order ambiguously, but hamon never produces such.
         if not isinstance(other, type):
             raise NotImplementedError
         return (cls.__module__, cls.__qualname__) < (

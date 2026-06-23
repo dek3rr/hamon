@@ -369,7 +369,7 @@ class CategoricalGibbsConditional(SoftmaxConditional):
     """A conditional update for categorical random variables that will perform a Gibbs sampling update given one or
         more `DiscreteEBMInteractions`.
 
-    This function can be extended to handle other interactions in the same way as [`thrml.models.SpinGibbsConditional`][].
+    This function can be extended to handle other interactions in the same way as [`hamon.models.SpinGibbsConditional`][].
 
     **Attributes:**
 
