@@ -138,6 +138,126 @@ def marginal_entropy(
 
 
 # ---------------------------------------------------------------------------
+# Effective sample size
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ESSReport:
+    """Result of :func:`effective_sample_size`.
+
+    Attributes:
+        per_variable: per-column effective sample size, shape ``(n_variables,)``.
+        min_ess: smallest ESS across variables (the worst-mixing variable — the
+            conservative number to quote).
+        median_ess / mean_ess: summary ESS across variables.
+        ess_fraction: ``min_ess / n_samples`` — the efficiency of the
+            worst-mixing variable, in ``[0, 1]``.
+        n_samples: number of samples the estimate was computed from.
+    """
+
+    per_variable: np.ndarray
+    min_ess: float
+    median_ess: float
+    mean_ess: float
+    ess_fraction: float
+    n_samples: int
+
+
+def _autocorrelation(x: np.ndarray) -> np.ndarray:
+    """Normalized autocorrelation ρ(0..n-1) of a 1-D series via FFT.
+
+    Uses zero-padding to ``2n`` so the inverse transform gives the *linear*
+    (non-circular) autocovariance; ρ(0) is normalized to 1. O(n log n).
+    """
+    n = x.shape[0]
+    x = x - x.mean()
+    # Pad to >= 2n so the circular FFT correlation has no wrap-around.
+    size = int(2 ** np.ceil(np.log2(2 * n)))
+    f = np.fft.rfft(x, n=size)
+    acov = np.fft.irfft(f * np.conjugate(f), n=size)[:n]
+    return acov / acov[0]
+
+
+def _ess_1d(x: np.ndarray) -> float:
+    """ESS of one variable via Geyer's initial-positive-sequence estimator.
+
+    τ_int = 1 + 2·Σ ρ(k), truncated where consecutive lag-pair sums Γ_m =
+    ρ(2m+1) + ρ(2m+2) first turn non-positive (Geyer 1992) — this guards
+    against the noisy tail of the empirical autocorrelation. ESS = n / τ_int,
+    clipped to ``[0, n]``. A frozen (zero-variance) series carries no
+    autocorrelation information and is reported as ESS = n.
+    """
+    n = x.shape[0]
+    if n < 2 or x.var() == 0.0:
+        return float(n)
+
+    rho = _autocorrelation(x)
+    # Pair the lag-≥1 autocorrelations: Γ_m = ρ(2m+1) + ρ(2m+2).
+    tail = rho[1:]
+    n_pairs = tail.shape[0] // 2
+    if n_pairs == 0:
+        return float(n)
+    pair_sums = tail[: 2 * n_pairs].reshape(n_pairs, 2).sum(axis=1)
+
+    # Initial positive sequence: keep pairs up to the first non-positive one.
+    nonpos = np.nonzero(pair_sums <= 0)[0]
+    cutoff = int(nonpos[0]) if nonpos.size else n_pairs
+
+    tau = 1.0 + 2.0 * float(pair_sums[:cutoff].sum())
+    tau = max(tau, 1.0)  # ESS can never exceed n
+    return float(np.clip(n / tau, 0.0, n))
+
+
+def effective_sample_size(
+    samples: Shaped[Array, "n_samples n_variables"],
+) -> ESSReport:
+    """Estimate the effective sample size of an autocorrelated MCMC trace.
+
+    MCMC draws are autocorrelated, so ``n`` correlated samples carry the
+    information of fewer independent ones. ESS estimates that effective count:
+    the Monte-Carlo error of any estimate computed from the trace scales as
+    ``σ/√ESS``, not ``σ/√n``. For an iid trace ESS ≈ ``n``; for a slowly mixing
+    one it can be far smaller. Pair ``ess_fraction`` (or ``min_ess``) with the
+    run's wall-clock time to get ESS/second, the efficiency metric used to
+    compare schedules or chain counts.
+
+    Computed on the host with numpy (FFT autocorrelation + Geyer
+    initial-positive-sequence; see :func:`_ess_1d`), so there is no XLA compile
+    cost. Inputs may be jax arrays; they are pulled to the host once.
+
+    For multimodal parallel tempering, a low single-marginal ESS can reflect
+    the chain *correctly* jumping between modes (mode switches are long-range
+    correlation), so read ESS alongside the round-trip diagnostics rather than
+    instead of them.
+
+    Args:
+        samples: array of shape ``(n_samples, n_variables)`` (a 1-D
+            ``(n_samples,)`` trace is treated as a single variable). Boolean or
+            numeric.
+
+    Returns:
+        An :class:`ESSReport`.
+    """
+    s = np.asarray(samples)
+    if s.ndim == 1:
+        s = s[:, None]
+    s = s.astype(np.float64)
+    n_samples, n_vars = s.shape
+
+    per_variable = np.array([_ess_1d(s[:, j]) for j in range(n_vars)])
+    min_ess = float(np.min(per_variable))
+    return ESSReport(
+        per_variable=per_variable,
+        min_ess=min_ess,
+        median_ess=float(np.median(per_variable)),
+        mean_ess=float(np.mean(per_variable)),
+        ess_fraction=min_ess / n_samples if n_samples else 0.0,
+        n_samples=int(n_samples),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Energy balance
 # ---------------------------------------------------------------------------
 
@@ -256,6 +376,11 @@ class NRPTHealthReport:
             convergence is informational only — correct multi-modal sampling
             shifts marginals between run halves, so a non-CONVERGED status is
             **not** treated as a failure.
+        min_ess / median_ess / ess_fraction: Effective-sample-size summaries
+            over the provided *samples* (``None`` when not provided).
+            ``ess_fraction`` is ``min_ess / n_samples`` for the worst-mixing
+            variable; a low value drives a warning (never a hard failure — see
+            :func:`effective_sample_size` on the multimodal caveat).
     """
 
     healthy: bool
@@ -274,6 +399,9 @@ class NRPTHealthReport:
     convergence_status: str | None = None
     rank_stability: float | None = None
     marginal_entropy: float | None = None
+    min_ess: float | None = None
+    median_ess: float | None = None
+    ess_fraction: float | None = None
 
     def summary(self) -> str:
         """Human-readable multi-line summary."""
@@ -301,6 +429,11 @@ class NRPTHealthReport:
             lines.append(
                 f"  entropy={self.marginal_entropy:.3f}  convergence={self.convergence_status}{note}"
             )
+        if self.min_ess is not None:
+            lines.append(
+                f"  ess(min)={self.min_ess:.1f}  ess(median)={self.median_ess:.1f}  "
+                f"ess_fraction={self.ess_fraction:.3f}"
+            )
         for issue in self.issues:
             lines.append(f"  ISSUE: {issue}")
         for warning in self.warnings:
@@ -319,6 +452,7 @@ def report_nrpt_diagnostics(
     entropy_frozen: float = 0.05,
     entropy_uniform: float = 0.95,
     min_attempts: int = 50,
+    ess_warn: float = 0.1,
 ) -> NRPTHealthReport:
     """Evaluate NRPT stats (and optionally samples) into a single verdict.
 
@@ -340,6 +474,8 @@ def report_nrpt_diagnostics(
     - ISSUE: ``marginal_entropy < entropy_frozen`` — sampler frozen.
     - WARN:  ``marginal_entropy > entropy_uniform`` — β may be too low.
     - WARN:  a sharp peak in the λ(β) profile (barrier bottleneck).
+    - WARN:  ``ess_fraction < ess_warn`` — worst-mixing variable has low
+      effective sample size (informational; never a hard failure).
 
     All of these statistics are noisy when few swaps were attempted: when
     ``min(attempted) < min_attempts`` the would-be issues are demoted to
@@ -443,6 +579,17 @@ def report_nrpt_diagnostics(
         elif report.marginal_entropy > entropy_uniform:
             warnings.append(
                 f"near-uniform marginals (entropy={report.marginal_entropy:.3f}) — beta may be too low"
+            )
+
+        ess = effective_sample_size(samples)
+        report.min_ess = ess.min_ess
+        report.median_ess = ess.median_ess
+        report.ess_fraction = ess.ess_fraction
+        if ess.ess_fraction < ess_warn:
+            warnings.append(
+                f"low effective sample size (min ESS={ess.min_ess:.1f} of "
+                f"{ess.n_samples}, fraction={ess.ess_fraction:.3f}) — "
+                f"worst-mixing variable is highly autocorrelated"
             )
 
     report.healthy = not issues and not insufficient

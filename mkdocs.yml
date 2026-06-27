@@ -120,6 +120,7 @@ nav:
         - Tempering:
             - 'api/nrpt.md'
             - 'api/round_trips.md'
+            - 'api/diagnostics.md'
         - Advanced:
             - 'api/dynamic_blocks.md'
             - 'api/boundary_energy.md'

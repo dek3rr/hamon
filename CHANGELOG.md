@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Effective sample size (ESS).** `hamon.effective_sample_size` estimates the
+  per-variable ESS of a sample trace (FFT autocorrelation + Geyer
+  initial-positive-sequence) and `report_nrpt_diagnostics` now reports
+  `min_ess`/`median_ess`/`ess_fraction` (with a low-ESS warning) whenever
+  `samples` are provided. ESS is the standard answer to "how much do I trust
+  these samples?" — Monte-Carlo error scales as `σ/√ESS`, not `σ/√n` — and is
+  the gold-standard efficiency metric (ESS/compute) of Syed et al. (2021),
+  complementing the existing round-trip proxy. Pure host numpy, no XLA compile.
+- **Log normalizing constant via thermodynamic integration.** A new opt-in
+  `hamon.NRPTEnergyObserver` accumulates the per-chain mean energy μ(β), and
+  `hamon.thermodynamic_integration` / `hamon.nrpt_log_normalizing_constant`
+  turn it into `log Z(β_max)/Z(β_min) = -∫μ dβ` (Syed et al. 2021, Sec. 5.5).
+  This recovers the model evidence / free energy — the quantity ordinary MCMC
+  discards but parallel tempering reconstructs almost for free — enabling
+  Bayes-factor model comparison, EBM/RBM test log-likelihood evaluation, and
+  Ising free-energy analysis. Opt-in: attaching the observer is the only way to
+  trigger it, so the default `nrpt`/`nrpt_adaptive`/`ising_sample` fast paths
+  are unchanged.
+
 ## [0.6.0] — 2026-06-23
 
 ### Changed

@@ -36,10 +36,13 @@ from .interaction import InteractionGroup as InteractionGroup
 from .observers import AbstractNRPTObserver as AbstractNRPTObserver
 from .observers import AbstractObserver as AbstractObserver
 from .observers import MomentAccumulatorObserver as MomentAccumulatorObserver
+from .observers import NRPTEnergyObserver as NRPTEnergyObserver
 from .observers import NRPTStateObserver as NRPTStateObserver
 from .observers import StateObserver as StateObserver
 from .observers import nrpt_node_samples as nrpt_node_samples
+from .diagnostics import ESSReport as ESSReport
 from .diagnostics import NRPTHealthReport as NRPTHealthReport
+from .diagnostics import effective_sample_size as effective_sample_size
 from .diagnostics import report_nrpt_diagnostics as report_nrpt_diagnostics
 from .pgm import AbstractNode as AbstractNode
 from .pgm import CategoricalNode as CategoricalNode
@@ -50,6 +53,10 @@ from .nrpt import optimize_schedule as optimize_schedule
 from .nrpt import discover_chain_count as discover_chain_count
 from .round_trips import round_trip_summary as round_trip_summary
 from .round_trips import recommend_n_chains as recommend_n_chains
+from .round_trips import thermodynamic_integration as thermodynamic_integration
+from .round_trips import (
+    nrpt_log_normalizing_constant as nrpt_log_normalizing_constant,
+)
 from .boundary_energy import EdgePartition as EdgePartition
 from .boundary_energy import make_rectangular_blocks as make_rectangular_blocks
 from .dynamic_blocks import compute_aggregate_influence as compute_aggregate_influence

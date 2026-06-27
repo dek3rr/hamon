@@ -178,6 +178,90 @@ def round_trip_summary(
     }
 
 
+# ---------------------------------------------------------------------------
+# Normalizing constant (thermodynamic integration)
+# ---------------------------------------------------------------------------
+
+
+def thermodynamic_integration(
+    betas: jax.Array,
+    mean_energies: jax.Array,
+    *,
+    method: str = "trapezoid",
+) -> jax.Array:
+    r"""Log normalizing-constant ratio via thermodynamic integration.
+
+    Estimates ``log Z(β_max) / Z(β_min) = -∫ μ(β) dβ`` (Syed et al. 2021,
+    Sec. 5.5), where ``μ(β) = E_{π^(β)}[V]`` is the mean base energy and the
+    integral runs over the supplied ladder ``[β_min, β_max]``. ``mean_energies``
+    are the per-chain means μ(β_i) — accumulate them with
+    [`hamon.NRPTEnergyObserver`][] and divide its ``(sum_E, count)`` carry, or
+    use :func:`nrpt_log_normalizing_constant`.
+
+    The reference chain (``β_min``, typically 0) has a known normalizer: for a
+    discrete model with a uniform β=0 reference over ``M`` configurations,
+    ``log Z(β_min) = log M`` (e.g. ``n·log 2`` for ``n`` spins), so the absolute
+    ``log Z(β_max)`` is this result plus that constant.
+
+    Args:
+        betas: ascending β ladder, shape ``(n_chains,)``.
+        mean_energies: per-chain mean base energy μ(β_i), shape ``(n_chains,)``.
+        method: ``"trapezoid"`` (default, O(N⁻²)) or ``"riemann"`` — the
+            right-Riemann sum of Syed et al. Eq. 5.5.
+
+    Returns:
+        Scalar ``log Z(β_max) / Z(β_min)``, in the dtype of ``mean_energies``.
+    """
+    betas = jnp.asarray(betas)
+    mu = jnp.asarray(mean_energies)
+    dbeta = jnp.diff(betas).astype(mu.dtype)
+    if method == "trapezoid":
+        integral = jnp.sum(0.5 * (mu[1:] + mu[:-1]) * dbeta)
+    elif method == "riemann":
+        integral = jnp.sum(mu[1:] * dbeta)
+    else:
+        raise ValueError(f"method must be 'trapezoid' or 'riemann', got {method!r}.")
+    return -integral
+
+
+def nrpt_log_normalizing_constant(
+    stats: dict,
+    *,
+    log_z0: float = 0.0,
+    method: str = "trapezoid",
+) -> jax.Array:
+    r"""Log normalizing constant from an NRPT run with an energy observer.
+
+    Convenience over :func:`thermodynamic_integration`: reads the
+    ``(sum_E, count)`` carry left by [`hamon.NRPTEnergyObserver`][] in
+    ``stats["observer_carry"]``, forms the per-chain mean energies, and
+    integrates them against ``stats["betas"]``.
+
+    Args:
+        stats: the stats dict from [`hamon.nrpt`][] / [`hamon.nrpt_adaptive`][]
+            run with ``observer=NRPTEnergyObserver(...)``.
+        log_z0: ``log Z(β_min)`` of the reference chain, added to the integrated
+            ratio to return the absolute ``log Z(β_max)``. Defaults to ``0``
+            (returns the ratio ``log Z(β_max) / Z(β_min)``). For an ``n``-spin
+            model with a β=0 uniform reference, pass ``n·log 2``.
+        method: quadrature rule, see :func:`thermodynamic_integration`.
+
+    Returns:
+        Scalar ``log Z(β_max)`` (or the ratio when ``log_z0 = 0``).
+    """
+    if "observer_carry" not in stats:
+        raise ValueError(
+            "stats has no 'observer_carry'; run nrpt/nrpt_adaptive with "
+            "observer=NRPTEnergyObserver(n_chains) to accumulate mean energies."
+        )
+    sum_E, count = stats["observer_carry"]
+    mean_energies = jnp.asarray(sum_E) / jnp.maximum(jnp.asarray(count), 1).astype(
+        jnp.asarray(sum_E).dtype
+    )
+    logz = thermodynamic_integration(stats["betas"], mean_energies, method=method)
+    return logz + jnp.asarray(log_z0, dtype=logz.dtype)
+
+
 def recommend_n_chains(
     Lambda: float | jax.Array,
     target_acceptance: float = 0.6,
