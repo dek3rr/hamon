@@ -63,6 +63,15 @@ class TestSelectGibbsSteps:
         assert best["n_expl"] == 1
         assert [h["n_expl"] for h in hist] == [1, 2]
 
+    def test_improve_tol_prefers_smaller_on_marginal_gain(self):
+        """Hysteresis: a later, only-marginally-better n_expl is not preferred
+        over a smaller one, so the chosen objective need not be the raw argmax."""
+        probe = _fake_probe({1: 1.0, 2: 2.0, 4: 2.06})  # n=4 only 3% over n=2
+        best, hist = _select_gibbs_steps(probe, 1, 4, 0.05)
+        assert best["n_expl"] == 2
+        assert best["objective"] < max(h["objective"] for h in hist)
+        assert [h["n_expl"] for h in hist] == [1, 2, 4]
+
     def test_max_steps_ceiling(self):
         probe = _fake_probe({1: 1.0, 2: 2.0, 4: 4.0})  # always improving
         best, hist = _select_gibbs_steps(probe, 1, 4, 0.0)
@@ -113,6 +122,10 @@ def test_discover_gibbs_steps_smoke():
     first = res["history"][0]
     for k in ("n_expl", "objective", "ess_median", "t_round", "rt_per_compute"):
         assert k in first
-    # The chosen n_expl is the argmax of the per-probe objective.
-    best_obj = max(h["objective"] for h in res["history"])
-    assert res["objective"] == best_obj
+    # The returned objective is the chosen n_expl's probe objective. (Selection
+    # applies improve_tol hysteresis, so it need not be the raw argmax — a later,
+    # only-marginally-better n_expl is not preferred over a smaller one.)
+    chosen = res["gibbs_steps_per_round"]
+    match = [h for h in res["history"] if h["n_expl"] == chosen]
+    assert len(match) == 1
+    assert res["objective"] == match[0]["objective"]
