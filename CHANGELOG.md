@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Efficiency-cause attribution in the health report.** When round-trip
+  efficiency is below the ELE-optimal rate, `report_nrpt_diagnostics` now sets
+  `NRPTHealthReport.efficiency_limiter` to point at the right knob:
+  `"schedule"` when the ladder is not equalized (tune further / add chains) or
+  `"local_exploration"` when it *is* equalized — an ELE violation whose fix is a
+  larger `gibbs_steps_per_round` (with more chains as the alternative lever).
+  Previously low efficiency was always attributed to chain count; the report now
+  distinguishes a schedule problem from a local-kernel problem using the
+  rejection-rate spread it already computes.
 - **Effective sample size (ESS).** `hamon.effective_sample_size` estimates the
   per-variable ESS of a sample trace (FFT autocorrelation + Geyer
   initial-positive-sequence) and `report_nrpt_diagnostics` now reports

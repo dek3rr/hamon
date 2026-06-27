@@ -220,6 +220,35 @@ class TestNRPTHealthReport(unittest.TestCase):
         self.assertIsNotNone(report.recommended_n_chains)
         self.assertGreaterEqual(report.recommended_n_chains, 2)
 
+    def test_low_efficiency_equalized_blames_local_exploration(self):
+        """Equalized schedule + low efficiency → blame the local kernel."""
+        # Default rej=(0.4, 0.4, 0.4) is perfectly equalized (std=0).
+        report = report_nrpt_diagnostics(self._stats(efficiency=0.1))
+        self.assertEqual(report.efficiency_limiter, "local_exploration")
+        self.assertIsNotNone(report.recommended_n_chains)
+        self.assertTrue(any("gibbs_steps_per_round" in i for i in report.issues))
+
+    def test_low_efficiency_unequalized_blames_schedule(self):
+        """Unequalized schedule + low efficiency → blame the schedule."""
+        report = report_nrpt_diagnostics(
+            self._stats(rej=(0.05, 0.8, 0.05), efficiency=0.1)
+        )
+        self.assertEqual(report.efficiency_limiter, "schedule")
+        self.assertIsNotNone(report.recommended_n_chains)
+        self.assertTrue(any("tune the schedule" in i for i in report.issues))
+
+    def test_efficiency_warn_level_sets_limiter(self):
+        """The warn band (no hard fail) still attributes a limiter."""
+        report = report_nrpt_diagnostics(self._stats(efficiency=0.3))
+        # 0.2 (fail) < 0.3 < 0.35 (warn): a warning, not an issue.
+        self.assertEqual(report.issues, [])
+        self.assertEqual(report.efficiency_limiter, "local_exploration")
+        self.assertTrue(any("local exploration kernel" in w for w in report.warnings))
+
+    def test_healthy_efficiency_no_limiter(self):
+        report = report_nrpt_diagnostics(self._stats(efficiency=0.6))
+        self.assertIsNone(report.efficiency_limiter)
+
     def test_unequalized_schedule_fails(self):
         report = report_nrpt_diagnostics(self._stats(rej=(0.05, 0.8, 0.05)))
         self.assertFalse(report.healthy)

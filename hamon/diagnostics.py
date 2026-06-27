@@ -370,6 +370,12 @@ class NRPTHealthReport:
         total_round_trips: Round-trip diagnostics (``None`` when the run was
             made with ``track_round_trips=False``).
         recommended_n_chains: Suggested chain count when efficiency is low.
+        efficiency_limiter: When round-trip efficiency is low, which knob to
+            turn — ``"schedule"`` (the ladder is not equalized: tune it further
+            or add chains) or ``"local_exploration"`` (the ladder *is*
+            equalized, so the local kernel is the bottleneck — an ELE violation;
+            raise ``gibbs_steps_per_round``, or increase N as the alternative
+            lever). ``None`` when efficiency is healthy or unavailable.
         barrier_peak_beta: Midpoint β of a sharp barrier peak, if detected.
         convergence_status / rank_stability / marginal_entropy: Sample-based
             metrics (``None`` when *samples* was not provided). For NRPT,
@@ -395,6 +401,7 @@ class NRPTHealthReport:
     efficiency: float | None = None
     total_round_trips: int | None = None
     recommended_n_chains: int | None = None
+    efficiency_limiter: str | None = None
     barrier_peak_beta: float | None = None
     convergence_status: str | None = None
     rank_stability: float | None = None
@@ -416,11 +423,16 @@ class NRPTHealthReport:
             f"  acceptance mean={self.acceptance_mean:.3f}  rejection std={self.rejection_std:.3f}"
         )
         if self.Lambda is not None:
+            limiter = (
+                f"  limiter={self.efficiency_limiter}"
+                if self.efficiency_limiter
+                else ""
+            )
             lines.append(
                 f"  Lambda={self.Lambda:.3f}  tau_obs={self.tau_observed:.4f}  "
                 f"tau_pred={self.tau_predicted:.4f}  "
                 f"efficiency={self.efficiency:.3f}  "
-                f"round_trips={self.total_round_trips}"
+                f"round_trips={self.total_round_trips}{limiter}"
             )
         if self.marginal_entropy is not None:
             note = ""
@@ -467,9 +479,14 @@ def report_nrpt_diagnostics(
 
     - ISSUE: ``tau_observed < tau_min`` — no round trips, information is not
       flowing through the ladder.
-    - ISSUE: ``efficiency < efficiency_fail`` — schedule badly miscalibrated
-      (the report then includes a chain-count recommendation).
-    - WARN:  ``efficiency < efficiency_warn``.
+    - ISSUE/WARN: ``efficiency < efficiency_fail`` / ``< efficiency_warn`` — the
+      round-trip rate is below the ELE-optimal τ̄. The report sets
+      ``efficiency_limiter`` to attribute the cause and point at the right knob:
+      ``"schedule"`` when the ladder is not equalized
+      (``std(rejection_rates) > rej_std_max`` — tune further / add chains) or
+      ``"local_exploration"`` when it *is* equalized (an ELE violation — raise
+      ``gibbs_steps_per_round``, or add chains as the alternative lever). A
+      chain-count recommendation is included either way.
     - ISSUE: ``std(rejection_rates) > rej_std_max`` — schedule not equalized.
     - ISSUE: ``marginal_entropy < entropy_frozen`` — sampler frozen.
     - WARN:  ``marginal_entropy > entropy_uniform`` — β may be too low.
@@ -536,19 +553,39 @@ def report_nrpt_diagnostics(
             _flag(
                 f"near-zero round trip rate (tau_obs={report.tau_observed:.4f}) — information not flowing"
             )
-        elif report.efficiency < efficiency_fail:
+        elif report.efficiency < efficiency_warn:
             from hamon.round_trips import recommend_n_chains
 
             report.recommended_n_chains = recommend_n_chains(report.Lambda)
-            _flag(
-                f"low round-trip efficiency ({report.efficiency:.3f}); "
-                f"consider {report.recommended_n_chains} chains for "
-                f"Lambda={report.Lambda:.2f}"
-            )
-        elif report.efficiency < efficiency_warn:
-            warnings.append(
-                f"round-trip efficiency below {efficiency_warn} ({report.efficiency:.3f})"
-            )
+            # Attribute the inefficiency to the right knob. An equalized ladder
+            # means the communication phase is already tuned, so the gap to the
+            # ELE-optimal rate τ̄ is the local exploration kernel failing to
+            # decorrelate the energy between swaps (an ELE violation) — raise
+            # gibbs_steps_per_round, with more chains as the alternative lever.
+            # An unequalized ladder means the schedule itself is the limiter.
+            if rejection_std <= rej_std_max:
+                report.efficiency_limiter = "local_exploration"
+                msg = (
+                    f"round-trip efficiency {report.efficiency:.3f} despite an "
+                    f"equalized schedule (rejection std={rejection_std:.3f}): the "
+                    f"local exploration kernel limits mixing (ELE violation). "
+                    f"Raise gibbs_steps_per_round, or increase N to "
+                    f"~{report.recommended_n_chains}."
+                )
+            else:
+                report.efficiency_limiter = "schedule"
+                msg = (
+                    f"round-trip efficiency {report.efficiency:.3f} with an "
+                    f"unequalized schedule (rejection std={rejection_std:.3f}): "
+                    f"tune the schedule further or use "
+                    f"~{report.recommended_n_chains} chains "
+                    f"(Lambda={report.Lambda:.2f})."
+                )
+            # Severity follows the same fail/warn split as before.
+            if report.efficiency < efficiency_fail:
+                _flag(msg)
+            else:
+                warnings.append(msg)
 
         lam_profile = np.asarray(rt["lambda_profile"])
         peak_val = float(np.max(lam_profile))
