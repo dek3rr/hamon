@@ -2,8 +2,11 @@ import unittest
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from hamon.diagnostics import (
+    ESSReport,
+    effective_sample_size,
     energy_balance,
     report_nrpt_diagnostics,
     marginal_entropy,
@@ -111,6 +114,57 @@ class TestEnergyBalance(unittest.TestCase):
         self.assertEqual(report.ratio, float("inf"))
 
 
+class TestEffectiveSampleSize(unittest.TestCase):
+    @staticmethod
+    def _ar1(n, rho, seed=0):
+        """An AR(1) series with lag-1 autocorrelation ~rho (ESS fraction known)."""
+        rng = np.random.default_rng(seed)
+        eps = rng.standard_normal(n)
+        x = np.empty(n)
+        x[0] = eps[0]
+        s = np.sqrt(1.0 - rho**2)
+        for t in range(1, n):
+            x[t] = rho * x[t - 1] + s * eps[t]
+        return x
+
+    def test_iid_fraction_near_one(self):
+        """IID samples should have ESS ≈ n (fraction near 1)."""
+        samples = np.asarray(
+            jax.random.bernoulli(jax.random.key(1), 0.5, shape=(20_000, 4))
+        )
+        report = effective_sample_size(samples)
+        self.assertIsInstance(report, ESSReport)
+        self.assertEqual(report.per_variable.shape, (4,))
+        self.assertGreater(report.ess_fraction, 0.7)
+        self.assertLessEqual(report.min_ess, report.n_samples)
+
+    def test_correlated_fraction_small(self):
+        """AR(1) with rho=0.9 → fraction ≈ (1-rho)/(1+rho) = 0.0526."""
+        x = self._ar1(12_000, rho=0.9)
+        report = effective_sample_size(x)  # 1-D input
+        self.assertEqual(report.per_variable.shape, (1,))
+        # Generous bounds around the 0.053 theoretical value (estimator is noisy).
+        self.assertLess(report.ess_fraction, 0.15)
+        self.assertGreater(report.ess_fraction, 0.01)
+
+    def test_frozen_column_is_full_ess(self):
+        """A zero-variance column carries no autocorrelation info → ESS = n."""
+        samples = np.ones((1000, 3))
+        report = effective_sample_size(samples)
+        np.testing.assert_allclose(report.per_variable, 1000.0)
+        self.assertEqual(report.min_ess, 1000.0)
+
+    def test_mixed_columns(self):
+        """Frozen + iid columns: all ESS in (0, n], shape preserved."""
+        iid = np.asarray(jax.random.bernoulli(jax.random.key(5), 0.5, shape=(5000, 2)))
+        frozen = np.ones((5000, 1))
+        samples = np.concatenate([iid, frozen], axis=1)
+        report = effective_sample_size(samples)
+        self.assertEqual(report.per_variable.shape, (3,))
+        self.assertTrue(np.all(report.per_variable > 0))
+        self.assertTrue(np.all(report.per_variable <= 5000))
+
+
 class TestNRPTHealthReport(unittest.TestCase):
     """Verdict logic of report_nrpt_diagnostics."""
 
@@ -166,6 +220,35 @@ class TestNRPTHealthReport(unittest.TestCase):
         self.assertIsNotNone(report.recommended_n_chains)
         self.assertGreaterEqual(report.recommended_n_chains, 2)
 
+    def test_low_efficiency_equalized_blames_local_exploration(self):
+        """Equalized schedule + low efficiency → blame the local kernel."""
+        # Default rej=(0.4, 0.4, 0.4) is perfectly equalized (std=0).
+        report = report_nrpt_diagnostics(self._stats(efficiency=0.1))
+        self.assertEqual(report.efficiency_limiter, "local_exploration")
+        self.assertIsNotNone(report.recommended_n_chains)
+        self.assertTrue(any("gibbs_steps_per_round" in i for i in report.issues))
+
+    def test_low_efficiency_unequalized_blames_schedule(self):
+        """Unequalized schedule + low efficiency → blame the schedule."""
+        report = report_nrpt_diagnostics(
+            self._stats(rej=(0.05, 0.8, 0.05), efficiency=0.1)
+        )
+        self.assertEqual(report.efficiency_limiter, "schedule")
+        self.assertIsNotNone(report.recommended_n_chains)
+        self.assertTrue(any("tune the schedule" in i for i in report.issues))
+
+    def test_efficiency_warn_level_sets_limiter(self):
+        """The warn band (no hard fail) still attributes a limiter."""
+        report = report_nrpt_diagnostics(self._stats(efficiency=0.3))
+        # 0.2 (fail) < 0.3 < 0.35 (warn): a warning, not an issue.
+        self.assertEqual(report.issues, [])
+        self.assertEqual(report.efficiency_limiter, "local_exploration")
+        self.assertTrue(any("local exploration kernel" in w for w in report.warnings))
+
+    def test_healthy_efficiency_no_limiter(self):
+        report = report_nrpt_diagnostics(self._stats(efficiency=0.6))
+        self.assertIsNone(report.efficiency_limiter)
+
     def test_unequalized_schedule_fails(self):
         report = report_nrpt_diagnostics(self._stats(rej=(0.05, 0.8, 0.05)))
         self.assertFalse(report.healthy)
@@ -212,8 +295,34 @@ class TestNRPTHealthReport(unittest.TestCase):
         self.assertIsNotNone(report.barrier_peak_beta)
         self.assertTrue(any("barrier" in w for w in report.warnings))
 
+    def test_ess_reported_for_iid_samples(self):
+        """ESS fields populated; iid samples do not trigger the low-ESS warning."""
+        samples = jax.random.bernoulli(jax.random.key(4), 0.5, shape=(5000, 8))
+        report = report_nrpt_diagnostics(self._stats(), samples=samples)
+        self.assertIsNotNone(report.min_ess)
+        self.assertIsNotNone(report.ess_fraction)
+        self.assertGreater(report.ess_fraction, 0.5)
+        self.assertFalse(any("effective sample size" in w for w in report.warnings))
+
+    def test_low_ess_warns(self):
+        """Highly autocorrelated samples trigger a low-ESS warning (not a failure)."""
+        # Each value repeated 20× → ESS fraction ≈ 1/20 = 0.05 < ess_warn.
+        base = jax.random.bernoulli(jax.random.key(7), 0.7, shape=(60, 8))
+        samples = jnp.repeat(base, 20, axis=0)
+        report = report_nrpt_diagnostics(self._stats(), samples=samples)
+        self.assertIsNotNone(report.min_ess)
+        self.assertLess(report.ess_fraction, 0.1)
+        self.assertTrue(any("effective sample size" in w for w in report.warnings))
+        # Low ESS is informational only — it must not flip the verdict.
+        self.assertTrue(report.healthy)
+
     def test_summary_renders(self):
         report = report_nrpt_diagnostics(self._stats())
         text = report.summary()
         self.assertIn("VERDICT", text)
         self.assertIn("Lambda", text)
+
+    def test_summary_includes_ess(self):
+        samples = jax.random.bernoulli(jax.random.key(8), 0.5, shape=(2000, 6))
+        report = report_nrpt_diagnostics(self._stats(), samples=samples)
+        self.assertIn("ess", report.summary())

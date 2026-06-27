@@ -18,3 +18,27 @@ without storing every sample.
     options:
         members:
             - __init__
+
+## NRPT observers
+
+Observers called once per NRPT round (after the Gibbs sweeps and swaps).
+`NRPTStateObserver` records chain states; `NRPTEnergyObserver` accumulates the
+per-chain mean energy used for the log normalizing constant
+([`thermodynamic_integration`][hamon.thermodynamic_integration]).
+
+::: hamon.AbstractNRPTObserver
+    options:
+        members:
+            - init
+
+::: hamon.NRPTStateObserver
+    options:
+        members:
+            - __init__
+
+::: hamon.NRPTEnergyObserver
+    options:
+        members:
+            - __init__
+
+::: hamon.nrpt_node_samples

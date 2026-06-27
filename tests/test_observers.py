@@ -13,10 +13,15 @@ import unittest
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from hamon.block_management import Block, block_state_to_global
 from hamon.block_sampling import BlockGibbsSpec
-from hamon.observers import MomentAccumulatorObserver, StateObserver
+from hamon.observers import (
+    MomentAccumulatorObserver,
+    NRPTEnergyObserver,
+    StateObserver,
+)
 from hamon.pgm import CategoricalNode, SpinNode
 
 
@@ -197,3 +202,45 @@ class TestMomentAccumulation(unittest.TestCase):
 
         # (+1)^2 * n_steps = n_steps
         self.assertAlmostEqual(float(carry[0][0]), float(n_steps), places=5)
+
+
+class TestNRPTEnergyObserver(unittest.TestCase):
+    """NRPTEnergyObserver accumulates per-chain mean base energy."""
+
+    def test_init_carry_shape(self):
+        obs = NRPTEnergyObserver(4)
+        sum_E, count = obs.init()
+        self.assertEqual(sum_E.shape, (4,))
+        self.assertEqual(int(count), 0)
+        self.assertEqual(sum_E.dtype, jnp.zeros(0, dtype=jnp.float32).dtype)
+
+    def test_accumulates_sum_and_count(self):
+        """Carry holds the running sum of base_energies and the round count."""
+        obs = NRPTEnergyObserver(4)
+        carry = obs.init()
+
+        be1 = jnp.array([1.0, 2.0, 3.0, 4.0])
+        be2 = jnp.array([0.5, 0.5, 0.5, 0.5])
+
+        # stacked_states / round_idx are unused by this observer.
+        carry, out1 = obs(None, be1, jnp.array(0, dtype=jnp.int32), carry)
+        self.assertIsNone(out1)  # accumulate-only → no per-round observation
+        carry, out2 = obs(None, be2, jnp.array(1, dtype=jnp.int32), carry)
+        self.assertIsNone(out2)
+
+        sum_E, count = carry
+        self.assertEqual(int(count), 2)
+        np.testing.assert_allclose(np.asarray(sum_E), np.asarray(be1 + be2))
+
+        mean_energies = np.asarray(sum_E) / int(count)
+        np.testing.assert_allclose(mean_energies, np.asarray(be1 + be2) / 2.0)
+
+    def test_dtype_parameter(self):
+        """dtype is canonicalized at construction (truncated to f32 without x64)."""
+        import jax.dtypes as jdt
+
+        obs = NRPTEnergyObserver(3, dtype=jnp.float64)
+        expected = jdt.canonicalize_dtype(jnp.float64)
+        self.assertEqual(obs._dtype, expected)
+        sum_E, _ = obs.init()
+        self.assertEqual(sum_E.dtype, expected)

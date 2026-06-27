@@ -371,6 +371,75 @@ class NRPTStateObserver(AbstractNRPTObserver):
         return None, [s[idx] for s in stacked_states]
 
 
+class NRPTEnergyObserver(AbstractNRPTObserver):
+    r"""Accumulate per-chain mean base energy μ(β_i) = E[V^(β_i)] for
+    thermodynamic integration of the log normalizing constant.
+
+    Each round the NRPT loop hands every observer the post-swap
+    ``base_energies`` (shape ``(n_chains,)``, aligned to chain/β positions).
+    Under stationarity these are samples of ``V^(β_i)``, so a running mean
+    estimates μ(β_i), which integrates to ``log Z`` via
+    :func:`hamon.round_trips.thermodynamic_integration`.
+
+    Accumulate-only: it returns ``None`` as the per-round observation, so it
+    adds no per-round output stack — only a tiny carry ``(sum_E, count)``. Read
+    the mean energies after a run from ``stats["observer_carry"]``::
+
+        obs = NRPTEnergyObserver(n_chains)
+        states, stats = nrpt_adaptive(..., observer=obs)
+        sum_E, count = stats["observer_carry"]
+        mean_energies = sum_E / count
+
+    or use the one-call
+    :func:`hamon.round_trips.nrpt_log_normalizing_constant`.
+
+    .. note::
+       Attaching any observer (this one included) switches the NRPT round loop
+       from the dynamic-trip-count ``lax.fori_loop`` fast path to ``lax.scan``,
+       which compiles once per distinct ``n_rounds``. The default no-observer
+       path is unaffected. In ``nrpt_adaptive`` the observer is attached only to
+       the production run, so accumulation is naturally post-tuning (no burn-in
+       from the tuning phases is included).
+
+    **Attributes:**
+
+    - `n_chains`: number of chains in the ladder (sets the carry shape).
+    - `_dtype`: accumulator dtype, fixed at construction.
+    """
+
+    n_chains: int
+    _dtype: jnp.dtype
+
+    def __init__(self, n_chains: int, dtype: jnp.dtype = jnp.float32):
+        """Create an energy observer.
+
+        **Arguments:**
+
+        - `n_chains`: the number of chains (``len(betas)``).
+        - `dtype`: accumulator dtype, fixed at construction. Defaults to
+            ``jnp.float32``; use ``jnp.float64`` for double-precision models.
+        """
+        self.n_chains = n_chains
+        self._dtype = jnp.zeros(0, dtype=dtype).dtype
+
+    def __call__(
+        self,
+        stacked_states: list[Array],
+        base_energies: Array,
+        round_idx: Int[Array, ""],
+        carry: tuple[Array, Array],
+    ) -> tuple[tuple[Array, Array], None]:
+        sum_E, count = carry
+        return (sum_E + base_energies.astype(self._dtype), count + 1), None
+
+    def init(self) -> tuple[Array, Array]:
+        """Initialize the ``(sum_E, count)`` accumulator carry."""
+        return (
+            jnp.zeros(self.n_chains, dtype=self._dtype),
+            jnp.zeros((), dtype=jnp.int32),
+        )
+
+
 def nrpt_node_samples(
     observations: list[Array],
     program: "BlockSamplingProgram",

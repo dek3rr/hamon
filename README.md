@@ -151,6 +151,46 @@ Key features of the NRPT implementation:
   Λ and predicted optimal rate τ̄ = 1/(2+2Λ)
 - **Chain count discovery**: iteratively probes to find the right number of
   chains for a target acceptance rate
+- **Local-exploration tuning**: `discover_gibbs_steps` picks
+  `gibbs_steps_per_round` by maximizing ESS per *measured* wall-second, so it
+  self-calibrates to the device (n_expl=1 on a compute-bound CPU, n_expl>1 on a
+  dispatch-bound GPU where extra sweeps are nearly free)
+- **Effective sample size**: `effective_sample_size` reports per-variable ESS
+  (the honest denominator on Monte-Carlo error); folded into
+  `report_nrpt_diagnostics`
+- **Log normalizing constant**: opt-in `NRPTEnergyObserver` +
+  `thermodynamic_integration` recover log Z / model evidence / free energy from
+  the tempering energies — the quantity ordinary MCMC discards
+
+### Log Z and effective sample size
+
+```python
+import jax.numpy as jnp
+from hamon import NRPTEnergyObserver, nrpt_log_normalizing_constant
+from hamon.nrpt import nrpt_adaptive
+
+obs = NRPTEnergyObserver(n_chains=8)
+states, stats = nrpt_adaptive(
+    jax.random.key(0),
+    init_states=[init_state] * 8,
+    clamp_state=[],
+    n_rounds=500,
+    gibbs_steps_per_round=5,
+    initial_betas=jnp.linspace(0.0, 1.0, 8),
+    ebm=ebm,
+    program=program,
+    observer=obs,  # opt-in: accumulates mean energy on the production run
+)
+
+# log Z(1) for an n-spin model (β=0 reference is uniform over 2**n states).
+log_z = nrpt_log_normalizing_constant(stats, log_z0=len(nodes) * jnp.log(2.0))
+
+# Effective sample size of the cold-chain trace.
+from hamon import effective_sample_size, report_nrpt_diagnostics
+
+report = report_nrpt_diagnostics(stats, samples=my_cold_chain_samples)
+print(report.summary())  # includes ess(min)/ess(median)/ess_fraction
+```
 
 ## What makes Hamon fast
 

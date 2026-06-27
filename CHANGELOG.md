@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Adaptive local-exploration count (`discover_gibbs_steps`).** Auto-tunes
+  `gibbs_steps_per_round` (n_expl) — the last major NRPT knob hamon did not
+  set for you — by maximizing effective sample size per **measured steady-state
+  wall-second** (compile excluded via warm-up). Because the objective measures
+  real per-round cost `t_round = c₀ + n_expl·c_s` rather than assuming the
+  paper's cost ∝ n_expl, it **self-calibrates to the device**: on a compute-bound
+  CPU it returns n_expl=1, but on a dispatch-bound GPU (where the fixed per-round
+  overhead c₀ dominates a single sweep) it flips to n_expl=2–4, measured to give
+  1.7–2.3× ESS/sec on the models tried. Round-trip efficiency and the
+  `efficiency_limiter` gate it (a schedule-limited probe stops the search). The
+  chain count is held fixed (Λ is robust to n_expl), so it composes after
+  `discover_chain_count`.
+- **Efficiency-cause attribution in the health report.** When round-trip
+  efficiency is below the ELE-optimal rate, `report_nrpt_diagnostics` now sets
+  `NRPTHealthReport.efficiency_limiter` to point at the right knob:
+  `"schedule"` when the ladder is not equalized (tune further / add chains) or
+  `"local_exploration"` when it *is* equalized — an ELE violation whose fix is a
+  larger `gibbs_steps_per_round` (with more chains as the alternative lever).
+  Previously low efficiency was always attributed to chain count; the report now
+  distinguishes a schedule problem from a local-kernel problem using the
+  rejection-rate spread it already computes.
+- **Effective sample size (ESS).** `hamon.effective_sample_size` estimates the
+  per-variable ESS of a sample trace (FFT autocorrelation + Geyer
+  initial-positive-sequence) and `report_nrpt_diagnostics` now reports
+  `min_ess`/`median_ess`/`ess_fraction` (with a low-ESS warning) whenever
+  `samples` are provided. ESS is the standard answer to "how much do I trust
+  these samples?" — Monte-Carlo error scales as `σ/√ESS`, not `σ/√n` — and is
+  the gold-standard efficiency metric (ESS/compute) of Syed et al. (2021),
+  complementing the existing round-trip proxy. Pure host numpy, no XLA compile.
+- **Log normalizing constant via thermodynamic integration.** A new opt-in
+  `hamon.NRPTEnergyObserver` accumulates the per-chain mean energy μ(β), and
+  `hamon.thermodynamic_integration` / `hamon.nrpt_log_normalizing_constant`
+  turn it into `log Z(β_max)/Z(β_min) = -∫μ dβ` (Syed et al. 2021, Sec. 5.5).
+  This recovers the model evidence / free energy — the quantity ordinary MCMC
+  discards but parallel tempering reconstructs almost for free — enabling
+  Bayes-factor model comparison, EBM/RBM test log-likelihood evaluation, and
+  Ising free-energy analysis. Opt-in: attaching the observer is the only way to
+  trigger it, so the default `nrpt`/`nrpt_adaptive`/`ising_sample` fast paths
+  are unchanged.
+
 ## [0.6.0] — 2026-06-23
 
 ### Changed
