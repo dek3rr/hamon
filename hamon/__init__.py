@@ -51,6 +51,7 @@ from .nrpt import nrpt as nrpt
 from .nrpt import nrpt_adaptive as nrpt_adaptive
 from .nrpt import optimize_schedule as optimize_schedule
 from .nrpt import discover_chain_count as discover_chain_count
+from .nrpt import discover_gibbs_steps as discover_gibbs_steps
 from .round_trips import round_trip_summary as round_trip_summary
 from .round_trips import recommend_n_chains as recommend_n_chains
 from .round_trips import thermodynamic_integration as thermodynamic_integration

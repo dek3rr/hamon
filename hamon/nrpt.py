@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import time
 from collections.abc import Sequence
 from functools import partial
 from typing import Any, NamedTuple
@@ -1540,5 +1541,301 @@ def discover_chain_count(
         "Lambda_raw": float(lambda_raw),
         "target_acceptance": target_acceptance,
         "converged_reason": reason,
+        "history": history,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Adaptive local-exploration count (n_expl = gibbs_steps_per_round)
+# ---------------------------------------------------------------------------
+
+
+def _select_gibbs_steps(
+    probe: Callable[[int], dict],
+    start_steps: int,
+    max_steps: int,
+    improve_tol: float,
+) -> tuple[dict, list[dict]]:
+    """Pick n_expl maximizing a per-compute objective by doubling until the peak.
+
+    ``probe(n_expl)`` runs NRPT at that exploration count and returns a record
+    with at least ``"objective"`` (ESS per unit compute) and
+    ``"efficiency_limiter"``.
+
+    The objective rises then falls in n_expl: more local exploration decorrelates
+    the cold chain (raising ESS and the round-trip rate toward the schedule-set
+    ceiling) while the per-scan cost grows as O(n_expl), so the ESS/compute ratio
+    has an interior (or boundary) maximum. We double n_expl until the objective
+    stops improving by more than ``improve_tol`` (we have passed the peak), hit
+    ``max_steps``, or the report attributes the inefficiency to the schedule
+    rather than local exploration (``efficiency_limiter == "schedule"`` — more
+    sweeps will not help). The best record seen is returned, so the choice is the
+    argmax over probed counts.
+
+    Pure (no NRPT / JAX here) so the control logic is unit-testable with a
+    synthetic ``probe``.
+    """
+    history: list[dict] = []
+    best: dict | None = None
+    n = start_steps
+    while True:
+        res = probe(n)
+        history.append(res)
+        if best is None or res["objective"] > best["objective"] * (1.0 + improve_tol):
+            best = res
+            improved = True
+        else:
+            improved = False
+        if n >= max_steps or not improved:
+            break
+        if res.get("efficiency_limiter") == "schedule":
+            break
+        n *= 2
+    assert best is not None
+    return best, history
+
+
+def _time_per_round(
+    key: jax.Array,
+    ebms,
+    programs,
+    init_states: Sequence[list],
+    clamp_state: list,
+    betas: jax.Array,
+    n_expl: int,
+    dev,
+    time_rounds: int,
+    time_reps: int,
+) -> float:
+    """Measured steady-state wall time per NRPT round at ``n_expl`` (seconds).
+
+    Times the lean round loop (``observer=None``, no eager diagnostics) on the
+    already-tuned schedule. A warm-up run absorbs the one-time XLA compile and
+    pages in the device, so the timed reps see only steady-state execution; the
+    median over ``time_reps`` runs of ``time_rounds`` rounds divides out to the
+    per-round cost ``c₀ + n_expl·c_s``. ``track_round_trips`` is left on so the
+    in-loop index update (real per-round cost) is included and the compiled
+    executable matches ``nrpt_adaptive``'s tuning loop; only the host-side
+    summary is skipped.
+    """
+
+    def run(n_rounds: int):
+        states, _ = nrpt(
+            key,
+            ebms,
+            programs,
+            init_states,
+            clamp_state,
+            n_rounds,
+            n_expl,
+            betas=betas,
+            track_round_trips=True,
+            observer=None,
+            device=dev,
+            _emit_diagnostics=False,
+        )
+        return states
+
+    jax.block_until_ready(run(time_rounds))  # warm: compile + first execution
+    times = []
+    for _ in range(max(1, time_reps)):
+        t0 = time.perf_counter()
+        jax.block_until_ready(run(time_rounds))
+        times.append(time.perf_counter() - t0)
+    return float(np.median(times)) / time_rounds
+
+
+def discover_gibbs_steps(
+    key: jax.Array,
+    ebm_factory: Callable | None = None,
+    program_factory: Callable | None = None,
+    init_states: Sequence[list] = (),
+    clamp_state: list | None = None,
+    initial_betas: jax.Array | None = None,
+    start_steps: int = 1,
+    max_steps: int = 64,
+    rounds_per_probe: int = 400,
+    n_tune_per_probe: int = 3,
+    improve_tol: float = 0.05,
+    time_rounds: int = 200,
+    time_reps: int = 3,
+    *,
+    ebm: AbstractEBM | None = None,
+    program: BlockSamplingProgram | None = None,
+    device: DeviceLike = "auto",
+) -> dict:
+    """Discover the local-exploration count ``gibbs_steps_per_round`` (n_expl).
+
+    n_expl is the only major NRPT knob hamon does not otherwise auto-tune
+    (``discover_chain_count`` sets N from Λ; ``nrpt_adaptive`` sets the
+    schedule). The **objective** maximized here is effective sample size per
+    **measured steady-state wall-second**,
+
+        objective(n_expl) = ESS_median(cold chain) / (rounds · t_round(n_expl)),
+
+    where ``t_round`` is the per-round wall time *measured on the target device*
+    after warm-up (so XLA compile is excluded). This is the honest endgame and,
+    crucially, it self-calibrates to the hardware's real cost structure. The
+    per-round cost is ``t_round = c₀ + n_expl·c_s``: a fixed overhead ``c₀``
+    (swap pass, energy recompute, host/kernel dispatch, scan bookkeeping) plus
+    ``n_expl`` Gibbs sweeps at ``c_s`` each. The Syed et al. compute model assumes
+    ``c₀ = 0`` (cost ∝ n_expl), which makes n_expl=1 optimal; but cold-chain ESS
+    grows *sub-linearly* in n_expl while real per-round cost grows *less than
+    linearly* when ``c₀`` is non-trivial — so on a dispatch-bound backend where
+    ``c₀ ≳ 1.4·c_s`` the optimum shifts to n_expl > 1. Measuring ``t_round``
+    rather than assuming cost ∝ n_expl is what lets the search see this.
+
+    Why not the cheaper round-trip proxy ``τ_obs / n_expl``? Empirically it
+    *under-picks* n_expl: round trips count excursions but not how decorrelated
+    each cold sample is, so doubling n_expl can sharply raise cold-chain ESS
+    while barely moving τ_obs (the r≈0.81 ESS↔round-trip correlation of Syed
+    et al. breaking down). The round-trip rate is still used as a robust **gate
+    and cross-check** — ``efficiency = τ_obs/τ̄`` is the ELE-violation meter, and
+    the ``efficiency_limiter`` from :func:`report_nrpt_diagnostics` stops the
+    search when a probe is schedule-limited (an unequalized ladder, where more
+    local exploration cannot help). ``rt_per_compute`` and ``t_round`` are
+    recorded per probe alongside the ESS-per-second objective.
+
+    See :func:`discover_chain_count` for the N analogue. The chain count is held
+    fixed at ``len(initial_betas)`` — Λ (hence N) is a schedule invariant robust
+    to n_expl, so the two searches decouple; run ``discover_chain_count`` first
+    if N is unknown.
+
+    Each probe (1) runs :func:`nrpt_adaptive` (tuning the schedule at that
+    n_expl) with an :class:`~hamon.NRPTStateObserver` on the cold chain and
+    computes ESS over the collected cold-chain trace, then (2) times the
+    steady-state round loop on the tuned schedule — a warm-up run absorbs the
+    one-time compile (n_expl is a static sweep count), and the median of
+    ``time_reps`` timed runs of ``time_rounds`` rounds gives ``t_round``. Instead
+    of ``ebm_factory`` / ``program_factory`` you may pass a single template
+    ``ebm`` and ``program`` (temperature-linear mode), as with ``nrpt_adaptive``.
+
+    Args:
+        key: PRNG key.
+        ebm_factory / program_factory: per-chain factories, or use ``ebm`` /
+            ``program`` template objects.
+        init_states: one initial block-state list per chain (fixed across probes).
+        clamp_state: clamped block states.
+        initial_betas: the (fixed) β ladder; its length sets the chain count.
+        start_steps: smallest n_expl to try (``≥ 1``).
+        max_steps: largest n_expl before the search stops.
+        rounds_per_probe: production rounds per probe (and the tuning ceiling) —
+            must be large enough for ESS and τ_obs to be low-variance.
+        n_tune_per_probe: schedule-tuning phases per probe.
+        improve_tol: minimum fractional objective gain to keep doubling
+            (guards against chasing Monte-Carlo noise past the peak).
+        time_rounds: rounds per timed run when measuring ``t_round``.
+        time_reps: number of timed runs to take the median over (noise control).
+        device: where to run; resolved once and reused across probes. Timing is
+            measured on this device, so the chosen n_expl is calibrated to it.
+
+    Returns:
+        dict with keys:
+            gibbs_steps_per_round: the chosen n_expl.
+            objective: ESS per measured wall-second at the chosen n_expl.
+            ess_median / tau_observed / efficiency / rt_per_compute / t_round:
+                at the choice (``t_round`` in seconds).
+            betas: the tuned schedule at the chosen n_expl.
+            history: list of per-probe records (n_expl, objective, ess_median,
+                tau_obs, rt_per_compute, t_round, efficiency, efficiency_limiter,
+                betas).
+    """
+    from hamon.diagnostics import effective_sample_size, report_nrpt_diagnostics
+    from hamon.observers import NRPTStateObserver
+
+    if clamp_state is None:
+        clamp_state = []
+    if initial_betas is None:
+        raise ValueError("initial_betas is required (its length sets the chain count).")
+    if not init_states:
+        raise ValueError("init_states is required (one initial state per chain).")
+    if int(start_steps) < 1:
+        raise ValueError("start_steps must be >= 1 (n_expl = 0 has no exploration).")
+
+    # Build a chain source so the timing phase can reconstruct nrpt() arguments
+    # for either the template or factory route.
+    source = _ChainSource(ebm_factory, program_factory, ebm, program)
+    betas = jnp.asarray(initial_betas)
+    dev = resolve_entry_device(
+        device,
+        n_chains=len(betas),
+        n_nodes=source.metadata_free_nodes(betas, device),
+        arrays=(init_states, betas, key),
+    )
+    source.device_put_template(dev)
+
+    def probe(n_expl: int) -> dict[str, Any]:
+        nonlocal key
+        key, k_probe, k_time = jax.random.split(key, 3)
+        # (1) Tune the schedule at this n_expl and observe the cold chain so ESS
+        # can be measured over its trace.
+        _, stats = nrpt_adaptive(
+            k_probe,
+            ebm_factory,
+            program_factory,
+            init_states,
+            clamp_state,
+            n_rounds=rounds_per_probe,
+            gibbs_steps_per_round=n_expl,
+            initial_betas=betas,
+            n_tune=n_tune_per_probe,
+            rounds_per_tune=rounds_per_probe,
+            ebm=ebm,
+            program=program,
+            observer=NRPTStateObserver(chain_indices=(-1,)),
+            device=dev,
+        )
+        rep = report_nrpt_diagnostics(stats)
+        tau_obs = float(rep.tau_observed) if rep.tau_observed is not None else 0.0
+        tuned_betas = jnp.asarray(stats["betas"])
+
+        # Flatten the per-round cold-chain block states into a (rounds, nodes)
+        # trace. ESS is per-column then median-reduced, so column order / node
+        # type are irrelevant — no node-reordering needed. median (not min) is
+        # the steadier order statistic across seeds.
+        cold = [np.asarray(o)[:, 0] for o in stats["observations"]]
+        trace = np.concatenate([c.reshape(c.shape[0], -1) for c in cold], axis=1)
+        ess = effective_sample_size(trace)
+
+        # (2) Measure steady-state wall time per round on the tuned schedule.
+        ebms_t, programs_t = source.nrpt_args(tuned_betas)
+        t_round = _time_per_round(
+            k_time,
+            ebms_t,
+            programs_t,
+            init_states,
+            clamp_state,
+            tuned_betas,
+            n_expl,
+            dev,
+            time_rounds,
+            time_reps,
+        )
+        wall = rounds_per_probe * t_round  # seconds to produce this ESS
+        return {
+            "n_expl": int(n_expl),
+            "objective": ess.median_ess / wall,  # ESS per measured wall-second
+            "ess_median": ess.median_ess,
+            "tau_obs": tau_obs,
+            "rt_per_compute": tau_obs / n_expl,
+            "t_round": t_round,
+            "efficiency": rep.efficiency,
+            "efficiency_limiter": rep.efficiency_limiter,
+            "betas": np.asarray(tuned_betas),
+        }
+
+    best, history = _select_gibbs_steps(
+        probe, int(start_steps), int(max_steps), float(improve_tol)
+    )
+
+    return {
+        "gibbs_steps_per_round": best["n_expl"],
+        "objective": best["objective"],
+        "ess_median": best["ess_median"],
+        "tau_observed": best["tau_obs"],
+        "rt_per_compute": best["rt_per_compute"],
+        "t_round": best["t_round"],
+        "efficiency": best["efficiency"],
+        "betas": best["betas"],
         "history": history,
     }

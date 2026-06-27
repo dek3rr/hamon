@@ -210,7 +210,7 @@ def _ess_1d(x: np.ndarray) -> float:
 
 
 def effective_sample_size(
-    samples: Shaped[Array, "n_samples n_variables"],
+    samples: Shaped[Array, "n_samples n_variables"] | np.ndarray,
 ) -> ESSReport:
     """Estimate the effective sample size of an autocorrelated MCMC trace.
 

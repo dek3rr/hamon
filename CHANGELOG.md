@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Adaptive local-exploration count (`discover_gibbs_steps`).** Auto-tunes
+  `gibbs_steps_per_round` (n_expl) — the last major NRPT knob hamon did not
+  set for you — by maximizing effective sample size per **measured steady-state
+  wall-second** (compile excluded via warm-up). Because the objective measures
+  real per-round cost `t_round = c₀ + n_expl·c_s` rather than assuming the
+  paper's cost ∝ n_expl, it **self-calibrates to the device**: on a compute-bound
+  CPU it returns n_expl=1, but on a dispatch-bound GPU (where the fixed per-round
+  overhead c₀ dominates a single sweep) it flips to n_expl=2–4, measured to give
+  1.7–2.3× ESS/sec on the models tried. Round-trip efficiency and the
+  `efficiency_limiter` gate it (a schedule-limited probe stops the search). The
+  chain count is held fixed (Λ is robust to n_expl), so it composes after
+  `discover_chain_count`.
 - **Efficiency-cause attribution in the health report.** When round-trip
   efficiency is below the ELE-optimal rate, `report_nrpt_diagnostics` now sets
   `NRPTHealthReport.efficiency_limiter` to point at the right knob:

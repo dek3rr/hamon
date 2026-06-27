@@ -151,6 +151,10 @@ Key features of the NRPT implementation:
   Λ and predicted optimal rate τ̄ = 1/(2+2Λ)
 - **Chain count discovery**: iteratively probes to find the right number of
   chains for a target acceptance rate
+- **Local-exploration tuning**: `discover_gibbs_steps` picks
+  `gibbs_steps_per_round` by maximizing ESS per *measured* wall-second, so it
+  self-calibrates to the device (n_expl=1 on a compute-bound CPU, n_expl>1 on a
+  dispatch-bound GPU where extra sweeps are nearly free)
 - **Effective sample size**: `effective_sample_size` reports per-variable ESS
   (the honest denominator on Monte-Carlo error); folded into
   `report_nrpt_diagnostics`
