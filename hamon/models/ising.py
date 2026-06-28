@@ -12,10 +12,8 @@ from jaxtyping import Array, Bool, Key, Shaped
 from hamon.device import (
     DeviceLike,
     free_node_count,
-    resolve_device,
     resolve_entry_device,
     tree_device_put,
-    work_score,
 )
 from hamon.block_sampling import (
     Block,
@@ -23,8 +21,6 @@ from hamon.block_sampling import (
     BlockSamplingProgram,
     SamplingSchedule,
     SuperBlock,
-    sample_states,
-    sample_states_batched,
     sample_with_observation,
 )
 from hamon.factor import FactorSamplingProgram
@@ -401,15 +397,18 @@ def ising_sample(
     n_samples: int = 1000,
     n_warmup: int = 500,
     steps_per_sample: int = 1,
-    gibbs_steps_per_round: int = 1,
     target_acceptance: float = 0.6,
-    n_draw_chains: int = 1,
+    max_chains: int = 128,
     device: DeviceLike = "auto",
 ) -> tuple[Bool[Array, "n_samples n"], dict]:
-    r"""Sample from an Ising model Boltzmann distribution via NRPT.
+    r"""Sample from an Ising model Boltzmann distribution via fully autotuned NRPT.
 
-    Orchestrates the full pipeline: graph coloring, chain-count discovery,
-    adaptive schedule tuning, and final sampling from the cold chain.
+    A thin Ising-specific front end over :func:`hamon.autosample`: it builds and
+    colours the graph, then **autotunes the full NRPT configuration** — chain
+    count, local-exploration count (``gibbs_steps_per_round``), and schedule —
+    before drawing from the cold chain. Unlike earlier versions, the
+    exploration count is no longer a fixed argument; it is discovered (and
+    device-calibrated) automatically.
 
     The energy function is
 
@@ -425,31 +424,21 @@ def ising_sample(
         n_samples: number of samples to return.
         n_warmup: warmup steps before collecting samples.
         steps_per_sample: Gibbs sweeps between recorded samples.
-        gibbs_steps_per_round: Gibbs sweeps between NRPT swap attempts.
-        target_acceptance: desired per-pair swap acceptance rate for
-            chain-count discovery.
-        n_draw_chains: how many independent chains to run for the final draw.
-            ``1`` (default) reproduces the single-chain draw exactly. With
-            ``k > 1`` the ``n_samples`` budget is split across ``k`` chains run
-            in parallel under one `vmap` (each seeded from the equilibrated cold
-            state), which cuts sample-collection iterations on an accelerator —
-            the draw is dispatch-bound, so fewer, wider kernels finish sooner.
-            The returned sample count is rounded down to ``k * (n_samples // k)``.
-        device: where to run — ``"auto"`` (default; small workloads on CPU,
-            large on a visible accelerator), ``"cpu"``/``"gpu"``, a concrete
-            ``jax.Device``, or ``None`` to leave placement untouched. Under
-            ``"auto"`` the device is re-resolved once after chain-count
-            discovery, so cheap discovery probes may run on CPU while a large
-            production run lands on the accelerator.
+        target_acceptance: desired per-pair swap acceptance rate for the
+            chain-count search.
+        max_chains: ceiling on the discovered chain count.
+        device: where to run — ``"auto"`` (default), ``"cpu"``/``"gpu"``, a
+            concrete ``jax.Device``, or ``None`` to leave placement untouched.
+            Resolved once and reused across all autotuning stages; the measured
+            wall time on this device calibrates the chosen ``gibbs_steps_per_round``.
 
     Returns:
-        A tuple ``(samples, diagnostics)`` where *samples* is a boolean
-        array of shape ``(n_samples, n)`` (``True`` = spin up) and
-        *diagnostics* is a dict with keys ``n_chains``, ``betas``,
-        ``Lambda``, ``converged_reason``, ``acceptance_rate``,
-        ``mean_spins`` (average number of +1 spins per sample), ``device``
-        (the resolved production device, or None), and
-        ``round_trip_diagnostics``.
+        A tuple ``(samples, diagnostics)`` where *samples* is a boolean array of
+        shape ``(n_samples, n)`` (``True`` = spin up) and *diagnostics* is a dict
+        with keys ``n_chains``, ``betas``, ``Lambda``, ``gibbs_steps_per_round``,
+        ``mean_spins`` (average number of +1 spins per sample), ``device``,
+        ``round_trip_diagnostics``, and ``report`` (the full
+        :class:`hamon.AutotuneReport`).
 
     Warns:
         Logs a warning if all coupling weights are zero (NRPT is
@@ -457,7 +446,7 @@ def ising_sample(
         per-variable preference).
     """
     from hamon.graph_utils import rlf_coloring
-    from hamon.nrpt import discover_chain_count, nrpt_adaptive
+    from hamon.autotune import autosample
 
     biases = jnp.asarray(biases)
     weights = jnp.asarray(weights)
@@ -506,106 +495,39 @@ def ising_sample(
     ebm = IsingEBM(nodes, node_edges, biases, weights, jnp.array(float(beta)))
     program = IsingSamplingProgram(ebm, free_blocks, [])
 
-    # --- discover chain count ---
-    key, k_disc, k_nrpt, k_samp, k_init = jax.random.split(key, 5)
+    # --- autotune (N + exploration + schedule) and draw ---
+    key, k_init, k_auto = jax.random.split(key, 3)
 
     def _init_factory(n_chains, ebms, programs):
         fb = programs[0].gibbs_spec.free_blocks
         keys = jax.random.split(k_init, n_chains)
         return [hinton_init(keys[c], ebms[0], fb, ()) for c in range(n_chains)]
 
-    # Device routing, stage 1: discovery probes start at 8 chains
-    # (discover_chain_count's initial_n default).
-    dev = resolve_entry_device(
-        device, n_chains=8, n_nodes=n, arrays=(biases, weights, key)
-    )
-
-    discovery = discover_chain_count(
-        k_disc,
+    samples, report = autosample(
+        k_auto,
+        n_samples=n_samples,
+        n_warmup=n_warmup,
+        steps_per_sample=steps_per_sample,
         ebm=ebm,
         program=program,
         init_factory=_init_factory,
-        beta_range=(0.0, float(beta)),
-        gibbs_steps_per_round=gibbs_steps_per_round,
-        target_acceptance=target_acceptance,
-        device=dev,
-    )
-
-    # --- adaptive NRPT ---
-    betas = discovery["betas"]
-    n_chains = len(betas)
-
-    # Device routing, stage 2: re-resolve with the discovered chain count. The
-    # chain-count change forces a recompile anyway, so this is the one place
-    # routing may legitimately switch devices (cheap CPU probes, accelerator
-    # production).
-    if dev is not None and isinstance(device, str) and device.lower() == "auto":
-        dev = resolve_device("auto", score=work_score(n_chains, n))
-
-    init_ebms = [ebm.with_beta(jnp.array(float(b))) for b in betas]
-    # _init_factory only reads programs[0].gibbs_spec.free_blocks, which is the
-    # same block structure as the template program (with_ebm changes only the
-    # β-scaled weights, not the spec). Reuse the template instead of rebuilding
-    # n_chains identical programs — each rebuild reruns the full block-structure
-    # construction (~16 ms) for a structure that never changes.
-    init_states = _init_factory(n_chains, init_ebms, [program])
-
-    warm_states, nrpt_stats = nrpt_adaptive(
-        k_nrpt,
-        ebm=ebm,
-        program=program,
-        init_states=init_states,
         clamp_state=[],
-        n_rounds=500,
-        gibbs_steps_per_round=gibbs_steps_per_round,
-        initial_betas=betas,
-        n_tune=5,
-        rounds_per_tune=200,
-        device=dev,
+        sample_nodes=nodes,
+        beta_range=(0.0, float(beta)),
+        target_acceptance=target_acceptance,
+        max_chains=max_chains,
+        device=device,
     )
-
-    # --- sample from cold chain (last index = highest beta) ---
-    cold_state = warm_states[-1]
-    obs_block = Block(nodes)
-    if n_draw_chains > 1:
-        # Split the sample budget across independent chains run under one vmap.
-        # The draw is dispatch-bound, so collecting n_samples//k samples on each
-        # of k chains finishes sooner than one long chain. Each chain starts from
-        # the (already equilibrated) cold state and decorrelates via its own key.
-        per_chain = max(1, n_samples // n_draw_chains)
-        schedule = SamplingSchedule(n_warmup, per_chain, steps_per_sample)
-        draw_inits = jax.tree.map(
-            lambda x: jnp.broadcast_to(x, (n_draw_chains, *x.shape)), cold_state
-        )
-        raw_samples = sample_states_batched(
-            k_samp, program, schedule, draw_inits, [], [obs_block], device=dev
-        )
-        # (k, per_chain, n) -> (k * per_chain, n)
-        samples = raw_samples[0].reshape(-1, raw_samples[0].shape[-1])
-    else:
-        schedule = SamplingSchedule(n_warmup, n_samples, steps_per_sample)
-        raw_samples = sample_states(
-            k_samp, program, schedule, cold_state, [], [obs_block], device=dev
-        )
-        samples = raw_samples[0]  # (n_samples, n)
 
     mean_spins = float(jnp.mean(jnp.sum(samples, axis=1).astype(jnp.float32)))
-
-    from hamon.diagnostics import report_nrpt_diagnostics
-
-    health = report_nrpt_diagnostics(nrpt_stats, samples=samples)
-
     diagnostics = {
-        "n_chains": discovery["n_chains"],
-        "betas": nrpt_stats["betas"],
-        "Lambda": discovery["Lambda"],
-        "converged_reason": discovery["converged_reason"],
-        "acceptance_rate": nrpt_stats["acceptance_rate"],
+        "n_chains": report.n_chains,
+        "betas": report.betas,
+        "Lambda": report.Lambda,
+        "gibbs_steps_per_round": report.gibbs_steps_per_round,
         "mean_spins": mean_spins,
-        "device": str(dev) if dev is not None else None,
-        "health": health,
+        "device": report.device,
+        "round_trip_diagnostics": report.round_trip_diagnostics,
+        "report": report,
     }
-    if "round_trip_diagnostics" in nrpt_stats:
-        diagnostics["round_trip_diagnostics"] = nrpt_stats["round_trip_diagnostics"]
-
     return samples, diagnostics

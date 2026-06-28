@@ -20,7 +20,7 @@ import pytest
 
 from hamon import Block, NRPTEnergyObserver, SpinNode
 from hamon.models import IsingEBM, IsingSamplingProgram, hinton_init
-from hamon.nrpt import nrpt_adaptive
+from hamon.tuning import tune_schedule
 from hamon.round_trips import (
     nrpt_log_normalizing_constant,
     thermodynamic_integration,
@@ -103,7 +103,7 @@ class TestLogZEndToEnd:
         init = [hinton_init(keys[c], ebm, free_blocks, ()) for c in range(n_chains)]
 
         obs = NRPTEnergyObserver(n_chains)
-        _, stats = nrpt_adaptive(
+        _, stats = tune_schedule(
             k_run,
             init_states=init,
             clamp_state=[],

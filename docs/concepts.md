@@ -111,7 +111,7 @@ the reversible alternative (Stochastic Even-Odd, SEO).
 The spacing of temperature levels matters. Hamon implements Algorithm 4 from
 [Syed et al. (2021)](https://arxiv.org/abs/1905.02939): it monitors rejection
 rates across the ladder and repositions \( \beta \) values to equalize
-communication cost. `nrpt_adaptive` runs this tuning loop automatically.
+communication cost. `tune_schedule` runs this tuning loop automatically.
 
 ### Communication barrier
 
@@ -124,8 +124,31 @@ governs tempering performance:
 
 where \( \Lambda = \sum_{i=0}^{N-1} \frac{r_i}{1 - r_i} \) and \( r_i \) is the
 rejection rate between chains \( i \) and \( i+1 \). Hamon reports \( \Lambda \)
-in the round-trip diagnostics and uses it in `discover_chain_count` to recommend
+in the round-trip diagnostics and uses it in `tune_chains` to recommend
 how many chains to use.
+
+### Local exploration
+
+Between swap attempts, each chain runs `gibbs_steps_per_round` Gibbs sweeps —
+the *local-exploration count* \( n_\text{expl} \). More sweeps decorrelate each
+chain's energy (better approximating the theory's "efficient local exploration"
+assumption), but cost more compute per round. `tune_exploration` picks
+\( n_\text{expl} \) by maximizing effective samples per *measured* wall-second,
+so it self-calibrates to the hardware: on a compute-bound CPU one sweep is
+usually optimal, while on a dispatch-bound GPU — where the fixed per-round
+overhead dwarfs an extra sweep — several sweeps win.
+
+### Autotuning
+
+These knobs have a clean dependency structure: \( \Lambda \) (hence the optimal
+\( N \)) and the equi-acceptance *shape* of the schedule are both invariant to
+\( n_\text{expl} \), because swap acceptance depends only on the stationary
+energy of each chain, not on how many local sweeps produced it. So they can be
+tuned in order without circular re-discovery. `autotune` does exactly that —
+chain count, then exploration count (reusing the schedule), then a final
+schedule polish — and returns a reusable plan. `autosample` is the one-shot
+"tune and draw" convenience. This is the primary interface; everything above is
+a building block beneath it.
 
 ## What Hamon optimizes
 

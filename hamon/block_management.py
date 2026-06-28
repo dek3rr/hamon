@@ -207,7 +207,7 @@ class BlockSpec:
         Keyed on node identity: a spec rebuilt over the *same* nodes and
         structure compares equal and shares the `eqx.filter_jit` cache. Without
         this, every `program.with_ebm(...)` — called once per `nrpt` /
-        `nrpt_adaptive` invocation and per discovery probe — builds a fresh spec
+        `tune_schedule` invocation and per discovery probe — builds a fresh spec
         object that misses the cache and forces a full recompile of the
         otherwise-identical NRPT round loop. (Specs over *different* node objects
         stay distinct, which is what we want: the surrounding program's blocks

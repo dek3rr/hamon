@@ -64,7 +64,7 @@ interaction arrays by each chain's \( \beta \) inside the vmapped kernel —
 no per-chain program construction and no per-chain copies of the weight
 tensors. The whole round loop lives in a module-level jitted function, so
 repeated calls with the same base pair (e.g. the tuning phases of
-`nrpt_adaptive`) compile exactly once; the \( \beta \) schedule is traced
+`tune_schedule`) compile exactly once; the \( \beta \) schedule is traced
 data and can change freely between phases.
 
 ## Energy caching
@@ -102,8 +102,25 @@ Algorithm 4 of Syed et al. (2021). Given observed rejection rates
 inverts it to find \( \beta \) values that equalize the per-level contribution
 to \( \Lambda \).
 
-`nrpt_adaptive` wraps this in a loop: run a short burn-in, measure rejections,
+`tune_schedule` wraps this in a loop: run a short burn-in, measure rejections,
 reposition betas, repeat for `n_tune` phases, then run production.
+
+## Autotuning orchestration
+
+`autotune` composes the three searches in dependency order, cheap to expensive:
+`tune_chains` (at `n_expl=1`) for the chain count, then `tune_exploration` at
+that fixed count — **reusing** the schedule via the `fixed_schedule` argument, so
+each exploration probe is one production run rather than a full re-tune (sound
+because the schedule is invariant to `n_expl`) — then a short `tune_schedule`
+polish that also leaves an equilibrated cold-chain state. The result is an
+`NRPTPlan` whose `sample()` draws from that warm state, so repeat draws skip
+tuning entirely and reuse the compiled loop. `tune_exploration` measures the
+steady-state per-round wall time on the target device (warm-up first, then the
+median of timed runs), which is what lets the chosen `n_expl` reflect real
+hardware cost rather than the idealized "cost ∝ `n_expl`" model. Because each
+distinct chain count and each distinct `n_expl` recompiles the round loop,
+`autotune` enables JAX's persistent compilation cache by default so those
+recompiles are amortized across probes and across runs.
 
 ## Dynamic blocks
 

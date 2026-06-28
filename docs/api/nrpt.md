@@ -1,15 +1,34 @@
 # NRPT
 
-Core NRPT functions: single runs, adaptive schedule tuning, schedule
-optimization, and automatic discovery of the chain count and the
-local-exploration count.
+The primary interface is **autotuning**: [`autotune`][hamon.autotune] /
+[`autosample`][hamon.autosample] discover the chain count, local-exploration
+count, and schedule together, then draw from the target. The building-block
+tuners and the core single run are below them.
+
+## Autotuning
+
+::: hamon.autosample
+
+::: hamon.autotune
+
+::: hamon.NRPTPlan
+    options:
+        members:
+            - sample
+
+::: hamon.AutotuneReport
+    options:
+        members:
+            - summary
+
+## Building blocks
 
 ::: hamon.nrpt
 
-::: hamon.nrpt_adaptive
+::: hamon.tune_schedule
 
 ::: hamon.optimize_schedule
 
-::: hamon.discover_chain_count
+::: hamon.tune_chains
 
-::: hamon.discover_gibbs_steps
+::: hamon.tune_exploration

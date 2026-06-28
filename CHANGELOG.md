@@ -7,9 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-06-27
+
+### Changed
+
+- **BREAKING — autotuning is now the primary interface, and the NRPT tuners are
+  renamed to a coherent `tune_*` family:**
+
+  | Old | New |
+  |---|---|
+  | `nrpt_adaptive` | `tune_schedule` |
+  | `discover_chain_count` | `tune_chains` |
+  | `discover_gibbs_steps` | `tune_exploration` |
+
+  `nrpt` and `optimize_schedule` are unchanged. No deprecated aliases are kept.
+- **BREAKING — `ising_sample` now autotunes the local-exploration count.** It is
+  a thin wrapper over `autosample`, so it discovers `gibbs_steps_per_round`
+  automatically (device-calibrated) rather than taking it as an argument. The
+  `gibbs_steps_per_round` and `n_draw_chains` parameters are removed and a
+  `max_chains` parameter is added. The returned `diagnostics` dict gains
+  `gibbs_steps_per_round` and `report` (an `AutotuneReport`) and drops
+  `converged_reason`, `acceptance_rate`, and `health`; `n_chains`, `betas`,
+  `Lambda`, `mean_spins`, `device`, and `round_trip_diagnostics` are retained.
+
 ### Added
 
-- **Adaptive local-exploration count (`discover_gibbs_steps`).** Auto-tunes
+- **One-call autotuning (`autotune` / `autosample`).** `autotune` runs the full
+  dependency-ordered pipeline — chain count → exploration count → schedule —
+  reusing the tuned schedule across exploration probes (it is invariant to
+  n_expl) and never re-discovering N, then returns an `NRPTPlan` whose
+  `.sample()` draws cheaply and repeatedly from a warm cold-chain state.
+  `autosample` is the one-shot `(samples, AutotuneReport)` convenience. The
+  `AutotuneReport` surfaces N, n_expl, Λ, and the round-trip count/efficiency
+  measured over the final production run (its length is the `n_rounds` argument,
+  decoupled from the cheap per-probe budget so the round-trip rate is
+  representative — a round trip needs ≳ 2·N rounds). The persistent compile
+  cache is enabled by default (opt out with `compile_cache=`) to amortize the
+  multi-probe recompiles; `hamon.enable_persistent_compile_cache` exposes it.
+- **Adaptive local-exploration count (`tune_exploration`).** Auto-tunes
   `gibbs_steps_per_round` (n_expl) — the last major NRPT knob hamon did not
   set for you — by maximizing effective sample size per **measured steady-state
   wall-second** (compile excluded via warm-up). Because the objective measures
@@ -20,7 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1.7–2.3× ESS/sec on the models tried. Round-trip efficiency and the
   `efficiency_limiter` gate it (a schedule-limited probe stops the search). The
   chain count is held fixed (Λ is robust to n_expl), so it composes after
-  `discover_chain_count`.
+  `tune_chains` — which is exactly what `autotune` does.
 - **Efficiency-cause attribution in the health report.** When round-trip
   efficiency is below the ELE-optimal rate, `report_nrpt_diagnostics` now sets
   `NRPTHealthReport.efficiency_limiter` to point at the right knob:
@@ -46,8 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   discards but parallel tempering reconstructs almost for free — enabling
   Bayes-factor model comparison, EBM/RBM test log-likelihood evaluation, and
   Ising free-energy analysis. Opt-in: attaching the observer is the only way to
-  trigger it, so the default `nrpt`/`nrpt_adaptive`/`ising_sample` fast paths
-  are unchanged.
+  trigger it, so the default `nrpt`/`tune_schedule` fast paths are unchanged.
 
 ## [0.6.0] — 2026-06-23
 

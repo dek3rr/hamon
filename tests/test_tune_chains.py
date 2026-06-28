@@ -1,4 +1,4 @@
-"""Tests for discover_chain_count in nrpt.py.
+"""Tests for tune_chains in nrpt.py.
 
 Guards against:
 - Node identity mismatch (SpinNode KeyError)
@@ -15,7 +15,7 @@ import pytest
 
 from hamon import Block, SpinNode
 from hamon.models import IsingEBM, IsingSamplingProgram, hinton_init
-from hamon.nrpt import discover_chain_count
+from hamon.tuning import tune_chains
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +53,7 @@ def _init_factory(n_chains, ebms, programs):
 
 class TestDiscoverChainCount:
     def test_runs_without_error(self):
-        result = discover_chain_count(
+        result = tune_chains(
             jax.random.key(42),
             _ebm_factory,
             _program_factory,
@@ -76,7 +76,7 @@ class TestDiscoverChainCount:
         assert "history" in result
 
     def test_output_types(self):
-        result = discover_chain_count(
+        result = tune_chains(
             jax.random.key(1),
             _ebm_factory,
             _program_factory,
@@ -97,7 +97,7 @@ class TestDiscoverChainCount:
         assert len(result["history"]) >= 1
 
     def test_chain_count_within_bounds(self):
-        result = discover_chain_count(
+        result = tune_chains(
             jax.random.key(2),
             _ebm_factory,
             _program_factory,
@@ -117,7 +117,7 @@ class TestDiscoverChainCount:
         assert result["n_chains"] <= 20
 
     def test_history_records_iterations(self):
-        result = discover_chain_count(
+        result = tune_chains(
             jax.random.key(3),
             _ebm_factory,
             _program_factory,
@@ -140,7 +140,7 @@ class TestDiscoverChainCount:
             assert h["n"] >= 3
 
     def test_target_acceptance_stored(self):
-        result = discover_chain_count(
+        result = tune_chains(
             jax.random.key(4),
             _ebm_factory,
             _program_factory,
@@ -158,7 +158,7 @@ class TestDiscoverChainCount:
         assert result["target_acceptance"] == 0.7
 
     def test_betas_length_matches_n_chains(self):
-        result = discover_chain_count(
+        result = tune_chains(
             jax.random.key(5),
             _ebm_factory,
             _program_factory,
@@ -175,7 +175,7 @@ class TestDiscoverChainCount:
         assert len(result["betas"]) == result["n_chains"]
 
     def test_converged_reason_is_valid(self):
-        result = discover_chain_count(
+        result = tune_chains(
             jax.random.key(6),
             _ebm_factory,
             _program_factory,
@@ -205,7 +205,7 @@ class TestDiscoverChainCount:
 class TestMaxLambdaTracking:
     def test_lambda_geq_lambda_raw(self):
         """Conservative Λ (max) should be >= the last raw estimate."""
-        result = discover_chain_count(
+        result = tune_chains(
             jax.random.key(10),
             _ebm_factory,
             _program_factory,
@@ -223,7 +223,7 @@ class TestMaxLambdaTracking:
 
     def test_lambda_max_monotonic_in_history(self):
         """Lambda_max in history should be non-decreasing."""
-        result = discover_chain_count(
+        result = tune_chains(
             jax.random.key(11),
             _ebm_factory,
             _program_factory,

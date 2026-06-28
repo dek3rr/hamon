@@ -50,13 +50,16 @@ resolve detail, and communication between them is what makes sampling work.
 compilation. Define your model as nodes, factors, and blocks; Hamon handles the
 index bookkeeping and padding for you.
 
-**Non-reversible parallel tempering (NRPT)** with single-pass DEO swaps,
-adaptive schedule optimization, and round-trip diagnostics. Based on the
-theoretical framework of
+**Non-reversible parallel tempering (NRPT)** with single-pass DEO swaps and
+round-trip diagnostics, based on the theoretical framework of
 [Syed et al. (2021)](https://arxiv.org/abs/1905.02939).
 
-**Automatic chain count discovery** via `discover_chain_count`, which estimates
-the communication barrier Λ and recommends how many tempering chains you need.
+**One-call autotuning** via `autotune` / `autosample`: hamon discovers the
+chain count, the local-exploration count, *and* the temperature schedule for
+you, then draws from the target. The exploration count is calibrated to your
+hardware by maximizing effective samples per measured wall-second. This is the
+primary way to solve a problem with hamon; the individual tuners (`tune_chains`,
+`tune_exploration`, `tune_schedule`) are available for manual control.
 
 **Dynamic block management** with influence-aware partitioning, per-temperature
 block sizing, and correlation-based re-blocking.

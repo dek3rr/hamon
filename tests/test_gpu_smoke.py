@@ -11,7 +11,8 @@ import pytest
 
 from hamon.device import accelerator_device
 from hamon.models.ising import hinton_init
-from hamon.nrpt import nrpt, nrpt_adaptive
+from hamon.nrpt import nrpt
+from hamon.tuning import tune_schedule
 
 from .utils import make_ising_grid
 
@@ -35,7 +36,7 @@ class TestGPUSmoke:
         inits = _make_states(jax.random.key(0), ebms, fb, 3)
 
         before = _nrpt_rounds_trace_count[0]
-        states, stats = nrpt_adaptive(
+        states, stats = tune_schedule(
             jax.random.key(1),
             ebm=ebms[0],
             program=progs[0],

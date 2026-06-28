@@ -342,12 +342,12 @@ class BlockSamplingProgram(eqx.Module):
     def with_ebm(self, ebm) -> "BlockSamplingProgram":
         """Return a copy of this program rewired to a different EBM.
 
-        Subclasses that want to work with `nrpt_adaptive(ebm=..., program=...)`
+        Subclasses that want to work with `tune_schedule(ebm=..., program=...)`
         must override this method.
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not implement with_ebm(). "
-            "Either implement it or provide explicit factory callables to nrpt_adaptive."
+            "Either implement it or provide explicit factory callables to tune_schedule."
         )
 
     gibbs_spec: BlockGibbsSpec

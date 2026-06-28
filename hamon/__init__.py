@@ -29,6 +29,9 @@ from .conditional_samplers import SoftmaxConditional as SoftmaxConditional
 from .device import DeviceLike as DeviceLike
 from .device import resolve_device as resolve_device
 from .device import work_score as work_score
+from .device import (
+    enable_persistent_compile_cache as enable_persistent_compile_cache,
+)
 from .factor import AbstractFactor as AbstractFactor
 from .factor import FactorSamplingProgram as FactorSamplingProgram
 from .factor import WeightedFactor as WeightedFactor
@@ -48,10 +51,14 @@ from .pgm import AbstractNode as AbstractNode
 from .pgm import CategoricalNode as CategoricalNode
 from .pgm import SpinNode as SpinNode
 from .nrpt import nrpt as nrpt
-from .nrpt import nrpt_adaptive as nrpt_adaptive
 from .nrpt import optimize_schedule as optimize_schedule
-from .nrpt import discover_chain_count as discover_chain_count
-from .nrpt import discover_gibbs_steps as discover_gibbs_steps
+from .tuning import tune_schedule as tune_schedule
+from .tuning import tune_chains as tune_chains
+from .tuning import tune_exploration as tune_exploration
+from .autotune import autotune as autotune
+from .autotune import autosample as autosample
+from .autotune import NRPTPlan as NRPTPlan
+from .autotune import AutotuneReport as AutotuneReport
 from .round_trips import round_trip_summary as round_trip_summary
 from .round_trips import recommend_n_chains as recommend_n_chains
 from .round_trips import thermodynamic_integration as thermodynamic_integration

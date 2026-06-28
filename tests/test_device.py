@@ -24,13 +24,15 @@ from hamon.device import (
     work_score,
 )
 from hamon.models.ising import hinton_init
-from hamon.nrpt import nrpt, nrpt_adaptive
+from hamon.nrpt import nrpt
+from hamon.tuning import tune_schedule
 
 from .utils import make_ising_grid
 
 # hamon/__init__.py re-exports the nrpt *function* under the name hamon.nrpt,
 # shadowing the module attribute — go through importlib for the real module.
-nrpt_mod = importlib.import_module("hamon.nrpt")
+# (tune_schedule lives in hamon.tuning and resolves the device there.)
+tuning_mod = importlib.import_module("hamon.tuning")
 
 CPU = jax.devices("cpu")[0]
 
@@ -202,12 +204,13 @@ class TestEntryPoints:
                 auto_calls.append(device)
             return real(device, **kwargs)
 
-        # nrpt.py references the imported name, so patch it there
-        monkeypatch.setattr(nrpt_mod, "resolve_entry_device", spy)
+        # tune_schedule (in hamon.tuning) references the imported name, so patch
+        # it there.
+        monkeypatch.setattr(tuning_mod, "resolve_entry_device", spy)
 
         _, _, fb, ebms, progs = make_ising_grid(3, [1.0], coupling=0.5)
         inits = _make_states(jax.random.key(0), ebms, fb, 3)
-        nrpt_adaptive(
+        tune_schedule(
             jax.random.key(1),
             ebm=ebms[0],
             program=progs[0],
@@ -226,7 +229,7 @@ class TestEntryPoints:
     def test_adaptive_cpu_outputs_on_cpu(self):
         _, _, fb, ebms, progs = make_ising_grid(3, [1.0], coupling=0.5)
         inits = _make_states(jax.random.key(0), ebms, fb, 2)
-        states, stats = nrpt_adaptive(
+        states, stats = tune_schedule(
             jax.random.key(1),
             ebm=ebms[0],
             program=progs[0],
