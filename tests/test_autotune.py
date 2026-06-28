@@ -39,6 +39,7 @@ _KW = dict(
     rounds_per_probe=150,
     n_tune=2,
     n_polish=2,
+    n_rounds=300,
     device="cpu",
 )
 
@@ -60,6 +61,10 @@ class TestAutotune:
         # endpoints span the requested beta range
         assert float(plan.betas[0]) == 0.0
         assert float(plan.betas[-1]) == 1.0
+        # round-trip diagnostics are surfaced and measured over the production run
+        assert plan.report.total_round_trips is not None
+        assert plan.report.production_rounds == 300
+        assert "round trips" in plan.report.summary()
 
         s1 = plan.sample(jax.random.key(1), 300)
         s2 = plan.sample(jax.random.key(2), 300)

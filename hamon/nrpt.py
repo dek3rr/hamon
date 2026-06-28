@@ -1887,7 +1887,11 @@ class AutotuneReport:
         chain_history: per-probe records from the N search (:func:`tune_chains`).
         exploration: the :func:`tune_exploration` result dict, or ``None`` when
             the n_expl search was skipped.
-        round_trip_diagnostics: round-trip summary from the final polish run.
+        round_trip_diagnostics: round-trip summary from the final production run.
+        total_round_trips: total completed round trips observed during the final
+            production run (summed across chains), or ``None``.
+        production_rounds: number of rounds the production run used (the window
+            ``total_round_trips`` and ``tau_observed`` were measured over).
     """
 
     n_chains: int
@@ -1898,6 +1902,8 @@ class AutotuneReport:
     chain_history: list
     exploration: dict | None
     round_trip_diagnostics: dict | None
+    total_round_trips: int | None = None
+    production_rounds: int | None = None
 
     def summary(self) -> str:
         """Human-readable multi-line summary."""
@@ -1915,8 +1921,19 @@ class AutotuneReport:
             )
         rt = self.round_trip_diagnostics
         if rt is not None:
+            trips = (
+                f"{self.total_round_trips}"
+                if self.total_round_trips is not None
+                else "?"
+            )
+            window = (
+                f" over {self.production_rounds} rounds"
+                if self.production_rounds is not None
+                else ""
+            )
             lines.append(
-                f"  round trips: tau_obs={float(rt['tau_observed']):.4f}  "
+                f"  round trips: {trips}{window}  "
+                f"tau_obs={float(rt['tau_observed']):.4f}  "
                 f"tau_pred={float(rt['tau_predicted']):.4f}  "
                 f"efficiency={float(rt['efficiency']):.3f}"
             )
@@ -1999,6 +2016,7 @@ def autotune(
     rounds_per_probe: int = 400,
     n_tune: int = 4,
     n_polish: int = 2,
+    n_rounds: int = 1000,
     compile_cache: bool | str = True,
     device: DeviceLike = "auto",
 ) -> NRPTPlan:
@@ -2042,9 +2060,14 @@ def autotune(
         min_chains / max_chains / initial_n: N-search bounds / start.
         search_exploration: tune n_expl (step 2); ``False`` fixes n_expl=1.
         max_exploration_steps: ceiling for the n_expl doubling search.
-        rounds_per_probe: rounds per tuning/exploration probe.
+        rounds_per_probe: rounds per tuning/exploration probe (the cheap search
+            budget).
         n_tune: schedule-tuning phases per N probe.
         n_polish: schedule-tuning phases in the final polish.
+        n_rounds: rounds for the final production run — equilibrates the warm
+            cold state and is the window the reported round-trip rate / efficiency
+            are measured over. Should be ``≫ 2·N`` for a representative rate; the
+            default (1000) suits the autotuned chain counts.
         compile_cache: ``True`` enables the persistent compile cache at the
             default path, a ``str`` enables it at that path, ``False`` leaves
             placement untouched. See
@@ -2129,13 +2152,17 @@ def autotune(
         n_expl = int(exploration["gibbs_steps_per_round"])
 
     # --- Stage 3: schedule polish at (N, n_expl) + warm cold state ---
+    # The production run uses n_rounds (not the short probe budget): it both
+    # equilibrates the warm cold state and measures a representative round-trip
+    # rate. A round trip needs >= ~2N rounds, so a short window badly
+    # underestimates tau_obs / efficiency for large N.
     warm_states, polish_stats = tune_schedule(
         k_polish,
         ebm_factory,
         program_factory,
         init_states,
         clamp_state,
-        n_rounds=rounds_per_probe,
+        n_rounds=n_rounds,
         gibbs_steps_per_round=n_expl,
         initial_betas=betas0,
         n_tune=n_polish,
@@ -2170,6 +2197,12 @@ def autotune(
         )
     obs_block = Block(out_nodes)
 
+    rt_diag = polish_stats.get("round_trip_diagnostics")
+    total_round_trips = (
+        int(np.sum(np.asarray(rt_diag["round_trips_per_chain"])))
+        if rt_diag is not None
+        else None
+    )
     report = AutotuneReport(
         n_chains=n_chains,
         gibbs_steps_per_round=n_expl,
@@ -2178,7 +2211,9 @@ def autotune(
         device=str(dev) if dev is not None else None,
         chain_history=disc["history"],
         exploration=exploration,
-        round_trip_diagnostics=polish_stats.get("round_trip_diagnostics"),
+        round_trip_diagnostics=rt_diag,
+        total_round_trips=total_round_trips,
+        production_rounds=n_rounds,
     )
     return NRPTPlan(
         n_chains=n_chains,

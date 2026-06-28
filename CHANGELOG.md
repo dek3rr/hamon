@@ -38,9 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   n_expl) and never re-discovering N, then returns an `NRPTPlan` whose
   `.sample()` draws cheaply and repeatedly from a warm cold-chain state.
   `autosample` is the one-shot `(samples, AutotuneReport)` convenience. The
-  persistent compile cache is enabled by default (opt out with `compile_cache=`)
-  to amortize the multi-probe recompiles; `hamon.enable_persistent_compile_cache`
-  exposes it directly.
+  `AutotuneReport` surfaces N, n_expl, Λ, and the round-trip count/efficiency
+  measured over the final production run (its length is the `n_rounds` argument,
+  decoupled from the cheap per-probe budget so the round-trip rate is
+  representative — a round trip needs ≳ 2·N rounds). The persistent compile
+  cache is enabled by default (opt out with `compile_cache=`) to amortize the
+  multi-probe recompiles; `hamon.enable_persistent_compile_cache` exposes it.
 - **Adaptive local-exploration count (`tune_exploration`).** Auto-tunes
   `gibbs_steps_per_round` (n_expl) — the last major NRPT knob hamon did not
   set for you — by maximizing effective sample size per **measured steady-state
