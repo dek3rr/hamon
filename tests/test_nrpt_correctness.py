@@ -22,7 +22,8 @@ import pytest
 
 from hamon import Block, SpinNode, SamplingSchedule, sample_states
 from hamon.models import IsingEBM, IsingSamplingProgram, hinton_init
-from hamon.nrpt import nrpt, tune_schedule, optimize_schedule
+from hamon.nrpt import nrpt, optimize_schedule
+from hamon.tuning import tune_schedule
 
 
 # ---------------------------------------------------------------------------

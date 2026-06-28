@@ -15,7 +15,7 @@ import pytest
 
 from hamon import Block, SpinNode
 from hamon.models import IsingEBM, IsingSamplingProgram, hinton_init
-from hamon.nrpt import tune_chains
+from hamon.tuning import tune_chains
 
 
 # ---------------------------------------------------------------------------

@@ -19,7 +19,8 @@ from hamon import (
     NRPTStateObserver,
 )
 from hamon.models import AbstractEBM, IsingEBM, hinton_init
-from hamon.nrpt import _compute_base_energies, _make_reference_ebm, nrpt, tune_schedule
+from hamon.nrpt import _compute_base_energies, _make_reference_ebm, nrpt
+from hamon.tuning import tune_schedule
 
 from .utils import make_ising_grid
 

@@ -11,7 +11,8 @@ import pytest
 
 from hamon.device import accelerator_device
 from hamon.models.ising import hinton_init
-from hamon.nrpt import nrpt, tune_schedule
+from hamon.nrpt import nrpt
+from hamon.tuning import tune_schedule
 
 from .utils import make_ising_grid
 

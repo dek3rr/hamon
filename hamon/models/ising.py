@@ -446,7 +446,7 @@ def ising_sample(
         per-variable preference).
     """
     from hamon.graph_utils import rlf_coloring
-    from hamon.nrpt import autosample
+    from hamon.autotune import autosample
 
     biases = jnp.asarray(biases)
     weights = jnp.asarray(weights)

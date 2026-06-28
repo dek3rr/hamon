@@ -14,7 +14,7 @@ import jax.numpy as jnp
 
 from hamon import Block, SpinNode
 from hamon.models import IsingEBM, IsingSamplingProgram, hinton_init
-from hamon.nrpt import _select_gibbs_steps, tune_exploration
+from hamon.tuning import _select_gibbs_steps, tune_exploration
 
 
 # ---------------------------------------------------------------------------

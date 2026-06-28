@@ -20,7 +20,7 @@ import pytest
 
 from hamon import Block, NRPTEnergyObserver, SpinNode
 from hamon.models import IsingEBM, IsingSamplingProgram, hinton_init
-from hamon.nrpt import tune_schedule
+from hamon.tuning import tune_schedule
 from hamon.round_trips import (
     nrpt_log_normalizing_constant,
     thermodynamic_integration,

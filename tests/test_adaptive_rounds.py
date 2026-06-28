@@ -7,7 +7,8 @@ import jax.numpy as jnp
 import numpy as np
 
 from hamon.models import hinton_init
-from hamon.nrpt import _nrpt_rounds_trace_count, tune_chains, tune_schedule
+from hamon.nrpt import _nrpt_rounds_trace_count
+from hamon.tuning import tune_chains, tune_schedule
 
 from .utils import make_ising_grid
 
