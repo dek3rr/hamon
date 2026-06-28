@@ -55,7 +55,7 @@ adaptive schedule optimization, and round-trip diagnostics. Based on the
 theoretical framework of
 [Syed et al. (2021)](https://arxiv.org/abs/1905.02939).
 
-**Automatic chain count discovery** via `discover_chain_count`, which estimates
+**Automatic chain count discovery** via `tune_chains`, which estimates
 the communication barrier Λ and recommends how many tempering chains you need.
 
 **Dynamic block management** with influence-aware partitioning, per-temperature

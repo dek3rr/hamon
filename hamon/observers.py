@@ -386,7 +386,7 @@ class NRPTEnergyObserver(AbstractNRPTObserver):
     the mean energies after a run from ``stats["observer_carry"]``::
 
         obs = NRPTEnergyObserver(n_chains)
-        states, stats = nrpt_adaptive(..., observer=obs)
+        states, stats = tune_schedule(..., observer=obs)
         sum_E, count = stats["observer_carry"]
         mean_energies = sum_E / count
 
@@ -397,7 +397,7 @@ class NRPTEnergyObserver(AbstractNRPTObserver):
        Attaching any observer (this one included) switches the NRPT round loop
        from the dynamic-trip-count ``lax.fori_loop`` fast path to ``lax.scan``,
        which compiles once per distinct ``n_rounds``. The default no-observer
-       path is unaffected. In ``nrpt_adaptive`` the observer is attached only to
+       path is unaffected. In ``tune_schedule`` the observer is attached only to
        the production run, so accumulation is naturally post-tuning (no burn-in
        from the tuning phases is included).
 

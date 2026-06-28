@@ -238,7 +238,7 @@ def nrpt_log_normalizing_constant(
     integrates them against ``stats["betas"]``.
 
     Args:
-        stats: the stats dict from [`hamon.nrpt`][] / [`hamon.nrpt_adaptive`][]
+        stats: the stats dict from [`hamon.nrpt`][] / [`hamon.tune_schedule`][]
             run with ``observer=NRPTEnergyObserver(...)``.
         log_z0: ``log Z(β_min)`` of the reference chain, added to the integrated
             ratio to return the absolute ``log Z(β_max)``. Defaults to ``0``
@@ -251,7 +251,7 @@ def nrpt_log_normalizing_constant(
     """
     if "observer_carry" not in stats:
         raise ValueError(
-            "stats has no 'observer_carry'; run nrpt/nrpt_adaptive with "
+            "stats has no 'observer_carry'; run nrpt/tune_schedule with "
             "observer=NRPTEnergyObserver(n_chains) to accumulate mean energies."
         )
     sum_E, count = stats["observer_carry"]
@@ -273,7 +273,7 @@ def recommend_n_chains(
 
     The default target_acceptance=0.6 means 40% rejection per pair.
 
-    Note: Λ from too few chains is biased low. Use ``discover_chain_count``
+    Note: Λ from too few chains is biased low. Use ``tune_chains``
     for iterative bootstrapping if recommendations keep increasing.
 
     Args:

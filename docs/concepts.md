@@ -111,7 +111,7 @@ the reversible alternative (Stochastic Even-Odd, SEO).
 The spacing of temperature levels matters. Hamon implements Algorithm 4 from
 [Syed et al. (2021)](https://arxiv.org/abs/1905.02939): it monitors rejection
 rates across the ladder and repositions \( \beta \) values to equalize
-communication cost. `nrpt_adaptive` runs this tuning loop automatically.
+communication cost. `tune_schedule` runs this tuning loop automatically.
 
 ### Communication barrier
 
@@ -124,7 +124,7 @@ governs tempering performance:
 
 where \( \Lambda = \sum_{i=0}^{N-1} \frac{r_i}{1 - r_i} \) and \( r_i \) is the
 rejection rate between chains \( i \) and \( i+1 \). Hamon reports \( \Lambda \)
-in the round-trip diagnostics and uses it in `discover_chain_count` to recommend
+in the round-trip diagnostics and uses it in `tune_chains` to recommend
 how many chains to use.
 
 ## What Hamon optimizes

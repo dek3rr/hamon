@@ -1,5 +1,5 @@
-"""Tests for convergence-driven (adaptive) NRPT tuning in nrpt_adaptive /
-discover_chain_count: adaptive per-phase rounds, keep-best schedule, combined
+"""Tests for convergence-driven (adaptive) NRPT tuning in tune_schedule /
+tune_chains: adaptive per-phase rounds, keep-best schedule, combined
 phase stop, and the legacy (adaptive_tuning=False) escape hatch."""
 
 import jax
@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from hamon.models import hinton_init
-from hamon.nrpt import _nrpt_rounds_trace_count, discover_chain_count, nrpt_adaptive
+from hamon.nrpt import _nrpt_rounds_trace_count, tune_chains, tune_schedule
 
 from .utils import make_ising_grid
 
@@ -25,7 +25,7 @@ def _setup(L, coupling, n_chains, *, key=0):
 
 
 def _run(ebm, prog, betas, inits, **kw):
-    _, stats = nrpt_adaptive(
+    _, stats = tune_schedule(
         jax.random.key(3),
         ebm=ebm,
         program=prog,
@@ -104,7 +104,7 @@ def test_compile_count_bounded():
     share one compiled round loop (<= 2 traces total)."""
     ebm, prog, fb, betas, inits = _setup(4, 0.5, 6)
     before = _nrpt_rounds_trace_count[0]
-    nrpt_adaptive(
+    tune_schedule(
         jax.random.key(3),
         ebm=ebm,
         program=prog,
@@ -123,7 +123,7 @@ def test_compile_count_bounded():
 
 
 def test_discover_forwards_tune_tol():
-    """discover_chain_count accepts tune_tol and returns a sane chain count."""
+    """tune_chains accepts tune_tol and returns a sane chain count."""
     betas = jnp.linspace(0.0, 1.0, 8)
     nodes, edges, fb, ebms, progs = make_ising_grid(
         4, [float(b) for b in betas], coupling=0.4
@@ -136,7 +136,7 @@ def test_discover_forwards_tune_tol():
             for k in jax.random.split(jax.random.key(7), n_chains)
         ]
 
-    out = discover_chain_count(
+    out = tune_chains(
         jax.random.key(1),
         ebm=ebms[-1],
         program=progs[-1],

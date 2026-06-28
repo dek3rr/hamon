@@ -502,7 +502,7 @@ def report_nrpt_diagnostics(
     **Arguments:**
 
     - `stats`: The stats dict returned by [`hamon.nrpt`][] /
-      [`hamon.nrpt_adaptive`][].
+      [`hamon.tune_schedule`][].
     - `samples`: Optional node-ordered boolean samples (e.g. from
       [`hamon.nrpt_node_samples`][]); enables the entropy and convergence
       sections.

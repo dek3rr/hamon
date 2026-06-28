@@ -19,7 +19,7 @@ from hamon import (
     NRPTStateObserver,
 )
 from hamon.models import AbstractEBM, IsingEBM, hinton_init
-from hamon.nrpt import _compute_base_energies, _make_reference_ebm, nrpt, nrpt_adaptive
+from hamon.nrpt import _compute_base_energies, _make_reference_ebm, nrpt, tune_schedule
 
 from .utils import make_ising_grid
 
@@ -537,13 +537,13 @@ class TestZeroBetaHotChain:
             )
 
     def test_adaptive_tuning_with_zero_beta0(self):
-        """nrpt_adaptive (the path ising_sample uses) works from β₀ = 0."""
+        """tune_schedule (the path ising_sample uses) works from β₀ = 0."""
         betas = jnp.linspace(0.0, 1.2, 4)
         _, _, fb, ebms, progs = _make_ising(4, [float(b) for b in betas], coupling=0.6)
         ebm, prog = ebms[-1], progs[-1]
         states = _make_states(jax.random.key(8), ebms, fb, 4)
 
-        _, stats = nrpt_adaptive(
+        _, stats = tune_schedule(
             jax.random.key(9),
             ebm=ebm,
             program=prog,
@@ -753,7 +753,7 @@ class TestJitCacheReuse:
         inits = _make_states(jax.random.key(3), ebms, fb, 3)
 
         before = _nrpt_rounds_trace_count[0]
-        nrpt_adaptive(
+        tune_schedule(
             jax.random.key(4),
             ebm=ebms[-1],
             program=progs[-1],
@@ -779,7 +779,7 @@ class TestJitCacheReuse:
         inits = _make_states(jax.random.key(3), ebms, fb, 3)
 
         before = _nrpt_rounds_trace_count[0]
-        nrpt_adaptive(
+        tune_schedule(
             jax.random.key(4),
             ebm=ebms[-1],
             program=progs[-1],
@@ -974,7 +974,7 @@ class TestTuneEarlyStop:
         betas = jnp.array([0.5, 1.0, 1.5])
         nodes, _, fb, ebms, progs = _make_ising(4, [float(b) for b in betas])
         inits = _make_states(jax.random.key(0), ebms, fb, 3)
-        _, stats = nrpt_adaptive(
+        _, stats = tune_schedule(
             jax.random.key(1),
             ebm=ebms[-1],
             program=progs[-1],

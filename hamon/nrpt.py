@@ -15,6 +15,7 @@ import contextlib
 import logging
 import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 from functools import partial
 from typing import Any, NamedTuple
 from collections.abc import Callable
@@ -82,7 +83,7 @@ def _resolve_factories(
 
 class _ChainSource:
     """Uniform producer of per-chain EBM/program arguments for the template
-    and factory routes of ``nrpt_adaptive`` and ``discover_chain_count``.
+    and factory routes of ``tune_schedule`` and ``tune_chains``.
 
     Template route (single ``ebm`` + ``program``, no factories):
     ``nrpt_args`` returns the same β = 1 base pair on every call, so nrpt's
@@ -389,14 +390,14 @@ def _nrpt_rounds(
 
     Module-level and ``eqx.filter_jit``-decorated so the compilation cache
     persists across calls: repeated invocations with the same program/observer
-    structure and array shapes (e.g. the tuning phases of ``nrpt_adaptive``)
+    structure and array shapes (e.g. the tuning phases of ``tune_schedule``)
     reuse the compiled executable. Arrays — including ``betas`` — are traced
     data, so schedule updates between phases do not retrigger compilation.
 
     Without an observer (the common case) the loop is a dynamic-trip-count
     ``lax.fori_loop`` and ``n_rounds`` arrives as a **traced** scalar, so the
     compiled executable is independent of the round count: the tuning batches
-    and the production run of ``nrpt_adaptive``, and discovery probes at the
+    and the production run of ``tune_schedule``, and discovery probes at the
     same chain count, all share a single compile. With an observer we must
     collect a per-round output stack, which needs ``lax.scan``'s static length,
     so ``n_rounds`` arrives as a static ``int`` and each distinct value compiles
@@ -520,7 +521,7 @@ def _phase_diagnostics(
     new_betas: jax.Array,
     acceptance_rate: jax.Array,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
-    """The per-phase scalar diagnostics of ``nrpt_adaptive``'s tuning loop.
+    """The per-phase scalar diagnostics of ``tune_schedule``'s tuning loop.
 
     Returns ``(rej_std, max_beta_shift, Lambda, mean_acceptance)`` in one fused
     kernel. Computing them as separate eager ``jnp.std`` / ``jnp.max`` /
@@ -588,7 +589,7 @@ def _resolve_run_inputs(
         beta_attr = getattr(ebms, "beta", None)
         if beta_attr is not None and float(beta_attr) == 1.0:
             # Already a β = 1 base pair. Reuse it as-is so repeated calls
-            # (e.g. nrpt_adaptive tuning phases) present identical static
+            # (e.g. tune_schedule tuning phases) present identical static
             # structure to the jit cache and skip retracing entirely.
             base_ebm = ebms
             run_program = programs
@@ -903,7 +904,7 @@ def nrpt(
 
     # --- Unstack --------------------------------------------------------------
     # The public return is per-chain [chain][block] lists. ``_return_stacked``
-    # (set by nrpt_adaptive's tuning loop) instead hands back the stacked
+    # (set by tune_schedule's tuning loop) instead hands back the stacked
     # [block]-of-(n_chains, ...) carry as-is, so threading states across the many
     # tuning batches skips the n_chains × n_free_blocks eager slices this
     # unstack would otherwise dispatch every call. nrpt re-ingests the stacked
@@ -917,7 +918,7 @@ def nrpt(
     stats: dict[str, Any] = _swap_rate_stats(final.accepted, final.attempted, betas)
     rejection_rates = stats["rejection_rates"]
 
-    # ``_emit_diagnostics=False`` (set by nrpt_adaptive's tuning batches) skips
+    # ``_emit_diagnostics=False`` (set by tune_schedule's tuning batches) skips
     # this eager per-call summary — a handful of host-dispatched reductions that
     # tuning never reads. ``track_round_trips`` itself is left untouched so the
     # in-loop index tracking stays in the jitted body and the compiled round loop
@@ -1017,7 +1018,7 @@ def _tune_phase_adaptive_rounds(
     return states, pooled_stats, rounds_used
 
 
-def nrpt_adaptive(
+def tune_schedule(
     key: jax.Array,
     ebm_factory: Callable | None = None,
     program_factory: Callable | None = None,
@@ -1215,7 +1216,7 @@ def nrpt_adaptive(
         )
         phase += 1
         logger.info(
-            "nrpt_adaptive tune %d/%d: Lambda=%.3f mean_acceptance=%.3f "
+            "tune_schedule tune %d/%d: Lambda=%.3f mean_acceptance=%.3f "
             "rej_std=%.4g max|dbeta|=%.4g rounds=%d",
             phase,
             n_tune,
@@ -1234,7 +1235,7 @@ def nrpt_adaptive(
             stop_streak = stop_streak + 1 if (equalized or settled) else 0
             if phase >= min_tune_phases and stop_streak >= phase_patience:
                 logger.info(
-                    "nrpt_adaptive: schedule converged after %d phase(s) "
+                    "tune_schedule: schedule converged after %d phase(s) "
                     "(rej_std=%.4g, max|dbeta|=%.4g); skipping remaining tuning",
                     phase,
                     quality,
@@ -1244,7 +1245,7 @@ def nrpt_adaptive(
         elif effective_tol is not None and max_beta_shift < effective_tol:
             # Legacy early-stop (unchanged semantics).
             logger.info(
-                "nrpt_adaptive: schedule converged after %d phase(s) "
+                "tune_schedule: schedule converged after %d phase(s) "
                 "(max|dbeta|=%.4g < tune_tol=%.4g); skipping remaining tuning",
                 phase,
                 max_beta_shift,
@@ -1279,7 +1280,7 @@ def _probe_history_entry(
     rejection_rates,
     betas,
 ) -> dict[str, Any]:
-    """One ``discover_chain_count`` per-probe history record."""
+    """One ``tune_chains`` per-probe history record."""
     return {
         "iteration": iteration,
         "n": int(n),
@@ -1291,7 +1292,7 @@ def _probe_history_entry(
     }
 
 
-def discover_chain_count(
+def tune_chains(
     key: jax.Array,
     ebm_factory: Callable | None = None,
     program_factory: Callable | None = None,
@@ -1322,7 +1323,7 @@ def discover_chain_count(
     searched for by probing many chain counts.
 
     1. Estimate Λ̂ = Σ rejection_rates at the current N (each probe runs
-       ``nrpt_adaptive``, which tunes the schedule toward equi-acceptance).
+       ``tune_schedule``, which tunes the schedule toward equi-acceptance).
     2. Recommend N* = ceil(Λ̂·(1 + safety_margin) / r_target) + 1 — the
        round-trip-optimal 2Λ + 1 chains at r* = 1/2 (target_acceptance = 0.5).
     3. Iterate this fixed point (re-estimate Λ̂ at N*) until N* stops moving.
@@ -1418,11 +1419,11 @@ def discover_chain_count(
         programs = source.programs_for_init(n, ebms)
         inits = init_factory(n, ebms, programs)
         key, k_probe = jax.random.split(key)
-        # Forward whichever route the caller used; nrpt_adaptive re-dispatches
+        # Forward whichever route the caller used; tune_schedule re-dispatches
         # through its own _ChainSource. The concrete device (or None) bypasses its
         # heuristic, so probes never flip devices. Tuning is adaptive, so a
         # wrong-N probe still self-limits its rounds.
-        _, stats = nrpt_adaptive(
+        _, stats = tune_schedule(
             k_probe,
             ebm_factory,
             program_factory,
@@ -1464,7 +1465,7 @@ def discover_chain_count(
 
     # --- N tuning (Syed et al. 2021, Sec. "Tuning N") -----------------------
     # Λ is a schedule invariant: Λ̂ = Σ rejection_rates ≈ Λ at any chain count
-    # (each probe runs nrpt_adaptive, which tunes the schedule to equi-
+    # (each probe runs tune_schedule, which tunes the schedule to equi-
     # acceptance). Estimate Λ̂ at the current N, set N* = ceil(Λ̂·margin/r) + 1
     # (= 2Λ + 1 at r* = 1/2), and iterate this fixed point until N* settles.
     # Using the current-N estimate (not a running maximum) makes the result
@@ -1615,7 +1616,7 @@ def _time_per_round(
     median over ``time_reps`` runs of ``time_rounds`` rounds divides out to the
     per-round cost ``c₀ + n_expl·c_s``. ``track_round_trips`` is left on so the
     in-loop index update (real per-round cost) is included and the compiled
-    executable matches ``nrpt_adaptive``'s tuning loop; only the host-side
+    executable matches ``tune_schedule``'s tuning loop; only the host-side
     summary is skipped.
     """
 
@@ -1645,7 +1646,7 @@ def _time_per_round(
     return float(np.median(times)) / time_rounds
 
 
-def discover_gibbs_steps(
+def tune_exploration(
     key: jax.Array,
     ebm_factory: Callable | None = None,
     program_factory: Callable | None = None,
@@ -1660,6 +1661,7 @@ def discover_gibbs_steps(
     time_rounds: int = 200,
     time_reps: int = 3,
     *,
+    fixed_schedule: jax.Array | None = None,
     ebm: AbstractEBM | None = None,
     program: BlockSamplingProgram | None = None,
     device: DeviceLike = "auto",
@@ -1667,7 +1669,7 @@ def discover_gibbs_steps(
     """Discover the local-exploration count ``gibbs_steps_per_round`` (n_expl).
 
     n_expl is the only major NRPT knob hamon does not otherwise auto-tune
-    (``discover_chain_count`` sets N from Λ; ``nrpt_adaptive`` sets the
+    (``tune_chains`` sets N from Λ; ``tune_schedule`` sets the
     schedule). The **objective** maximized here is effective sample size per
     **measured steady-state wall-second**,
 
@@ -1696,19 +1698,21 @@ def discover_gibbs_steps(
     local exploration cannot help). ``rt_per_compute`` and ``t_round`` are
     recorded per probe alongside the ESS-per-second objective.
 
-    See :func:`discover_chain_count` for the N analogue. The chain count is held
+    See :func:`tune_chains` for the N analogue. The chain count is held
     fixed at ``len(initial_betas)`` — Λ (hence N) is a schedule invariant robust
-    to n_expl, so the two searches decouple; run ``discover_chain_count`` first
+    to n_expl, so the two searches decouple; run ``tune_chains`` first
     if N is unknown.
 
-    Each probe (1) runs :func:`nrpt_adaptive` (tuning the schedule at that
-    n_expl) with an :class:`~hamon.NRPTStateObserver` on the cold chain and
-    computes ESS over the collected cold-chain trace, then (2) times the
-    steady-state round loop on the tuned schedule — a warm-up run absorbs the
-    one-time compile (n_expl is a static sweep count), and the median of
-    ``time_reps`` timed runs of ``time_rounds`` rounds gives ``t_round``. Instead
-    of ``ebm_factory`` / ``program_factory`` you may pass a single template
-    ``ebm`` and ``program`` (temperature-linear mode), as with ``nrpt_adaptive``.
+    Each probe (1) gets a schedule, (2) measures ESS over a cold-chain trace via
+    an :class:`~hamon.NRPTStateObserver`, and (3) times the steady-state round
+    loop (warm-up absorbs the one-time compile; the median of ``time_reps`` runs
+    of ``time_rounds`` rounds gives ``t_round``). With ``fixed_schedule=None``
+    (default) the schedule is re-tuned per probe via :func:`tune_schedule`; pass
+    ``fixed_schedule`` (a pre-tuned ladder) to **reuse it** and run each probe as
+    a single :func:`nrpt` production call — much cheaper, and sound because the
+    equi-acceptance schedule is invariant to n_expl. ``autotune`` uses this mode.
+    Instead of ``ebm_factory`` / ``program_factory`` you may pass a single
+    template ``ebm`` and ``program`` (temperature-linear mode).
 
     Args:
         key: PRNG key.
@@ -1726,6 +1730,10 @@ def discover_gibbs_steps(
             (guards against chasing Monte-Carlo noise past the peak).
         time_rounds: rounds per timed run when measuring ``t_round``.
         time_reps: number of timed runs to take the median over (noise control).
+        fixed_schedule: a pre-tuned β ladder to reuse across all probes (each
+            probe becomes one production run, no per-probe re-tuning). ``None``
+            (default) re-tunes per probe; ``autotune`` passes the ladder from
+            ``tune_chains``.
         device: where to run; resolved once and reused across probes. Timing is
             measured on this device, so the chosen n_expl is calibrated to it.
 
@@ -1764,30 +1772,51 @@ def discover_gibbs_steps(
     )
     source.device_put_template(dev)
 
+    obs = NRPTStateObserver(chain_indices=(-1,))
+
     def probe(n_expl: int) -> dict[str, Any]:
         nonlocal key
         key, k_probe, k_time = jax.random.split(key, 3)
-        # (1) Tune the schedule at this n_expl and observe the cold chain so ESS
-        # can be measured over its trace.
-        _, stats = nrpt_adaptive(
-            k_probe,
-            ebm_factory,
-            program_factory,
-            init_states,
-            clamp_state,
-            n_rounds=rounds_per_probe,
-            gibbs_steps_per_round=n_expl,
-            initial_betas=betas,
-            n_tune=n_tune_per_probe,
-            rounds_per_tune=rounds_per_probe,
-            ebm=ebm,
-            program=program,
-            observer=NRPTStateObserver(chain_indices=(-1,)),
-            device=dev,
-        )
+        # (1) Get a schedule + cold-chain trace at this n_expl. With a fixed
+        # schedule each probe is a single production run (no re-tuning, since the
+        # equi-acceptance schedule is n_expl-invariant); otherwise re-tune.
+        if fixed_schedule is not None:
+            tuned_betas = jnp.asarray(fixed_schedule)
+            ebms_t, programs_t = source.nrpt_args(tuned_betas)
+            _, stats = nrpt(
+                k_probe,
+                ebms_t,
+                programs_t,
+                init_states,
+                clamp_state,
+                rounds_per_probe,
+                n_expl,
+                betas=tuned_betas,
+                track_round_trips=True,
+                observer=obs,
+                device=dev,
+            )
+        else:
+            _, stats = tune_schedule(
+                k_probe,
+                ebm_factory,
+                program_factory,
+                init_states,
+                clamp_state,
+                n_rounds=rounds_per_probe,
+                gibbs_steps_per_round=n_expl,
+                initial_betas=betas,
+                n_tune=n_tune_per_probe,
+                rounds_per_tune=rounds_per_probe,
+                ebm=ebm,
+                program=program,
+                observer=obs,
+                device=dev,
+            )
+            tuned_betas = jnp.asarray(stats["betas"])
+            ebms_t, programs_t = source.nrpt_args(tuned_betas)
         rep = report_nrpt_diagnostics(stats)
         tau_obs = float(rep.tau_observed) if rep.tau_observed is not None else 0.0
-        tuned_betas = jnp.asarray(stats["betas"])
 
         # Flatten the per-round cold-chain block states into a (rounds, nodes)
         # trace. ESS is per-column then median-reduced, so column order / node
@@ -1797,8 +1826,7 @@ def discover_gibbs_steps(
         trace = np.concatenate([c.reshape(c.shape[0], -1) for c in cold], axis=1)
         ess = effective_sample_size(trace)
 
-        # (2) Measure steady-state wall time per round on the tuned schedule.
-        ebms_t, programs_t = source.nrpt_args(tuned_betas)
+        # (2) Measure steady-state wall time per round on this schedule.
         t_round = _time_per_round(
             k_time,
             ebms_t,
@@ -1839,3 +1867,352 @@ def discover_gibbs_steps(
         "betas": best["betas"],
         "history": history,
     }
+
+
+# ---------------------------------------------------------------------------
+# Full autotuning: orchestrate N, exploration, and schedule
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class AutotuneReport:
+    """Diagnostics from an :func:`autotune` run.
+
+    Attributes:
+        n_chains: discovered chain count N.
+        gibbs_steps_per_round: discovered local-exploration count n_expl.
+        Lambda: estimated global communication barrier Λ.
+        betas: the final tuned β ladder.
+        device: the resolved device (string) or ``None``.
+        chain_history: per-probe records from the N search (:func:`tune_chains`).
+        exploration: the :func:`tune_exploration` result dict, or ``None`` when
+            the n_expl search was skipped.
+        round_trip_diagnostics: round-trip summary from the final polish run.
+    """
+
+    n_chains: int
+    gibbs_steps_per_round: int
+    Lambda: float
+    betas: np.ndarray
+    device: str | None
+    chain_history: list
+    exploration: dict | None
+    round_trip_diagnostics: dict | None
+
+    def summary(self) -> str:
+        """Human-readable multi-line summary."""
+        lines = [
+            "AUTOTUNE: "
+            f"N={self.n_chains}  n_expl={self.gibbs_steps_per_round}  "
+            f"Lambda={self.Lambda:.3f}  device={self.device}",
+        ]
+        if self.exploration is not None:
+            ess_sec = self.exploration.get("objective")
+            lines.append(
+                f"  exploration: chose n_expl={self.gibbs_steps_per_round} "
+                f"(ESS/sec={ess_sec:.1f}, "
+                f"t_round={self.exploration.get('t_round', 0.0) * 1e3:.3f} ms)"
+            )
+        rt = self.round_trip_diagnostics
+        if rt is not None:
+            lines.append(
+                f"  round trips: tau_obs={float(rt['tau_observed']):.4f}  "
+                f"tau_pred={float(rt['tau_predicted']):.4f}  "
+                f"efficiency={float(rt['efficiency']):.3f}"
+            )
+        return "\n".join(lines)
+
+
+@dataclass
+class NRPTPlan:
+    """A tuned NRPT configuration plus a warm cold-chain state.
+
+    Returned by :func:`autotune`. Holds the discovered hyperparameters (N,
+    schedule, n_expl) and an equilibrated cold-chain state, so :meth:`sample`
+    can draw repeatedly and cheaply — no re-tuning, reusing the compiled loop.
+
+    Attributes:
+        n_chains / betas / gibbs_steps_per_round / Lambda: the tuned config.
+        device: the resolved device (or ``None``).
+        report: the :class:`AutotuneReport`.
+    """
+
+    n_chains: int
+    betas: np.ndarray
+    gibbs_steps_per_round: int
+    Lambda: float
+    device: Any
+    report: AutotuneReport
+    _cold_program: BlockSamplingProgram
+    _warm_state: list
+    _clamp_state: list
+    _obs_block: Any
+
+    def sample(
+        self,
+        key: jax.Array,
+        n_samples: int,
+        *,
+        n_warmup: int = 0,
+        steps_per_sample: int = 1,
+    ) -> jax.Array:
+        """Draw ``n_samples`` from the target (cold chain) — cheap and repeatable.
+
+        Runs single-chain block Gibbs at the tuned cold β from the stored warm
+        state (the established post-NRPT draw). Returns a ``(n_samples,
+        n_nodes)`` array; call again with a fresh ``key`` for more, with no
+        re-tuning.
+        """
+        from hamon.block_sampling import SamplingSchedule, sample_states
+
+        schedule = SamplingSchedule(n_warmup, n_samples, steps_per_sample)
+        dev = self.device if self.device is not None else "auto"
+        raw = sample_states(
+            key,
+            self._cold_program,
+            schedule,
+            self._warm_state,
+            self._clamp_state,
+            [self._obs_block],
+            device=dev,
+        )
+        return raw[0]
+
+
+def autotune(
+    key: jax.Array,
+    *,
+    ebm: AbstractEBM | None = None,
+    program: BlockSamplingProgram | None = None,
+    ebm_factory: Callable | None = None,
+    program_factory: Callable | None = None,
+    init_factory: Callable,
+    clamp_state: list | None = None,
+    sample_nodes: Sequence | None = None,
+    beta_range: tuple[float, float] = (0.0, 1.0),
+    target_acceptance: float = 0.6,
+    min_chains: int = 3,
+    max_chains: int = 128,
+    initial_n: int | None = None,
+    search_exploration: bool = True,
+    max_exploration_steps: int = 8,
+    rounds_per_probe: int = 400,
+    n_tune: int = 4,
+    n_polish: int = 2,
+    compile_cache: bool | str = True,
+    device: DeviceLike = "auto",
+) -> NRPTPlan:
+    """Autotune the full NRPT configuration: N, exploration count, and schedule.
+
+    The one-call front door for solving a problem with hamon. Runs the
+    dependency-ordered, cheap→expensive recipe and returns an :class:`NRPTPlan`
+    you draw from with :meth:`NRPTPlan.sample`:
+
+    1. **N** via :func:`tune_chains` at n_expl=1 (cheapest probes; Λ — hence N\\* —
+       is invariant to n_expl).
+    2. **n_expl** via :func:`tune_exploration` at the fixed N, **reusing** the
+       schedule from step 1 (production-only probes; the equi-acceptance schedule
+       is invariant to n_expl, so this needs no re-tuning and never re-discovers
+       N). Maximizes ESS per *measured* wall-second, so it self-calibrates to the
+       device. Skipped when ``search_exploration=False``.
+    3. **Schedule polish** via :func:`tune_schedule` at the chosen (N, n_expl),
+       which also leaves an equilibrated warm cold-chain state.
+
+    The multi-probe search recompiles per chain count and per n_expl, so by
+    default the **persistent compilation cache** is enabled (``compile_cache``)
+    to amortize those compiles across probes and runs.
+
+    Pass either a single template ``ebm`` + ``program`` (temperature-linear mode)
+    or per-chain ``ebm_factory`` + ``program_factory``, exactly as the individual
+    tuners accept. ``init_factory(n_chains, ebms, programs) -> list`` builds one
+    initial state per chain at the discovered N.
+
+    Args:
+        key: PRNG key.
+        ebm / program: single template objects (temperature-linear mode), or
+        ebm_factory / program_factory: per-chain factories.
+        init_factory: ``(n_chains, ebms, programs) -> list`` of initial states.
+        clamp_state: clamped block states.
+        sample_nodes: nodes defining the column order of drawn samples (must be
+            free nodes of the program). ``None`` (default) uses all free nodes in
+            free-block order; pass the model's canonical node list to get samples
+            in that order (single node type only).
+        beta_range: ``(β_min, β_max)`` temperature range.
+        target_acceptance: per-pair swap acceptance target for the N search.
+        min_chains / max_chains / initial_n: N-search bounds / start.
+        search_exploration: tune n_expl (step 2); ``False`` fixes n_expl=1.
+        max_exploration_steps: ceiling for the n_expl doubling search.
+        rounds_per_probe: rounds per tuning/exploration probe.
+        n_tune: schedule-tuning phases per N probe.
+        n_polish: schedule-tuning phases in the final polish.
+        compile_cache: ``True`` enables the persistent compile cache at the
+            default path, a ``str`` enables it at that path, ``False`` leaves
+            placement untouched. See
+            :func:`hamon.enable_persistent_compile_cache`.
+        device: where to run; resolved once and reused across every stage.
+
+    Returns:
+        An :class:`NRPTPlan`.
+    """
+    from hamon.block_management import Block
+    from hamon.device import enable_persistent_compile_cache
+
+    if init_factory is None:
+        raise ValueError("init_factory is required.")
+    if compile_cache:
+        enable_persistent_compile_cache(
+            compile_cache if isinstance(compile_cache, str) else None
+        )
+    clamp_state = clamp_state or []
+    source = _ChainSource(ebm_factory, program_factory, ebm, program)
+
+    # Resolve the device once for every stage.
+    _pilot_n = initial_n if initial_n is not None else min_chains + 16
+    _meta_betas = jnp.linspace(beta_range[0], beta_range[1], 1)
+    dev = resolve_entry_device(
+        device,
+        n_chains=max(min_chains, min(max_chains, _pilot_n)),
+        n_nodes=source.metadata_free_nodes(_meta_betas, device),
+        arrays=(key,),
+    )
+    source.device_put_template(dev)
+
+    k_chains, k_expl, k_polish = jax.random.split(key, 3)
+
+    # --- Stage 1: chain count at n_expl = 1 ---
+    disc = tune_chains(
+        k_chains,
+        ebm_factory,
+        program_factory,
+        init_factory,
+        clamp_state,
+        beta_range=beta_range,
+        gibbs_steps_per_round=1,
+        target_acceptance=target_acceptance,
+        rounds_per_probe=rounds_per_probe,
+        n_tune_per_probe=n_tune,
+        min_chains=min_chains,
+        max_chains=max_chains,
+        initial_n=initial_n,
+        ebm=ebm,
+        program=program,
+        device=dev,
+    )
+    n_chains = int(disc["n_chains"])
+    Lambda = float(disc["Lambda"])
+    betas0 = jnp.asarray(disc["betas"])
+
+    # Initial states at the discovered N (reused by stages 2 and 3).
+    ebms_init = source.ebms_for_init(betas0)
+    programs_init = source.programs_for_init(n_chains, ebms_init)
+    init_states = init_factory(n_chains, ebms_init, programs_init)
+
+    # --- Stage 2: exploration count at fixed N, reusing the schedule ---
+    exploration: dict | None = None
+    n_expl = 1
+    if search_exploration and max_exploration_steps > 1:
+        exploration = tune_exploration(
+            k_expl,
+            ebm_factory,
+            program_factory,
+            init_states,
+            clamp_state,
+            initial_betas=betas0,
+            start_steps=1,
+            max_steps=max_exploration_steps,
+            rounds_per_probe=rounds_per_probe,
+            fixed_schedule=betas0,
+            ebm=ebm,
+            program=program,
+            device=dev,
+        )
+        n_expl = int(exploration["gibbs_steps_per_round"])
+
+    # --- Stage 3: schedule polish at (N, n_expl) + warm cold state ---
+    warm_states, polish_stats = tune_schedule(
+        k_polish,
+        ebm_factory,
+        program_factory,
+        init_states,
+        clamp_state,
+        n_rounds=rounds_per_probe,
+        gibbs_steps_per_round=n_expl,
+        initial_betas=betas0,
+        n_tune=n_polish,
+        rounds_per_tune=rounds_per_probe,
+        ebm=ebm,
+        program=program,
+        device=dev,
+    )
+    betas = jnp.asarray(polish_stats["betas"])
+    warm_cold = warm_states[-1]  # cold chain = highest β
+
+    # Build the cold-β program for the production draw (real β_cold weights, not
+    # the temperature-linear template).
+    cold_beta = float(np.asarray(betas)[-1])
+    if ebm is not None and program is not None:
+        cold_program = program.with_ebm(ebm.with_beta(jnp.asarray(cold_beta)))
+    else:
+        assert ebm_factory is not None and program_factory is not None
+        cold_ebm = ebm_factory(jnp.asarray([cold_beta]))[0]
+        cold_program = program_factory([cold_ebm])[0]
+
+    # Output column order: caller-supplied (e.g. the model's original node
+    # order) or, by default, all free nodes in free-block (colour) order.
+    if sample_nodes is not None:
+        out_nodes = list(sample_nodes)
+    else:
+        out_nodes = [n for b in cold_program.gibbs_spec.free_blocks for n in b.nodes]
+    if len({type(n) for n in out_nodes}) > 1:
+        raise NotImplementedError(
+            "autotune sampling currently supports single-node-type models; "
+            "draw manually from plan with sample_states for mixed-type models."
+        )
+    obs_block = Block(out_nodes)
+
+    report = AutotuneReport(
+        n_chains=n_chains,
+        gibbs_steps_per_round=n_expl,
+        Lambda=Lambda,
+        betas=np.asarray(betas),
+        device=str(dev) if dev is not None else None,
+        chain_history=disc["history"],
+        exploration=exploration,
+        round_trip_diagnostics=polish_stats.get("round_trip_diagnostics"),
+    )
+    return NRPTPlan(
+        n_chains=n_chains,
+        betas=np.asarray(betas),
+        gibbs_steps_per_round=n_expl,
+        Lambda=Lambda,
+        device=dev,
+        report=report,
+        _cold_program=cold_program,
+        _warm_state=warm_cold,
+        _clamp_state=clamp_state,
+        _obs_block=obs_block,
+    )
+
+
+def autosample(
+    key: jax.Array,
+    *,
+    n_samples: int,
+    n_warmup: int = 0,
+    steps_per_sample: int = 1,
+    **autotune_kwargs,
+) -> tuple[jax.Array, AutotuneReport]:
+    """One-shot: :func:`autotune` then draw — returns ``(samples, report)``.
+
+    The convenience entry for "give me samples." Forwards all keyword arguments
+    to :func:`autotune` (``ebm``/``program`` or factories, ``init_factory``,
+    ``beta_range``, ``device``, …), then draws ``n_samples`` from the tuned plan.
+    For repeated draws from one tuned configuration, call :func:`autotune` once
+    and reuse :meth:`NRPTPlan.sample`.
+    """
+    k_tune, k_draw = jax.random.split(key)
+    plan = autotune(k_tune, **autotune_kwargs)
+    samples = plan.sample(
+        k_draw, n_samples, n_warmup=n_warmup, steps_per_sample=steps_per_sample
+    )
+    return samples, plan.report

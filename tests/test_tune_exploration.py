@@ -1,4 +1,4 @@
-"""Tests for discover_gibbs_steps (adaptive n_expl on ESS per measured wall-second).
+"""Tests for tune_exploration (adaptive n_expl on ESS per measured wall-second).
 
 The peak-finding control logic (``_select_gibbs_steps``) is validated
 deterministically with a synthetic probe. The end-to-end search is validated
@@ -14,7 +14,7 @@ import jax.numpy as jnp
 
 from hamon import Block, SpinNode
 from hamon.models import IsingEBM, IsingSamplingProgram, hinton_init
-from hamon.nrpt import _select_gibbs_steps, discover_gibbs_steps
+from hamon.nrpt import _select_gibbs_steps, tune_exploration
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +99,7 @@ def test_discover_gibbs_steps_smoke():
     keys = jax.random.split(jax.random.key(2), n_chains)
     init = [hinton_init(keys[c], ebm, free_blocks, ()) for c in range(n_chains)]
 
-    res = discover_gibbs_steps(
+    res = tune_exploration(
         jax.random.key(3),
         init_states=init,
         clamp_state=[],

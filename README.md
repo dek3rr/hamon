@@ -60,7 +60,7 @@ Requires Python ≥ 3.12 and a JAX installation ([GPU setup guide](https://jax.r
 
 With CUDA jax installed, JAX places everything on the GPU — including the
 small, dispatch-bound programs where a CPU finishes several times faster.
-hamon's entry points (`nrpt`, `nrpt_adaptive`, `discover_chain_count`,
+hamon's entry points (`nrpt`, `tune_schedule`, `tune_chains`,
 `ising_sample`, `sample_states`, `sample_with_observation`, …) therefore take
 a `device` argument:
 
@@ -110,67 +110,70 @@ samples = sample_states(k_samp, program, schedule, init_state, [], [Block(nodes)
 
 Hamon implements adaptive NRPT based on
 [Syed et al. (2021)](https://arxiv.org/abs/1905.02939), with vectorized swaps
-that exploit the temperature-linearity of Ising energies:
+that exploit the temperature-linearity of Ising energies. **The primary
+interface is autotuning** — `autotune` / `autosample` discover the chain count,
+the local-exploration count, and the schedule for you:
 
 ```python
-from hamon.nrpt import nrpt_adaptive
+from hamon import autosample
 
-ebm = IsingEBM(nodes, edges, biases, weights, jnp.array(1.0))
-program = IsingSamplingProgram(ebm, free_blocks, [])
-
-states, _, stats = nrpt_adaptive(
-    jax.random.key(42),
-    init_states=[init_state] * 8,
-    clamp_state=[],
-    n_rounds=500,
-    gibbs_steps_per_round=5,
-    initial_betas=jnp.linspace(0.1, 2.0, 8),
-    n_tune=5,
-    rounds_per_tune=200,
-    ebm=ebm,
+# Tunes N, gibbs_steps_per_round, and the β ladder, then draws from the target.
+samples, report = autosample(
+    jax.random.key(0),
+    n_samples=2000,
+    ebm=ebm,                  # a single template EBM (any β)
     program=program,
+    init_factory=init_factory,  # (n_chains, ebms, programs) -> [init per chain]
+    clamp_state=[],
+    beta_range=(0.0, 1.0),
 )
+print(report.summary())       # N, n_expl, Λ, round-trip efficiency
 
-print(f"Final Λ: {stats['round_trip_diagnostics']['Lambda']:.3f}")
-print(f"Round trip rate: {stats['round_trip_diagnostics']['tau_observed']:.4f}")
+# Or keep the tuned plan and draw repeatedly without re-tuning:
+plan = autotune(jax.random.key(1), ebm=ebm, program=program,
+                init_factory=init_factory, clamp_state=[])
+more = plan.sample(jax.random.key(2), 5000)
 ```
+
+For Ising models, `ising_sample` wraps this in a one-liner (biases, edges,
+weights → samples) and autotunes everything automatically.
 
 Key features of the NRPT implementation:
 
+- **Full autotuning**: `autotune` runs chain count → exploration count →
+  schedule in dependency order, reusing the schedule across exploration probes
+  and never re-discovering N; returns an `NRPTPlan` for cheap repeated draws
+- **Device-calibrated exploration**: `tune_exploration` picks
+  `gibbs_steps_per_round` by maximizing ESS per *measured* wall-second, so it
+  self-calibrates (n_expl=1 on a compute-bound CPU, n_expl>1 on a dispatch-bound
+  GPU where extra sweeps are nearly free — measured 1.7–2.3× ESS/sec)
 - **Vectorized swaps**: 1 energy evaluation per chain (not 4 per pair), all
   non-overlapping swaps execute simultaneously via permutation indexing
 - **Temperature-linear mode**: one β = 1 base program serves every chain;
   interactions are scaled by each chain's β inside the kernel, so no
   per-chain program construction and n_chains× less interaction memory
-- **Compile-once adaptive tuning**: the round loop is jitted at module level
-  and the β schedule is traced data, so all tuning phases reuse one
-  compiled executable
-- **Adaptive scheduling**: iteratively tunes β spacing to equalize rejection
-  rates, minimizing the global communication barrier Λ
-- **Round trip tracking**: monitors the index process per machine, estimates
-  Λ and predicted optimal rate τ̄ = 1/(2+2Λ)
-- **Chain count discovery**: iteratively probes to find the right number of
-  chains for a target acceptance rate
-- **Local-exploration tuning**: `discover_gibbs_steps` picks
-  `gibbs_steps_per_round` by maximizing ESS per *measured* wall-second, so it
-  self-calibrates to the device (n_expl=1 on a compute-bound CPU, n_expl>1 on a
-  dispatch-bound GPU where extra sweeps are nearly free)
+- **Chain count discovery**: `tune_chains` probes for the right N from Λ
+- **Adaptive scheduling**: `tune_schedule` equalizes rejection rates,
+  minimizing the global communication barrier Λ
+- **Round trip tracking**: estimates Λ and predicted optimal rate τ̄ = 1/(2+2Λ)
 - **Effective sample size**: `effective_sample_size` reports per-variable ESS
   (the honest denominator on Monte-Carlo error); folded into
   `report_nrpt_diagnostics`
 - **Log normalizing constant**: opt-in `NRPTEnergyObserver` +
   `thermodynamic_integration` recover log Z / model evidence / free energy from
   the tempering energies — the quantity ordinary MCMC discards
+- **Compile cache by default**: autotune enables JAX's persistent compile cache
+  to amortize the multi-probe recompiles across runs
 
 ### Log Z and effective sample size
 
 ```python
 import jax.numpy as jnp
 from hamon import NRPTEnergyObserver, nrpt_log_normalizing_constant
-from hamon.nrpt import nrpt_adaptive
+from hamon.nrpt import tune_schedule
 
 obs = NRPTEnergyObserver(n_chains=8)
-states, stats = nrpt_adaptive(
+states, stats = tune_schedule(
     jax.random.key(0),
     init_states=[init_state] * 8,
     clamp_state=[],
@@ -221,7 +224,7 @@ If you use Hamon in your research, please cite:
     title        = {Hamon: JAX-Native Thermal Sampling for Discrete Energy-Based Models},
     year         = {2026},
     url          = {https://github.com/dek3rr/hamon},
-    version      = {0.6.0},
+    version      = {0.7.0},
     license      = {Apache-2.0},
 }
 ```

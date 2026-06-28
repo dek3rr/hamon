@@ -80,7 +80,7 @@ tempering (NRPT) runs multiple chains at different temperatures and shuffles
 information between them.
 
 ```python
-from hamon.nrpt import nrpt, nrpt_adaptive
+from hamon.nrpt import nrpt, tune_schedule
 
 betas = [0.2, 0.5, 0.8, 1.0]  # hot → cold
 ebms = [IsingEBM(nodes, edges, biases, weights, jnp.array(b)) for b in betas]
@@ -106,7 +106,7 @@ print(f"Round-trip rate:  {stats['round_trip_diagnostics']['tau_observed']:.4f}"
 Let Hamon optimize the temperature ladder automatically:
 
 ```python
-states, _, stats = nrpt_adaptive(
+states, _, stats = tune_schedule(
     jax.random.key(2),
     ebm_factory=lambda b: IsingEBM(nodes, edges, biases, weights, b),
     program_factory=lambda e: IsingSamplingProgram(e, free_blocks, []),

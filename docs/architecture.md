@@ -64,7 +64,7 @@ interaction arrays by each chain's \( \beta \) inside the vmapped kernel —
 no per-chain program construction and no per-chain copies of the weight
 tensors. The whole round loop lives in a module-level jitted function, so
 repeated calls with the same base pair (e.g. the tuning phases of
-`nrpt_adaptive`) compile exactly once; the \( \beta \) schedule is traced
+`tune_schedule`) compile exactly once; the \( \beta \) schedule is traced
 data and can change freely between phases.
 
 ## Energy caching
@@ -102,7 +102,7 @@ Algorithm 4 of Syed et al. (2021). Given observed rejection rates
 inverts it to find \( \beta \) values that equalize the per-level contribution
 to \( \Lambda \).
 
-`nrpt_adaptive` wraps this in a loop: run a short burn-in, measure rejections,
+`tune_schedule` wraps this in a loop: run a short burn-in, measure rejections,
 reposition betas, repeat for `n_tune` phases, then run production.
 
 ## Dynamic blocks

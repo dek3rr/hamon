@@ -22,7 +22,7 @@ import pytest
 
 from hamon import Block, SpinNode, SamplingSchedule, sample_states
 from hamon.models import IsingEBM, IsingSamplingProgram, hinton_init
-from hamon.nrpt import nrpt, nrpt_adaptive, optimize_schedule
+from hamon.nrpt import nrpt, tune_schedule, optimize_schedule
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +87,7 @@ def _exact_marginals(exact_probs: np.ndarray, n: int) -> np.ndarray:
 # T1: Boltzmann marginals
 #
 # The cold chain of nrpt must sample from exp(-β_cold * E_base(x)).
-# Strategy: small model (n=8), use nrpt_adaptive for warmup to avoid cold-start
+# Strategy: small model (n=8), use tune_schedule for warmup to avoid cold-start
 # bias, then collect samples via sample_states from the warm state.
 # Compare empirical first-order marginals to exact enumeration.
 #
@@ -110,7 +110,7 @@ class TestBoltzmannMarginals:
         ebms, progs = _make_chain_set(nodes, edges, biases, weights, fb, betas)
         init = _init_states(k_init, len(betas), ebms, fb)
 
-        # Warmup via nrpt_adaptive so cold chain isn't stuck
+        # Warmup via tune_schedule so cold chain isn't stuck
         def ebm_factory(b):
             return [
                 IsingEBM(nodes, edges, biases, weights, jnp.array(float(bi)))
@@ -120,7 +120,7 @@ class TestBoltzmannMarginals:
         def prog_factory(es):
             return [IsingSamplingProgram(e, fb, []) for e in es]
 
-        warm_states, _ = nrpt_adaptive(
+        warm_states, _ = tune_schedule(
             k_nrpt,
             ebm_factory,
             prog_factory,
@@ -225,7 +225,7 @@ class TestBoltzmannMarginals:
         def prog_f(es):
             return [IsingSamplingProgram(e, fb, []) for e in es]
 
-        warm, _ = nrpt_adaptive(
+        warm, _ = tune_schedule(
             k_pt,
             ebm_f,
             prog_f,
@@ -516,7 +516,7 @@ class TestAdaptiveSchedule:
         init = _init_states(k_init, 6, ebms_init, fb)
         ebm_f, prog_f = self._make_factories(nodes, edges, biases, weights, fb)
 
-        _, stats = nrpt_adaptive(
+        _, stats = tune_schedule(
             jax.random.key(0),
             ebm_f,
             prog_f,
@@ -561,7 +561,7 @@ class TestAdaptiveSchedule:
         init = _init_states(k_init, 6, ebms_init, fb)
         ebm_f, prog_f = self._make_factories(nodes, edges, biases, weights, fb)
 
-        _, stats = nrpt_adaptive(
+        _, stats = tune_schedule(
             jax.random.key(11),
             ebm_f,
             prog_f,
@@ -605,7 +605,7 @@ class TestAdaptiveSchedule:
         init = _init_states(k_init, 6, ebms_init, fb)
         ebm_f, prog_f = self._make_factories(nodes, edges, biases, weights, fb)
 
-        _, stats = nrpt_adaptive(
+        _, stats = tune_schedule(
             jax.random.key(22),
             ebm_f,
             prog_f,
@@ -680,7 +680,7 @@ class TestRoundTripPrediction:
         def prog_f(es):
             return [IsingSamplingProgram(e, fb, []) for e in es]
 
-        _, stats = nrpt_adaptive(
+        _, stats = tune_schedule(
             jax.random.key(0),
             ebm_f,
             prog_f,
