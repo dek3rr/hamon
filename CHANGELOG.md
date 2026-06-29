@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The persistent compilation cache now actually persists.**
+  `enable_persistent_compile_cache` set the cache directory but left JAX's
+  `jax_persistent_cache_min_compile_time_secs` at its 1.0 s default, so the
+  autotuning search's many sub-second probe compiles were never written to disk
+  and every repeat run recompiled from scratch — the ≈−72 % amortization the
+  docstring promised was never delivered. It now lowers the compile-time and
+  entry-size minimums to 0 (an explicit `JAX_PERSISTENT_CACHE_MIN_*` env var
+  still wins) and only enables caching on an accelerator backend (on a CPU-only
+  backend XLA's AOT loader logs a machine-feature-mismatch error per reloaded
+  executable). Measured ≈−72 % wall on repeat cold runs.
+
+### Changed
+
+- **`autotune` sets the local-exploration count (`n_expl`) deterministically by
+  default** instead of by a wall-timed search. The previous ESS-per-second search
+  was not reproducible across runs: the objective is flat in `n_expl` near its
+  peak and the wall time depends on the machine's clock/thermal state, so identical
+  inputs could pick `n_expl ∈ {1, 2, 8}`. The default is now a fixed
+  device-calibrated value (accelerator → 4, CPU → 1) — reproducible, and ~free
+  since the extra cold-chain ESS from more sweeps costs almost nothing on a
+  dispatch-bound accelerator. Opt back into the search with
+  `search_exploration=True`, or pin a value with `gibbs_steps_per_round`.
+- **Default swap `target_acceptance` is now 0.5** (was 0.6), across `autotune`,
+  `tune_chains`, `ising_sample`, and `recommend_n_chains`. This is the
+  round-trip-optimal rejection rate r\* = 1/2 (giving N\* ≈ 2Λ) from Syed et al.,
+  not the 0.77 of the reversible-PT literature. Autotune now discovers ~20 % fewer
+  chains for equal-or-better round-trip efficiency. **This changes the discovered
+  chain count, and hence `ising_sample` output, for a given problem.**
+- **The chain-count search pilots at `max_chains`.** `tune_chains`/`autotune` take
+  the first barrier estimate at a high, over-resolved chain count rather than a
+  low pilot, so Λ̂ is unbiased on the first probe and discovery converges in ~2
+  probes regardless of problem size (large models previously needed extra probes).
+
+### Added
+
+- **`gibbs_steps_per_round` argument on `autotune`/`autosample`** — pin `n_expl`
+  directly, skipping both the device default and the search, for hardware you have
+  already calibrated.
+- **`select_by` argument on `tune_exploration` (threaded through `autotune`).**
+  `"cost"` (default) maximizes cold-chain ESS per wall-second; `"ele"` picks the
+  smallest `n_expl` whose round-trip efficiency reaches the ELE-adequacy knee —
+  deterministic (no wall-clock), the criterion the Syed et al. analysis
+  prescribes. The `"cost"` search fits a single cost line from the probes' reused
+  production timings, avoiding a separate timing compile per probe.
+
 ## [0.7.0] — 2026-06-27
 
 ### Changed

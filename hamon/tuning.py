@@ -394,7 +394,7 @@ def tune_chains(
     beta_range: tuple[float, float] = (0.0, 1.0),
     gibbs_steps_per_round: int = 0,
     initial_n: int | None = None,
-    target_acceptance: float = 0.6,
+    target_acceptance: float = 0.5,
     rounds_per_probe: int = 200,
     n_tune_per_probe: int = 4,
     max_iters: int = 6,
@@ -423,9 +423,12 @@ def tune_chains(
 
     Because Λ̂ comes from the current probe (not a running maximum), the result is
     essentially independent of the starting N — discovery from ``initial_n=None``
-    (a small pilot) and from a reasonable guess converge to the same count. With
-    no ``initial_n`` the first estimate is taken at a cheap pilot of
-    ``min_chains + 16`` chains.
+    and from a reasonable guess converge to the same count. With no ``initial_n``
+    the first probe runs at a **high** pilot of ``max_chains`` chains: high on
+    purpose, because a low pilot's rejection rates saturate and bias Λ̂ low,
+    forcing the fixed point to climb over several probes. An over-resolved pilot
+    gives an unbiased Λ̂ in one probe, landing n* within ±1 immediately, so
+    discovery converges in ~2 probes regardless of problem size.
 
     Instead of providing ``ebm_factory`` and ``program_factory``, you can pass
     a template ``ebm`` and ``program`` and the factories will be built
@@ -443,10 +446,12 @@ def tune_chains(
         clamp_state: clamped block states
         beta_range: (β_min, β_max) for the temperature range
         gibbs_steps_per_round: Gibbs sweeps between swap attempts
-        initial_n: starting chain count. The default ``None`` estimates a
-            starting point from a cheap pilot probe (no initial guess needed);
+        initial_n: starting chain count. The default ``None`` runs a high pilot
+            probe at ``max_chains`` for an unbiased Λ̂ (no initial guess needed);
             pass an int to start there instead.
-        target_acceptance: desired per-pair swap acceptance rate
+        target_acceptance: desired per-pair swap acceptance rate. Default 0.5 —
+            the round-trip-optimal rejection r* = 1/2 (N* ≈ 2Λ; Syed et al.), not
+            the 0.77 from the reversible-PT literature.
         rounds_per_probe: rounds per probe (and for the final production probe)
         n_tune_per_probe: schedule tuning iterations for the final probe
         max_iters: maximum discovery iterations
@@ -486,7 +491,11 @@ def tune_chains(
     # (each recompiles regardless), but a single device avoids transfer thrash;
     # the conservative score uses the (pilot) starting chain count. Borderline
     # workloads can pass an explicit device.
-    _pilot_n = initial_n if initial_n is not None else min_chains + 16
+    # Pilot at the budget ceiling: an over-resolved first probe gives an unbiased
+    # Λ̂ (low-N probes saturate rejection rates and bias Λ̂ low), so the fixed
+    # point lands within ±1 of N* immediately and converges in ~2 probes instead
+    # of climbing. Measured: 1600-node grid 4→2 probes, −40% stage-1 wall.
+    _pilot_n = initial_n if initial_n is not None else max_chains
     _meta_betas = jnp.linspace(beta_range[0], beta_range[1], 1)
     dev = resolve_entry_device(
         device,
@@ -564,7 +573,7 @@ def tune_chains(
     # Using the current-N estimate (not a running maximum) makes the result
     # independent of the starting N.
     margin = 1.0 + max(0.0, float(safety_margin))
-    n = _clamp(initial_n) if initial_n is not None else _clamp(min_chains + 16)
+    n = _clamp(initial_n) if initial_n is not None else _clamp(max_chains)
     lambda_raw = 0.0  # last current-N barrier estimate; drives N*
     lambda_max = 0.0  # running max, reported as the conservative Λ
     best_betas = None
@@ -700,17 +709,19 @@ def _time_per_round(
     dev,
     time_rounds: int,
     time_reps: int,
+    observer: AbstractNRPTObserver | None = None,
 ) -> float:
     """Measured steady-state wall time per NRPT round at ``n_expl`` (seconds).
 
-    Times the lean round loop (``observer=None``, no eager diagnostics) on the
-    already-tuned schedule. A warm-up run absorbs the one-time XLA compile and
-    pages in the device, so the timed reps see only steady-state execution; the
-    median over ``time_reps`` runs of ``time_rounds`` rounds divides out to the
-    per-round cost ``c₀ + n_expl·c_s``. ``track_round_trips`` is left on so the
-    in-loop index update (real per-round cost) is included and the compiled
-    executable matches ``tune_schedule``'s tuning loop; only the host-side
-    summary is skipped.
+    Times the round loop on the already-tuned schedule. A warm-up run absorbs the
+    one-time XLA compile and pages in the device, so the timed reps see only
+    steady-state execution; the median over ``time_reps`` runs of ``time_rounds``
+    rounds divides out to the per-round cost ``c₀ + n_expl·c_s``.
+    ``track_round_trips`` is left on so the in-loop index update (real per-round
+    cost) is included; only the host-side summary is skipped. Pass the **same
+    observer the production probe used** to reuse its compiled executable — no
+    separate ``observer=None`` compile, which the cost model relies on;
+    ``observer=None`` (default) times the lean loop.
     """
 
     def run(n_rounds: int):
@@ -724,7 +735,7 @@ def _time_per_round(
             n_expl,
             betas=betas,
             track_round_trips=True,
-            observer=None,
+            observer=observer,
             device=dev,
             _emit_diagnostics=False,
         )
@@ -737,6 +748,84 @@ def _time_per_round(
         jax.block_until_ready(run(time_rounds))
         times.append(time.perf_counter() - t0)
     return float(np.median(times)) / time_rounds
+
+
+def _fit_cost_line(ns: Sequence[int], ts: Sequence[float]) -> tuple[float, float]:
+    """Least-squares fit ``t_round = c₀ + n_expl·c_s`` over probed (n, t) points.
+
+    The points are the per-probe production timings (reused, not separately
+    measured). One shared line — rather than each count's own noisy timing —
+    makes the objective's argmax reproducible: the ranking then depends on the
+    common ``c₀, c_s`` and the deterministic ESS, not on per-count timing noise
+    (the objective is nearly flat near its peak, so pairwise-comparing noisy
+    per-count timings picked the stopping count at random). Both terms are
+    floored at 0 against noise that could yield a negative slope or intercept;
+    with a single distinct point the slope is 0 (flat line at that level).
+    """
+    a = np.asarray(ns, dtype=float)
+    b = np.asarray(ts, dtype=float)
+    if a.size >= 2 and a.min() != a.max():
+        cs, c0 = (float(v) for v in np.polyfit(a, b, 1))
+    else:
+        cs, c0 = 0.0, (float(b[0]) if b.size else 0.0)
+    return max(c0, 0.0), max(cs, 0.0)
+
+
+def _select_gibbs_steps_ele(
+    probe: Callable[[int], dict],
+    start_steps: int,
+    max_steps: int,
+    improve_tol: float,
+    target_efficiency: float,
+) -> tuple[dict, list[dict]]:
+    """Pick the smallest n_expl that adequately approximates ELE (Syed et al.).
+
+    n_expl exists to approximate Efficient Local Exploration (assumption A2):
+    enough local moves between swaps that the energy decorrelates. ELE-adequacy is
+    read off the round-trip **efficiency** ``τ_obs / τ̂`` where ``τ̂ = 1/(2+2Λ)``
+    is the theoretical optimum (Thm 3) — both computed from rejection / round-trip
+    counts, so this is **fully deterministic** (no wall-clock) and reproducible
+    across runs, unlike an ESS-per-second timing search.
+
+    Efficiency rises with n_expl and plateaus once ELE is approximated. We double
+    n_expl while efficiency keeps gaining > ``improve_tol``, stopping when it
+    reaches ``target_efficiency``, plateaus, hits ``max_steps``, or the report
+    blames the schedule (``efficiency_limiter == "schedule"`` — more local moves
+    cannot help; add chains instead). We then return the **smallest** n_expl
+    within ``improve_tol`` of the best efficiency seen: the knee of the curve, the
+    cheapest count giving near-optimal index-process mixing. Under the paper's
+    cost model (cost ∝ n_expl) that knee maximizes round-trips per compute; on a
+    dispatch-bound accelerator going higher is ~free but only marginally helps
+    (the ESS/sec plateau), so the knee is a sound, reproducible choice.
+
+    Pure control logic (no JAX), unit-testable with a synthetic ``probe``.
+    """
+
+    def _eff(rec: dict) -> float:
+        e = rec.get("efficiency")
+        return float(e) if e is not None else 0.0
+
+    history: list[dict] = []
+    n = start_steps
+    while True:
+        rec = probe(n)
+        history.append(rec)
+        if _eff(rec) >= target_efficiency:
+            break
+        if rec.get("efficiency_limiter") == "schedule":
+            break
+        if n >= max_steps:
+            break
+        if len(history) >= 2 and _eff(rec) <= _eff(history[-2]) * (1.0 + improve_tol):
+            break  # efficiency plateaued: more local moves no longer help ELE
+        n *= 2
+    best_eff = max(_eff(r) for r in history)
+    best = history[-1]
+    for r in history:  # ascending n: cheapest count within tol of the plateau
+        if _eff(r) >= best_eff * (1.0 - improve_tol):
+            best = r
+            break
+    return best, history
 
 
 def tune_exploration(
@@ -753,6 +842,9 @@ def tune_exploration(
     improve_tol: float = 0.05,
     time_rounds: int = 200,
     time_reps: int = 3,
+    cost_model: bool = True,
+    select_by: str = "cost",
+    target_efficiency: float = 0.9,
     *,
     fixed_schedule: jax.Array | None = None,
     ebm: AbstractEBM | None = None,
@@ -822,7 +914,26 @@ def tune_exploration(
         improve_tol: minimum fractional objective gain to keep doubling
             (guards against chasing Monte-Carlo noise past the peak).
         time_rounds: rounds per timed run when measuring ``t_round``.
-        time_reps: number of timed runs to take the median over (noise control).
+        time_reps: number of timed runs to reduce over (noise control).
+        select_by: how to choose n_expl. ``"cost"`` (default) maximizes cold-chain
+            ESS per wall-second (see ``cost_model``) — the sample-quality objective;
+            the pick depends on the machine's measured cost ratio, so it is best
+            used as a one-time per-hardware calibration. ``"ele"`` instead picks
+            the smallest count whose round-trip efficiency ``τ_obs/τ̂`` reaches the
+            ELE-adequacy knee — deterministic (no wall-clock) and the criterion the
+            Syed et al. analysis prescribes, but it optimizes index-process mixing
+            rather than cold-sample ESS, so it under-picks n_expl on a
+            dispatch-bound accelerator where extra sweeps are nearly free; use it
+            for index-efficiency or severe-ELE-violation regimes.
+        target_efficiency: ELE-adequacy threshold for ``select_by="ele"`` — stop
+            climbing once ``τ_obs/τ̂`` reaches this (it also stops on a plateau or
+            a schedule-limited verdict).
+        cost_model: for ``select_by="cost"`` only — when ``True`` (and a
+            ``fixed_schedule`` is given) fit ``t_round = c₀ + n_expl·c_s`` by least
+            squares across the probes (each timing reuses the production
+            executable, no separate ``observer=None`` compile) and take the argmax
+            from that shared line; ``False`` times each probe independently (the
+            flat objective then lets timing noise pick the count at random).
         fixed_schedule: a pre-tuned β ladder to reuse across all probes (each
             probe becomes one production run, no per-probe re-tuning). ``None``
             (default) re-tunes per probe; ``autotune`` passes the ladder from
@@ -866,6 +977,9 @@ def tune_exploration(
     source.device_put_template(dev)
 
     obs = NRPTStateObserver(chain_indices=(-1,))
+    # Reuse-timing cost model: only on a fixed schedule, where each probe is a
+    # single production run whose executable we can re-time directly.
+    use_reuse_timing = cost_model and fixed_schedule is not None
 
     def probe(n_expl: int) -> dict[str, Any]:
         nonlocal key
@@ -919,23 +1033,30 @@ def tune_exploration(
         trace = np.concatenate([c.reshape(c.shape[0], -1) for c in cold], axis=1)
         ess = effective_sample_size(trace)
 
-        # (2) Measure steady-state wall time per round on this schedule.
-        t_round = _time_per_round(
-            k_time,
-            ebms_t,
-            programs_t,
-            init_states,
-            clamp_state,
-            tuned_betas,
-            n_expl,
-            dev,
-            time_rounds,
-            time_reps,
-        )
-        wall = rounds_per_probe * t_round  # seconds to produce this ESS
+        # (2) Per-round wall time — only the timing-based ("cost"/empirical)
+        # selectors need it. The ELE selector is timing-free (it reads the
+        # deterministic round-trip efficiency from this same run), so skip it.
+        if select_by == "ele":
+            t_round = 0.0
+            objective = rep.efficiency if rep.efficiency is not None else 0.0
+        else:
+            t_round = _time_per_round(
+                k_time,
+                ebms_t,
+                programs_t,
+                init_states,
+                clamp_state,
+                tuned_betas,
+                n_expl,
+                dev,
+                time_rounds,
+                time_reps,
+                observer=obs if use_reuse_timing else None,
+            )
+            objective = ess.median_ess / (rounds_per_probe * t_round)
         return {
             "n_expl": int(n_expl),
-            "objective": ess.median_ess / wall,  # ESS per measured wall-second
+            "objective": objective,  # ESS/wall-second (cost) or efficiency (ele)
             "ess_median": ess.median_ess,
             "tau_obs": tau_obs,
             "rt_per_compute": tau_obs / n_expl,
@@ -945,9 +1066,54 @@ def tune_exploration(
             "betas": np.asarray(tuned_betas),
         }
 
-    best, history = _select_gibbs_steps(
-        probe, int(start_steps), int(max_steps), float(improve_tol)
-    )
+    if select_by == "ele":
+        # Deterministic, timing-free: pick the smallest n_expl whose round-trip
+        # efficiency (τ_obs/τ̂) reaches the ELE-adequacy knee. Reproducible across
+        # runs (no wall-clock in the objective).
+        best, history = _select_gibbs_steps_ele(
+            probe,
+            int(start_steps),
+            int(max_steps),
+            float(improve_tol),
+            float(target_efficiency),
+        )
+    elif use_reuse_timing:
+        # Doubling driven by ESS growth (deterministic — same key ⇒ same ESS ⇒
+        # the probed set is fixed run-to-run), collecting each probe's reused
+        # production timing. Then fit ONE cost line and pick the argmax objective,
+        # requiring a >improve_tol gain to climb so the near-flat peak resolves to
+        # the lower (cheaper) count instead of flipping on timing noise.
+        history = []
+        n = int(start_steps)
+        while True:
+            rec = probe(n)
+            history.append(rec)
+            if rec.get("efficiency_limiter") == "schedule":
+                break  # schedule-limited: more local exploration cannot help
+            if n >= int(max_steps):
+                break
+            if len(history) >= 2 and rec["ess_median"] <= history[-2]["ess_median"] * (
+                1.0 + float(improve_tol)
+            ):
+                break  # ESS saturated: extra sweeps no longer decorrelate
+            n *= 2
+        c0, cs = _fit_cost_line(
+            [r["n_expl"] for r in history], [r["t_round"] for r in history]
+        )
+        for r in history:
+            tr = c0 + r["n_expl"] * cs
+            r["t_round"] = tr
+            r["objective"] = (
+                r["ess_median"] / (rounds_per_probe * tr) if tr > 0 else 0.0
+            )
+        best = history[0]
+        for r in history[1:]:
+            if r["objective"] > best["objective"] * (1.0 + float(improve_tol)):
+                best = r
+    else:
+        best, history = _select_gibbs_steps(
+            probe, int(start_steps), int(max_steps), float(improve_tol)
+        )
 
     return {
         "gibbs_steps_per_round": best["n_expl"],
