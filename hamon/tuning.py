@@ -385,6 +385,81 @@ def _probe_history_entry(
     }
 
 
+# Energy-variance barrier pre-estimate (Syed et al. 2021, Theorem 2). Used to
+# seed the chain-count search so it converges in one probe instead of two.
+_ENERGY_GRID = 11
+_ENERGY_WARMUP = 500
+_ENERGY_SAMPLES = 500
+
+
+def _estimate_barrier_energy(
+    key: jax.Array,
+    source: _ChainSource,
+    init_factory: Callable,
+    clamp_state: list,
+    beta_range: tuple[float, float],
+    dev,
+    *,
+    n_grid: int = _ENERGY_GRID,
+    warmup: int = _ENERGY_WARMUP,
+    n_samples: int = _ENERGY_SAMPLES,
+) -> float:
+    """Estimate the global communication barrier Λ from energy samples (no PT).
+
+    Theorem 2 of Syed et al. gives the local barrier in closed form,
+    ``λ(β) = ½·E|V₁−V₂|`` where ``V`` is the base potential ``E(x)`` and
+    ``V₁,V₂`` are independent draws from ``π^(β)``; ``Λ = ∫₀¹ λ(β) dβ``. We draw
+    from ``π^(β)`` with single-chain block Gibbs at a β grid — **local
+    exploration only, no DEO ladder** — so this compiles just the (cheap) Gibbs
+    kernel (reused across the grid via the structure cache), never the round
+    loop. ``V`` is recovered exactly via the same ``_compute_base_energies`` path
+    the swap step uses, so the estimate is on the same scale as ``Σ rejection``.
+
+    Accurate when local exploration mixes at each β (the ELE regime); on severely
+    multimodal targets where the local kernel sticks at high β it can
+    underestimate ``λ(1)``, so it is used only to **seed** the chain-count search
+    (the probe refines it), never as the final word.
+    """
+    from hamon._nrpt_energy import _compute_base_energies, _make_reference_ebm
+    from hamon.block_sampling import SamplingSchedule, sample_states
+
+    betas = np.linspace(beta_range[0], beta_range[1], int(n_grid))
+    keys = jax.random.split(key, int(n_grid))
+    sched = SamplingSchedule(int(warmup), int(n_samples), 1)
+
+    # The base EBM (β=1) and block spec are identical across the grid — only the
+    # tempered SAMPLING program (weights) changes. Build them once and jit the
+    # energy→λ kernel so it compiles a single time, reused across the grid (and
+    # with_ebm reuses the cached block structure, so the Gibbs draw is too).
+    one = jnp.asarray(1.0)
+    base_ebm, beta_ref = _make_reference_ebm(source.ebms_for_init(one[None]), one[None])
+    spec = source._make_programs(source.ebms_for_init(one[None]))[0].gibbs_spec
+
+    @jax.jit
+    def _lam(samples):
+        V = _compute_base_energies(base_ebm, beta_ref, spec, samples, clamp_state)
+        return 0.5 * jnp.mean(jnp.abs(V[:, None] - V[None, :]))
+
+    lambdas = []
+    for i, b in enumerate(betas):
+        ebms_i = source.ebms_for_init(jnp.asarray([float(b)]))
+        # β-tempered program via with_ebm (NOT programs_for_init, which returns
+        # the un-tempered β=1 template in template mode).
+        programs_i = source._make_programs(ebms_i)
+        init = init_factory(1, ebms_i, programs_i)[0]
+        samples = sample_states(
+            keys[i],
+            programs_i[0],
+            sched,
+            init,
+            clamp_state,
+            spec.free_blocks,
+            device=dev,
+        )
+        lambdas.append(float(_lam(samples)))
+    return float(np.trapezoid(np.asarray(lambdas), betas))
+
+
 def tune_chains(
     key: jax.Array,
     ebm_factory: Callable | None = None,
@@ -394,6 +469,7 @@ def tune_chains(
     beta_range: tuple[float, float] = (0.0, 1.0),
     gibbs_steps_per_round: int = 0,
     initial_n: int | None = None,
+    seed_from_energy: bool = False,
     target_acceptance: float = 0.5,
     rounds_per_probe: int = 200,
     n_tune_per_probe: int = 4,
@@ -447,8 +523,17 @@ def tune_chains(
         beta_range: (β_min, β_max) for the temperature range
         gibbs_steps_per_round: Gibbs sweeps between swap attempts
         initial_n: starting chain count. The default ``None`` runs a high pilot
-            probe at ``max_chains`` for an unbiased Λ̂ (no initial guess needed);
-            pass an int to start there instead.
+            probe at ``max_chains`` for an unbiased Λ̂ (no initial guess needed),
+            unless ``seed_from_energy`` is set; pass an int to start there instead.
+        seed_from_energy: when ``True`` (and ``initial_n`` is ``None``), seed the
+            search from a cheap energy-variance Λ̂ (Theorem 2, no PT ladder; see
+            :func:`_estimate_barrier_energy`) so it converges in one probe instead
+            of the ``max_chains`` pilot's two — fewer compiles, ~comparable wall.
+            The seed lands on the same fixed point, but the schedule's RNG path
+            differs, so samples are not bit-identical to the pilot path (the
+            discovered N is). Best on targets where local exploration mixes well
+            (e.g. spin models); on severely multimodal targets the estimate can
+            be biased and the search self-corrects with extra probes.
         target_acceptance: desired per-pair swap acceptance rate. Default 0.5 —
             the round-trip-optimal rejection r* = 1/2 (N* ≈ 2Λ; Syed et al.), not
             the 0.77 from the reversible-PT literature.
@@ -573,7 +658,23 @@ def tune_chains(
     # Using the current-N estimate (not a running maximum) makes the result
     # independent of the starting N.
     margin = 1.0 + max(0.0, float(safety_margin))
-    n = _clamp(initial_n) if initial_n is not None else _clamp(max_chains)
+    if initial_n is not None:
+        n = _clamp(initial_n)
+    elif seed_from_energy:
+        # Seed N* from a cheap energy-variance Λ̂ (Theorem 2, no PT ladder) using
+        # the same fixed-point formula below, so the first real probe lands on N*
+        # and the search converges in one probe instead of two. Consuming exactly
+        # one key split (mirroring the discarded max_chains pilot probe) leaves the
+        # subsequent probe on the SAME RNG as the pilot's N* probe, so when the
+        # seed equals N* the result is bit-identical to the pilot path (and the
+        # search self-corrects with an extra probe when the estimate is off).
+        key, k_energy = jax.random.split(key)
+        lam_seed = _estimate_barrier_energy(
+            k_energy, source, init_factory, clamp_state, beta_range, dev
+        )
+        n = _clamp(int(np.ceil(lam_seed * margin / r_target)) + 1)
+    else:
+        n = _clamp(max_chains)
     lambda_raw = 0.0  # last current-N barrier estimate; drives N*
     lambda_max = 0.0  # running max, reported as the conservative Λ
     best_betas = None

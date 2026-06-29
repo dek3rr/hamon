@@ -52,6 +52,30 @@ def _init_factory(n_chains, ebms, programs):
 
 
 class TestDiscoverChainCount:
+    def test_seed_from_energy_matches_pilot(self):
+        # The energy-variance seed (Theorem 2, no PT ladder) converges in fewer
+        # probes and, when the estimate hits N*, yields the SAME discovered N and
+        # schedule as the max_chains pilot — the probe RNG is key-aligned, so the
+        # result is bit-identical (only the reported Λ, a max over probes, differs).
+        ebm = IsingEBM(_NODES, _EDGES, _BIASES, _WEIGHTS, jnp.array(1.0))
+        program = IsingSamplingProgram(ebm, _FREE_BLOCKS, [])
+        kw = dict(
+            ebm=ebm,
+            program=program,
+            init_factory=_init_factory,
+            clamp_state=[],
+            beta_range=(0.0, 1.0),
+            gibbs_steps_per_round=1,
+            max_chains=32,
+            rounds_per_probe=60,
+            n_tune_per_probe=2,
+        )
+        pilot = tune_chains(jax.random.key(7), **kw)
+        energy = tune_chains(jax.random.key(7), seed_from_energy=True, **kw)
+        assert energy["n_chains"] == pilot["n_chains"]
+        assert jnp.allclose(jnp.asarray(energy["betas"]), jnp.asarray(pilot["betas"]))
+        assert len(energy["history"]) <= len(pilot["history"])
+
     def test_runs_without_error(self):
         result = tune_chains(
             jax.random.key(42),
