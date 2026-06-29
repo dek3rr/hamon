@@ -52,6 +52,23 @@ _THRESHOLD_ENV = "HAMON_DEVICE_THRESHOLD"
 _DEVICE_ENV = "HAMON_DEVICE"
 
 
+def _lower_persistence_thresholds() -> None:
+    """Let sub-second compiles persist to the on-disk cache.
+
+    JAX's ``min_compile_time_secs`` default of **1.0s** drops nearly all of the
+    autotuning search's many sub-second probe compiles (tuning math,
+    ``optimize_schedule``, ``round_trip_summary``, even most ``_nrpt_rounds``),
+    so the cache would store almost nothing and repeat runs would recompile
+    everything — the amortization this module promises never happens. Set both
+    minimums to 0 so every executable persists; an explicit
+    ``JAX_PERSISTENT_CACHE_MIN_*`` env var still wins.
+    """
+    if "JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS" not in os.environ:
+        jax.config.update("jax_persistent_cache_min_compile_time_secs", 0.0)
+    if "JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES" not in os.environ:
+        jax.config.update("jax_persistent_cache_min_entry_size_bytes", 0)
+
+
 def enable_persistent_compile_cache(path: str | None = None) -> str | None:
     """Turn on JAX's persistent compilation cache (idempotent).
 
@@ -61,22 +78,47 @@ def enable_persistent_compile_cache(path: str | None = None) -> str | None:
     them across processes — measured ≈ −72% wall on repeat cold runs — which is
     what keeps autotuning affordable.
 
-    If ``JAX_COMPILATION_CACHE_DIR`` is already set in the environment it is
-    respected and this is a no-op (the user's explicit choice wins, including
-    opting out by pointing it elsewhere). Otherwise the cache dir is set to
-    ``path`` (or ``~/.cache/jax`` by default), matching the GPU default used in
-    the test suite.
+    Only enabled on an **accelerator** backend. On a CPU-only backend XLA's AOT
+    loader logs a "machine-feature mismatch" error (warning of a theoretical
+    SIGILL) for every reloaded executable, and CPU compiles are cheap, so caching
+    there is net-negative; the test ``conftest`` makes the same accelerator-only
+    choice. An explicit ``JAX_COMPILATION_CACHE_DIR`` overrides this on any
+    backend (the user's deliberate opt-in/out wins).
+
+    If ``JAX_COMPILATION_CACHE_DIR`` is already set in the environment its
+    directory is respected (including opting out via an empty value). Otherwise,
+    when an accelerator is present, the cache dir is set to ``path`` (or
+    ``~/.cache/jax`` by default), matching the GPU default used in the test
+    suite. Whenever caching is active the persistence thresholds are lowered (see
+    :func:`_lower_persistence_thresholds`).
 
     Args:
         path: cache directory; defaults to ``~/.cache/jax``.
 
     Returns:
-        The active cache directory, or ``None`` if an empty env var disabled it.
+        The active cache directory, or ``None`` if caching is disabled (CPU-only
+        backend, or an empty env var).
     """
     env = os.environ.get("JAX_COMPILATION_CACHE_DIR")
     if env is not None:
+        # Explicit env var wins on any backend: empty disables, else opt in.
+        if env:
+            _lower_persistence_thresholds()
         return env or None
-    target = path or os.path.join(os.path.expanduser("~"), ".cache", "jax")
+
+    if path is not None:
+        # An explicit path is a deliberate opt-in too; honor it on any backend.
+        _lower_persistence_thresholds()
+        jax.config.update("jax_compilation_cache_dir", path)
+        return path
+
+    # Default (compile_cache=True): only worthwhile on an accelerator. On a
+    # CPU-only backend the AOT loader logs a machine-feature-mismatch error per
+    # reloaded executable and compiles are cheap, so caching is net-negative.
+    if accelerator_device() is None:
+        return None
+    _lower_persistence_thresholds()
+    target = os.path.join(os.path.expanduser("~"), ".cache", "jax")
     jax.config.update("jax_compilation_cache_dir", target)
     return target
 

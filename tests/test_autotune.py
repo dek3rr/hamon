@@ -90,17 +90,49 @@ class TestAutotune:
         assert report.gibbs_steps_per_round >= 1
         assert "AUTOTUNE" in report.summary()
 
-    def test_search_exploration_false_fixes_n_expl_one(self):
+    def test_default_uses_device_calibrated_n_expl(self):
+        # Default (search_exploration=False) sets n_expl deterministically by
+        # device and runs no exploration search. On CPU the calibrated value is 1.
         nodes, ebm, program, init_factory = _model()
         plan = autotune(
             jax.random.key(4),
             ebm=ebm,
             program=program,
             init_factory=init_factory,
-            search_exploration=False,
             **_KW,
         )
-        assert plan.gibbs_steps_per_round == 1
+        assert plan.gibbs_steps_per_round == 1  # CPU device default
+        assert plan.report.exploration is None
+
+    def test_search_exploration_runs_the_search(self):
+        # Opt-in: search_exploration=True runs tune_exploration and reports it.
+        nodes, ebm, program, init_factory = _model()
+        plan = autotune(
+            jax.random.key(4),
+            ebm=ebm,
+            program=program,
+            init_factory=init_factory,
+            search_exploration=True,
+            **_KW,
+        )
+        assert plan.gibbs_steps_per_round >= 1
+        assert plan.report.exploration is not None
+        assert "history" in plan.report.exploration
+
+    def test_explicit_gibbs_steps_override(self):
+        # An explicit gibbs_steps_per_round pins n_expl and skips the search,
+        # even when search_exploration=True.
+        nodes, ebm, program, init_factory = _model()
+        plan = autotune(
+            jax.random.key(4),
+            ebm=ebm,
+            program=program,
+            init_factory=init_factory,
+            gibbs_steps_per_round=3,
+            search_exploration=True,
+            **_KW,
+        )
+        assert plan.gibbs_steps_per_round == 3
         assert plan.report.exploration is None
 
     def test_compile_cache_opt_out(self):

@@ -110,6 +110,7 @@ def test_discover_gibbs_steps_smoke():
         n_tune_per_probe=2,
         time_rounds=50,
         time_reps=2,
+        select_by="cost",  # timing-based selection (t_round measured)
         ebm=ebm,
         program=program,
         device="cpu",
@@ -129,3 +130,43 @@ def test_discover_gibbs_steps_smoke():
     match = [h for h in res["history"] if h["n_expl"] == chosen]
     assert len(match) == 1
     assert res["objective"] == match[0]["objective"]
+
+
+def test_discover_gibbs_steps_ele_smoke():
+    # select_by="ele": timing-free, deterministic. The chosen n_expl is within
+    # the probed grid and the objective is the round-trip efficiency.
+    n = 6
+    nodes = [SpinNode() for _ in range(n)]
+    edges = [(nodes[i], nodes[i + 1]) for i in range(n - 1)]
+    biases = jax.random.uniform(jax.random.key(1), (n,), minval=-0.5, maxval=0.5)
+    weights = jnp.ones(n - 1) * 0.6
+    ebm = IsingEBM(nodes, edges, biases, weights, jnp.array(1.0))
+    free_blocks = [Block(nodes[::2]), Block(nodes[1::2])]
+    program = IsingSamplingProgram(ebm, free_blocks, [])
+
+    n_chains = 5
+    betas = jnp.linspace(0.0, 1.0, n_chains)
+    keys = jax.random.split(jax.random.key(2), n_chains)
+    init = [hinton_init(keys[c], ebm, free_blocks, ()) for c in range(n_chains)]
+
+    kw = dict(
+        init_states=init,
+        clamp_state=[],
+        initial_betas=betas,
+        start_steps=1,
+        max_steps=4,
+        rounds_per_probe=150,
+        n_tune_per_probe=2,
+        select_by="ele",
+        ebm=ebm,
+        program=program,
+        device="cpu",
+    )
+    res = tune_exploration(jax.random.key(3), **kw)
+
+    assert res["gibbs_steps_per_round"] in (1, 2, 4)
+    assert res["efficiency"] is not None
+    assert len(res["history"]) >= 1
+    # Deterministic: same inputs ⇒ same chosen n_expl (no wall-clock in the rule).
+    res2 = tune_exploration(jax.random.key(3), **kw)
+    assert res2["gibbs_steps_per_round"] == res["gibbs_steps_per_round"]

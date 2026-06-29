@@ -26,6 +26,21 @@ from hamon.tuning import tune_chains, tune_exploration, tune_schedule
 # Full autotuning: orchestrate N, exploration, and schedule
 # ---------------------------------------------------------------------------
 
+# Deterministic local-exploration count used when the exploration search is off.
+# The ESS-per-wall-second objective is flat across n_expl 2-8 on a dispatch-bound
+# accelerator (extra Gibbs sweeps per round are nearly free there), so a fixed
+# mid-range value captures ~all the benefit AND is reproducible across runs —
+# unlike a wall-timed search, whose argmax wanders the flat region with the GPU's
+# clock/thermal state. CPU is compute-bound (cost grows ~linearly with n_expl),
+# so 1 is optimal there.
+_ACCELERATOR_DEFAULT_GIBBS_STEPS = 4
+
+
+def _default_gibbs_steps(dev) -> int:
+    """Device-calibrated n_expl when the exploration search is off."""
+    platform = getattr(dev, "platform", "cpu") if dev is not None else "cpu"
+    return _ACCELERATOR_DEFAULT_GIBBS_STEPS if platform != "cpu" else 1
+
 
 @dataclass
 class AutotuneReport:
@@ -160,12 +175,16 @@ def autotune(
     clamp_state: list | None = None,
     sample_nodes: Sequence | None = None,
     beta_range: tuple[float, float] = (0.0, 1.0),
-    target_acceptance: float = 0.6,
+    target_acceptance: float = 0.5,
     min_chains: int = 3,
     max_chains: int = 128,
     initial_n: int | None = None,
-    search_exploration: bool = True,
+    gibbs_steps_per_round: int | None = None,
+    search_exploration: bool = False,
     max_exploration_steps: int = 8,
+    cost_model: bool = True,
+    select_by: str = "cost",
+    target_efficiency: float = 0.9,
     rounds_per_probe: int = 400,
     n_tune: int = 4,
     n_polish: int = 2,
@@ -181,11 +200,17 @@ def autotune(
 
     1. **N** via :func:`tune_chains` at n_expl=1 (cheapest probes; Λ — hence N\\* —
        is invariant to n_expl).
-    2. **n_expl** via :func:`tune_exploration` at the fixed N, **reusing** the
-       schedule from step 1 (production-only probes; the equi-acceptance schedule
-       is invariant to n_expl, so this needs no re-tuning and never re-discovers
-       N). Maximizes ESS per *measured* wall-second, so it self-calibrates to the
-       device. Skipped when ``search_exploration=False``.
+    2. **n_expl** — by default a deterministic device-calibrated count
+       (accelerator → a fixed mid-range value, CPU → 1): reproducible across runs
+       and ~free, since the ESS-per-wall-second objective is flat in n_expl on a
+       dispatch-bound accelerator. Pin it explicitly with ``gibbs_steps_per_round``
+       (e.g. a value calibrated for your hardware), or pass
+       ``search_exploration=True`` to tune it via :func:`tune_exploration` at the
+       fixed N, reusing the schedule from step 1 (the equi-acceptance schedule is
+       n_expl-invariant, so this needs no re-tuning and never re-discovers N); the
+       ``"cost"`` search maximizes ESS per *measured* wall-second but its pick is
+       not reproducible across runs (it depends on the machine's clock state), so
+       it is best used as a one-time per-hardware calibration.
     3. **Schedule polish** via :func:`tune_schedule` at the chosen (N, n_expl),
        which also leaves an equilibrated warm cold-chain state.
 
@@ -210,9 +235,26 @@ def autotune(
             in that order (single node type only).
         beta_range: ``(β_min, β_max)`` temperature range.
         target_acceptance: per-pair swap acceptance target for the N search.
+            Default 0.5 — the round-trip-optimal r* = 1/2 (N* ≈ 2Λ; Syed et al.).
         min_chains / max_chains / initial_n: N-search bounds / start.
-        search_exploration: tune n_expl (step 2); ``False`` fixes n_expl=1.
-        max_exploration_steps: ceiling for the n_expl doubling search.
+        gibbs_steps_per_round: pin n_expl to this value, skipping both the device
+            default and the search (step 2). For hardware you have already
+            calibrated. ``None`` (default) uses the device default or the search.
+        search_exploration: tune n_expl by a wall-timed search (step 2). Default
+            ``False`` uses a deterministic device-calibrated n_expl (reproducible
+            across runs); ``True`` runs :func:`tune_exploration`. Ignored when
+            ``gibbs_steps_per_round`` is set.
+        max_exploration_steps: ceiling for the n_expl doubling search (when
+            ``search_exploration=True``).
+        select_by: for ``search_exploration=True`` — ``"cost"`` (default)
+            maximizes cold-chain ESS per wall-second; ``"ele"`` picks n_expl by the
+            deterministic round-trip efficiency knee (reproducible, but optimizes
+            index-process mixing rather than sample ESS). See
+            :func:`tune_exploration`.
+        target_efficiency: ELE-adequacy threshold for ``select_by="ele"``.
+        cost_model: for the ``select_by="cost"`` path, fit one n_expl cost line
+            from reused production timings instead of timing each probe
+            separately; see :func:`tune_exploration`.
         rounds_per_probe: rounds per tuning/exploration probe (the cheap search
             budget).
         n_tune: schedule-tuning phases per N probe.
@@ -242,8 +284,10 @@ def autotune(
     clamp_state = clamp_state or []
     source = _ChainSource(ebm_factory, program_factory, ebm, program)
 
-    # Resolve the device once for every stage.
-    _pilot_n = initial_n if initial_n is not None else min_chains + 16
+    # Resolve the device once for every stage. Match tune_chains' pilot (the
+    # max_chains ceiling) so the CPU/GPU sizing heuristic scores the same chain
+    # count the first probe runs.
+    _pilot_n = initial_n if initial_n is not None else max_chains
     _meta_betas = jnp.linspace(beta_range[0], beta_range[1], 1)
     dev = resolve_entry_device(
         device,
@@ -284,9 +328,16 @@ def autotune(
     init_states = init_factory(n_chains, ebms_init, programs_init)
 
     # --- Stage 2: exploration count at fixed N, reusing the schedule ---
+    # Precedence: an explicit gibbs_steps_per_round pins n_expl (skip stage 2);
+    # else a wall-timed search if opted in; else a deterministic device-calibrated
+    # default (reproducible and ~free, since the ESS/sec objective is flat in
+    # n_expl on a dispatch-bound accelerator).
     exploration: dict | None = None
-    n_expl = 1
-    if search_exploration and max_exploration_steps > 1:
+    if gibbs_steps_per_round is not None:
+        if int(gibbs_steps_per_round) < 1:
+            raise ValueError("gibbs_steps_per_round must be >= 1.")
+        n_expl = int(gibbs_steps_per_round)
+    elif search_exploration and max_exploration_steps > 1:
         exploration = tune_exploration(
             k_expl,
             ebm_factory,
@@ -297,12 +348,17 @@ def autotune(
             start_steps=1,
             max_steps=max_exploration_steps,
             rounds_per_probe=rounds_per_probe,
+            cost_model=cost_model,
+            select_by=select_by,
+            target_efficiency=target_efficiency,
             fixed_schedule=betas0,
             ebm=ebm,
             program=program,
             device=dev,
         )
         n_expl = int(exploration["gibbs_steps_per_round"])
+    else:
+        n_expl = _default_gibbs_steps(dev)
 
     # --- Stage 3: schedule polish at (N, n_expl) + warm cold state ---
     # The production run uses n_rounds (not the short probe budget): it both

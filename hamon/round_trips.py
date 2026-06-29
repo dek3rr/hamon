@@ -264,21 +264,22 @@ def nrpt_log_normalizing_constant(
 
 def recommend_n_chains(
     Lambda: float | jax.Array,
-    target_acceptance: float = 0.6,
+    target_acceptance: float = 0.5,
 ) -> int:
     """Suggest chain count for a given barrier and target acceptance rate.
 
     For NRPT with equalized rejection rates: Nr* ≈ Λ where r* = 1 - target_acceptance.
     Solving: N = Λ / r* = Λ / (1 - target_acceptance).
 
-    The default target_acceptance=0.6 means 40% rejection per pair.
+    The default target_acceptance=0.5 (r* = 1/2 ⇒ N* ≈ 2Λ) is the round-trip-
+    optimal rejection rate from Syed et al., not the 0.77 of reversible PT.
 
     Note: Λ from too few chains is biased low. Use ``tune_chains``
     for iterative bootstrapping if recommendations keep increasing.
 
     Args:
         Lambda: estimated global communication barrier
-        target_acceptance: desired per-pair acceptance rate (default: 0.6 = 60%)
+        target_acceptance: desired per-pair acceptance rate (default: 0.5 = 50%)
 
     Returns:
         Recommended number of chains (minimum 2).

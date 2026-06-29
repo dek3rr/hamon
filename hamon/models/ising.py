@@ -397,7 +397,7 @@ def ising_sample(
     n_samples: int = 1000,
     n_warmup: int = 500,
     steps_per_sample: int = 1,
-    target_acceptance: float = 0.6,
+    target_acceptance: float = 0.5,
     max_chains: int = 128,
     device: DeviceLike = "auto",
 ) -> tuple[Bool[Array, "n_samples n"], dict]:
@@ -425,7 +425,8 @@ def ising_sample(
         n_warmup: warmup steps before collecting samples.
         steps_per_sample: Gibbs sweeps between recorded samples.
         target_acceptance: desired per-pair swap acceptance rate for the
-            chain-count search.
+            chain-count search. Default 0.5 — the round-trip-optimal r* = 1/2
+            (N* ≈ 2Λ; Syed et al.).
         max_chains: ceiling on the discovered chain count.
         device: where to run — ``"auto"`` (default), ``"cpu"``/``"gpu"``, a
             concrete ``jax.Device``, or ``None`` to leave placement untouched.
