@@ -179,6 +179,7 @@ def autotune(
     min_chains: int = 3,
     max_chains: int = 128,
     initial_n: int | None = None,
+    seed_from_energy: bool = False,
     gibbs_steps_per_round: int | None = None,
     search_exploration: bool = False,
     max_exploration_steps: int = 8,
@@ -237,6 +238,9 @@ def autotune(
         target_acceptance: per-pair swap acceptance target for the N search.
             Default 0.5 — the round-trip-optimal r* = 1/2 (N* ≈ 2Λ; Syed et al.).
         min_chains / max_chains / initial_n: N-search bounds / start.
+        seed_from_energy: seed the chain-count search from a cheap energy-variance
+            Λ̂ (no PT ladder) so it converges in one probe; see
+            :func:`hamon.tuning.tune_chains`. Same discovered N, fewer compiles.
         gibbs_steps_per_round: pin n_expl to this value, skipping both the device
             default and the search (step 2). For hardware you have already
             calibrated. ``None`` (default) uses the device default or the search.
@@ -314,6 +318,7 @@ def autotune(
         min_chains=min_chains,
         max_chains=max_chains,
         initial_n=initial_n,
+        seed_from_energy=seed_from_energy,
         ebm=ebm,
         program=program,
         device=dev,

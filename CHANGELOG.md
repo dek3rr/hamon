@@ -53,6 +53,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deterministic (no wall-clock), the criterion the Syed et al. analysis
   prescribes. The `"cost"` search fits a single cost line from the probes' reused
   production timings, avoiding a separate timing compile per probe.
+- **`seed_from_energy` argument on `tune_chains`/`autotune` (opt-in).** Seeds the
+  chain-count search from a cheap energy-variance Λ̂ — the local barrier in closed
+  form, `λ(β) = ½·E|V₁−V₂|` (Syed et al. Theorem 2), estimated from
+  local-exploration-only energy samples on a β grid with no DEO ladder, so it
+  compiles only the (cheap) Gibbs kernel, not the round loop. The search then
+  converges in one probe instead of the `max_chains` pilot's two. The probe RNG
+  is key-aligned with the pilot, so when the estimate hits N\* the discovered N
+  and schedule are **bit-identical** to the pilot path (only the reported Λ, a max
+  over probes, differs); the search self-corrects with an extra probe when the
+  estimate is off. Measured ≈−30 % compiles / ~1 s faster on spin-glass grids.
+  Best where local exploration mixes well (e.g. spin models); on severely
+  multimodal targets the estimate can be biased, hence opt-in.
 
 ## [0.7.0] — 2026-06-27
 
