@@ -684,10 +684,20 @@ def tune_chains(
     # --- N tuning (Syed et al. 2021, Sec. "Tuning N") -----------------------
     # Λ is a schedule invariant: Λ̂ = Σ rejection_rates ≈ Λ at any chain count
     # (each probe runs tune_schedule, which tunes the schedule to equi-
-    # acceptance). Estimate Λ̂ at the current N, set N* = ceil(Λ̂·margin/r) + 1
-    # (= 2Λ + 1 at r* = 1/2), and iterate this fixed point until N* settles.
-    # Using the current-N estimate (not a running maximum) makes the result
-    # independent of the starting N.
+    # acceptance). Estimate Λ̂, set N* = ceil(Λ̂·margin/r) + 1 (= 2Λ + 1 at
+    # r* = 1/2), and iterate this fixed point until N* settles.
+    #
+    # N* uses the running MAX of Λ̂ over probes, not the current probe's value.
+    # The invariant holds only when the ladder resolves the barrier; on a glassy
+    # target the barrier concentrates near a small β_c, and a coarse low-N ladder
+    # cannot resolve that peak, so Λ̂ is biased LOW at low N and only reaches the
+    # true Λ at high N. Under-resolution can only MISS barrier, never fabricate
+    # it, so the max over probes is the least-biased estimate. Iterating on the
+    # current-N value instead would chase the biased-low low-N estimates and
+    # collapse to a too-low N that fails to mix; the running max converges to
+    # N* ≈ 2Λ in ~2 probes and errs high (safe — under-provisioning fails, over-
+    # provisioning only costs chains). On a non-glassy target Λ̂ is N-independent,
+    # so the max equals the current value and this is a no-op.
     margin = 1.0 + max(0.0, float(safety_margin))
     if initial_n is not None:
         n = _clamp(initial_n)
@@ -711,8 +721,8 @@ def tune_chains(
             n = _clamp(max_chains)  # trapping detected → robust pilot
     else:
         n = _clamp(max_chains)
-    lambda_raw = 0.0  # last current-N barrier estimate; drives N*
-    lambda_max = 0.0  # running max, reported as the conservative Λ
+    lambda_raw = 0.0  # last current-N barrier estimate
+    lambda_max = 0.0  # running max over probes; drives N* and reported as Λ
     best_betas = None
     n_star = n
     seen: set[int] = set()
@@ -725,7 +735,7 @@ def tune_chains(
         lambda_max = max(lambda_max, lambda_raw)
         best_betas = res["betas"]
         seen.add(n)
-        n_star = _clamp(int(np.ceil(lambda_raw * margin / r_target)) + 1)
+        n_star = _clamp(int(np.ceil(lambda_max * margin / r_target)) + 1)
         history.append(
             _probe_history_entry(
                 len(history),

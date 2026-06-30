@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`tune_chains` no longer collapses to a too-low chain count on glassy
+  targets.** The N fixed point `N* = ceil(Λ̂·margin/(1−target_acceptance))+1`
+  drove `N*` from the *current* probe's `Λ̂ = Σ rejection_rates`, which relies on
+  `Λ̂` being chain-count-independent (Syed's schedule invariant). On a glassy
+  target the barrier concentrates near a small β_c that a coarse low-N ladder
+  can't resolve, so `Λ̂` is biased **low** at low N (≈5 vs the true ≈16 measured
+  on a 24×24 frustrated lattice) and the iteration chased the biased estimates
+  downward, oscillating and stopping at a random too-low N that fails to mix.
+  `N*` is now driven by the **running max** `Λ̂` over probes; since
+  under-resolution can only *miss* barrier (never fabricate it), the max is the
+  least-biased estimate, so the search converges to `N* ≈ 2Λ` in ~2 probes and
+  errs high (safe). No change on non-glassy targets, where `Λ̂` is
+  chain-count-independent and the max equals the current value.
+
 - **The persistent compilation cache now actually persists.**
   `enable_persistent_compile_cache` set the cache directory but left JAX's
   `jax_persistent_cache_min_compile_time_secs` at its 1.0 s default, so the

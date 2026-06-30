@@ -9,8 +9,11 @@ Guards against:
 - Chain count bounds
 """
 
+import math
+
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from hamon import Block, SpinNode
@@ -75,6 +78,58 @@ class TestDiscoverChainCount:
         assert energy["n_chains"] == pilot["n_chains"]
         assert jnp.allclose(jnp.asarray(energy["betas"]), jnp.asarray(pilot["betas"]))
         assert len(energy["history"]) <= len(pilot["history"])
+
+    def test_n_star_driven_by_running_max_lambda(self):
+        # On a frustrated grid the per-probe Λ̂ is biased low at low N (a coarse
+        # ladder can't resolve the barrier), so N* must be driven by the running
+        # MAX Λ̂, not the current probe — else the search collapses to a too-low N.
+        # Assert convergence to a non-degenerate N consistent with the reported
+        # (max) Λ: N = ceil((1+safety_margin)·Λ / (1-target_acceptance)) + 1.
+        L = 6
+        n = L * L
+
+        def idx(r, c):
+            return (r % L) * L + (c % L)
+
+        edges = []
+        for r in range(L):
+            for c in range(L):
+                edges.append((idx(r, c), idx(r, c + 1)))
+                edges.append((idx(r, c), idx(r + 1, c)))
+        rng = np.random.default_rng(0)
+        nodes = [SpinNode() for _ in range(n)]
+        node_edges = [(nodes[a], nodes[b]) for a, b in edges]
+        weights = jnp.asarray(rng.choice([-2.0, 2.0], size=len(edges)))
+        even = [
+            nodes[r * L + c] for r in range(L) for c in range(L) if (r + c) % 2 == 0
+        ]
+        odd = [nodes[r * L + c] for r in range(L) for c in range(L) if (r + c) % 2 == 1]
+        ebm = IsingEBM(nodes, node_edges, jnp.zeros(n), weights, jnp.array(1.0))
+        program = IsingSamplingProgram(ebm, [Block(even), Block(odd)], [])
+
+        def init_factory(nc, ebms, programs):
+            fb = programs[0].gibbs_spec.free_blocks
+            ks = jax.random.split(jax.random.key(0), nc)
+            return [hinton_init(ks[i], ebms[0], fb, ()) for i in range(nc)]
+
+        result = tune_chains(
+            jax.random.key(1),
+            ebm=ebm,
+            program=program,
+            init_factory=init_factory,
+            clamp_state=[],
+            beta_range=(0.0, 1.0),
+            gibbs_steps_per_round=1,
+            target_acceptance=0.5,
+            safety_margin=0.05,
+            max_chains=64,
+            rounds_per_probe=40,
+            n_tune_per_probe=2,
+        )
+        N, Lam = int(result["n_chains"]), float(result["Lambda"])
+        assert 3 <= N <= 64  # non-degenerate, within bounds
+        expected = math.ceil((1.05 * Lam) / 0.5) + 1  # = ceil(2.1·Λ)+1
+        assert abs(N - expected) <= 1  # N driven by the (max) Λ, ±cached-final
 
     def test_runs_without_error(self):
         result = tune_chains(
