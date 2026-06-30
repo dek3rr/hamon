@@ -390,6 +390,15 @@ def _probe_history_entry(
 _ENERGY_GRID = 11
 _ENERGY_WARMUP = 500
 _ENERGY_SAMPLES = 500
+_ENERGY_RESTARTS = 8  # independent chains per β (coverage + the R̂ trap detector)
+_ENERGY_RHAT_MAX = 1.1  # Gelman–Rubin cutoff: above this, trust the PT pilot
+
+
+def _energy_mad_halved(v: np.ndarray) -> float:
+    """½·E|V₁−V₂| of a 1-D energy sample, via the sorted-Gini formula (O(M log M))."""
+    v = np.sort(np.asarray(v))
+    M = v.size
+    return float((1.0 / M**2) * np.sum((2 * np.arange(1, M + 1) - M - 1) * v))
 
 
 def _estimate_barrier_energy(
@@ -403,61 +412,79 @@ def _estimate_barrier_energy(
     n_grid: int = _ENERGY_GRID,
     warmup: int = _ENERGY_WARMUP,
     n_samples: int = _ENERGY_SAMPLES,
-) -> float:
-    """Estimate the global communication barrier Λ from energy samples (no PT).
+    restarts: int = _ENERGY_RESTARTS,
+) -> tuple[float, float]:
+    """Estimate Λ from energy samples (no PT) plus a trapping diagnostic.
 
     Theorem 2 of Syed et al. gives the local barrier in closed form,
-    ``λ(β) = ½·E|V₁−V₂|`` where ``V`` is the base potential ``E(x)`` and
-    ``V₁,V₂`` are independent draws from ``π^(β)``; ``Λ = ∫₀¹ λ(β) dβ``. We draw
-    from ``π^(β)`` with single-chain block Gibbs at a β grid — **local
-    exploration only, no DEO ladder** — so this compiles just the (cheap) Gibbs
-    kernel (reused across the grid via the structure cache), never the round
+    ``λ(β) = ½·E|V₁−V₂|`` where ``V`` is the base potential and ``V₁,V₂`` are
+    independent draws from ``π^(β)``; ``Λ = ∫₀¹ λ(β) dβ``. We draw from ``π^(β)``
+    with ``restarts`` independent block-Gibbs chains (random inits) at a β grid —
+    **local exploration only, no DEO ladder** — so this compiles just the (cheap)
+    Gibbs kernel (reused across the grid via the structure cache), never the round
     loop. ``V`` is recovered exactly via the same ``_compute_base_energies`` path
     the swap step uses, so the estimate is on the same scale as ``Σ rejection``.
 
-    Accurate when local exploration mixes at each β (the ELE regime); on severely
-    multimodal targets where the local kernel sticks at high β it can
-    underestimate ``λ(1)``, so it is used only to **seed** the chain-count search
-    (the probe refines it), never as the final word.
+    Theorem 2 is exact *given equilibrium samples*; the bias on a glassy target is
+    a sampling artifact — local Gibbs traps in a basin and misses the inter-mode
+    energy spread. The independent restarts expose this directly: we return the
+    **Gelman–Rubin R̂** of the per-chain energies (max over β). R̂≈1 ⇒ the chains
+    agree ⇒ local Gibbs mixes ⇒ Λ̂ (and the seed it implies) is trustworthy; R̂≫1
+    ⇒ the chains trap in different basins ⇒ the target is glassy and the caller
+    should fall back to the robust ``max_chains`` pilot. R̂ needs no ground truth
+    and (unlike importance-weight ESS) cannot be fooled by a confidently-sampled
+    but truncated support — it measures whether independent starts converge to the
+    same distribution, which is exactly the property that fails.
+
+    Returns ``(Λ̂, R̂_max)``.
     """
     from hamon._nrpt_energy import _compute_base_energies, _make_reference_ebm
-    from hamon.block_sampling import SamplingSchedule, sample_states
+    from hamon.block_sampling import SamplingSchedule, sample_states_batched
 
     betas = np.linspace(beta_range[0], beta_range[1], int(n_grid))
-    keys = jax.random.split(key, int(n_grid))
-    sched = SamplingSchedule(int(warmup), int(n_samples), 1)
+    R, ns = max(2, int(restarts)), int(n_samples)
+    sched = SamplingSchedule(int(warmup), ns, 1)
 
     # The base EBM (β=1) and block spec are identical across the grid — only the
     # tempered SAMPLING program (weights) changes. Build them once and jit the
-    # energy→λ kernel so it compiles a single time, reused across the grid (and
-    # with_ebm reuses the cached block structure, so the Gibbs draw is too).
+    # base-energy kernel so it compiles a single time, reused across the grid.
     one = jnp.asarray(1.0)
     base_ebm, beta_ref = _make_reference_ebm(source.ebms_for_init(one[None]), one[None])
     spec = source._make_programs(source.ebms_for_init(one[None]))[0].gibbs_spec
+    nb = len(spec.free_blocks)
 
     @jax.jit
-    def _lam(samples):
-        V = _compute_base_energies(base_ebm, beta_ref, spec, samples, clamp_state)
-        return 0.5 * jnp.mean(jnp.abs(V[:, None] - V[None, :]))
+    def _energies(stacked):  # per-block (R*ns, …) → (R*ns,) base potential V
+        return _compute_base_energies(base_ebm, beta_ref, spec, stacked, clamp_state)
 
-    lambdas = []
+    lambdas, rhats = [], []
     for i, b in enumerate(betas):
-        ebms_i = source.ebms_for_init(jnp.asarray([float(b)]))
-        # β-tempered program via with_ebm (NOT programs_for_init, which returns
-        # the un-tempered β=1 template in template mode).
-        programs_i = source._make_programs(ebms_i)
-        init = init_factory(1, ebms_i, programs_i)[0]
-        samples = sample_states(
-            keys[i],
-            programs_i[0],
+        betas_R = jnp.full((R,), float(b))
+        ebms_R = source.ebms_for_init(betas_R)
+        programs_R = source._make_programs(ebms_R)  # β-tempered (with_ebm), cached
+        inits = init_factory(R, ebms_R, programs_R)  # R distinct random inits
+        batched = [jnp.stack([inits[c][blk] for c in range(R)]) for blk in range(nb)]
+        raw = sample_states_batched(
+            jax.random.fold_in(key, i),
+            programs_R[0],
             sched,
-            init,
+            batched,
             clamp_state,
             spec.free_blocks,
             device=dev,
-        )
-        lambdas.append(float(_lam(samples)))
-    return float(np.trapezoid(np.asarray(lambdas), betas))
+        )  # list per free block, each (R, ns, …)
+        flat = [blk.reshape((R * ns, *blk.shape[2:])) for blk in raw]
+        V = np.asarray(_energies(flat)).reshape(R, ns)
+        lambdas.append(float(np.mean([_energy_mad_halved(V[c]) for c in range(R)])))
+        if b > 0.0:  # β=0 mixes trivially; its R̂ is uninformative
+            within = float(V.var(axis=1).mean())
+            between = ns * float(V.mean(axis=1).var(ddof=1))
+            rhats.append(
+                np.sqrt(((ns - 1) / ns * within + between / ns) / max(within, 1e-12))
+            )
+    return float(np.trapezoid(np.asarray(lambdas), betas)), float(
+        max(rhats, default=1.0)
+    )
 
 
 def tune_chains(
@@ -528,12 +555,16 @@ def tune_chains(
         seed_from_energy: when ``True`` (and ``initial_n`` is ``None``), seed the
             search from a cheap energy-variance Λ̂ (Theorem 2, no PT ladder; see
             :func:`_estimate_barrier_energy`) so it converges in one probe instead
-            of the ``max_chains`` pilot's two — fewer compiles, ~comparable wall.
-            The seed lands on the same fixed point, but the schedule's RNG path
-            differs, so samples are not bit-identical to the pilot path (the
-            discovered N is). Best on targets where local exploration mixes well
-            (e.g. spin models); on severely multimodal targets the estimate can
-            be biased and the search self-corrects with extra probes.
+            of the ``max_chains`` pilot's two — fewer compiles. **Self-guarding:**
+            the estimate is only trustworthy when local exploration mixes, so the
+            energy probe also returns a Gelman–Rubin R̂; if R̂ exceeds the cutoff
+            (trapping — a glassy target where the estimate would be unreliable)
+            the search falls back to the robust ``max_chains`` pilot. On a mixing
+            target (R̂≈1) the seed lands on N* and, because the probe RNG is
+            key-aligned with the pilot, the discovered N and schedule are
+            bit-identical to the pilot path; on a glassy target it is exactly the
+            pilot. So it never under-provisions — it only ever *saves* (mixing) or
+            *matches* the pilot (glassy), at the cost of the energy probe.
         target_acceptance: desired per-pair swap acceptance rate. Default 0.5 —
             the round-trip-optimal rejection r* = 1/2 (N* ≈ 2Λ; Syed et al.), not
             the 0.77 from the reversible-PT literature.
@@ -663,16 +694,21 @@ def tune_chains(
     elif seed_from_energy:
         # Seed N* from a cheap energy-variance Λ̂ (Theorem 2, no PT ladder) using
         # the same fixed-point formula below, so the first real probe lands on N*
-        # and the search converges in one probe instead of two. Consuming exactly
-        # one key split (mirroring the discarded max_chains pilot probe) leaves the
-        # subsequent probe on the SAME RNG as the pilot's N* probe, so when the
-        # seed equals N* the result is bit-identical to the pilot path (and the
-        # search self-corrects with an extra probe when the estimate is off).
+        # and the search converges in one probe instead of two. The estimate is
+        # only trustworthy when local exploration mixes; the returned Gelman–Rubin
+        # R̂ flags trapping (a glassy target), in which case we fall back to the
+        # robust max_chains pilot. Consuming exactly one key split (mirroring the
+        # discarded pilot probe) leaves the subsequent probe on the SAME RNG as
+        # the pilot's N* probe, so on a mixing target (R̂≈1) the result is
+        # bit-identical to the pilot path.
         key, k_energy = jax.random.split(key)
-        lam_seed = _estimate_barrier_energy(
+        lam_seed, rhat = _estimate_barrier_energy(
             k_energy, source, init_factory, clamp_state, beta_range, dev
         )
-        n = _clamp(int(np.ceil(lam_seed * margin / r_target)) + 1)
+        if rhat <= _ENERGY_RHAT_MAX:
+            n = _clamp(int(np.ceil(lam_seed * margin / r_target)) + 1)
+        else:
+            n = _clamp(max_chains)  # trapping detected → robust pilot
     else:
         n = _clamp(max_chains)
     lambda_raw = 0.0  # last current-N barrier estimate; drives N*

@@ -239,8 +239,11 @@ def autotune(
             Default 0.5 — the round-trip-optimal r* = 1/2 (N* ≈ 2Λ; Syed et al.).
         min_chains / max_chains / initial_n: N-search bounds / start.
         seed_from_energy: seed the chain-count search from a cheap energy-variance
-            Λ̂ (no PT ladder) so it converges in one probe; see
-            :func:`hamon.tuning.tune_chains`. Same discovered N, fewer compiles.
+            Λ̂ (no PT ladder) so it converges in one probe — but only when local
+            exploration mixes; a Gelman–Rubin R̂ check falls back to the robust
+            ``max_chains`` pilot on glassy targets, so it never under-provisions.
+            Same discovered N, fewer compiles when it applies; see
+            :func:`hamon.tuning.tune_chains`.
         gibbs_steps_per_round: pin n_expl to this value, skipping both the device
             default and the search (step 2). For hardware you have already
             calibrated. ``None`` (default) uses the device default or the search.

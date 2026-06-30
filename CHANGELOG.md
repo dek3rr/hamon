@@ -61,10 +61,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   converges in one probe instead of the `max_chains` pilot's two. The probe RNG
   is key-aligned with the pilot, so when the estimate hits N\* the discovered N
   and schedule are **bit-identical** to the pilot path (only the reported Λ, a max
-  over probes, differs); the search self-corrects with an extra probe when the
-  estimate is off. Measured ≈−30 % compiles / ~1 s faster on spin-glass grids.
-  Best where local exploration mixes well (e.g. spin models); on severely
-  multimodal targets the estimate can be biased, hence opt-in.
+  over probes, differs). **Self-guarding:** the estimate is only reliable when
+  local exploration mixes, so the energy probe runs several independent restarts
+  and returns their Gelman–Rubin R̂; if R̂ exceeds a cutoff (the chains trap in
+  different basins — a glassy target where the estimate would mislead) the search
+  falls back to the robust `max_chains` pilot. So it never under-provisions: it
+  *saves* when local exploration mixes (≈−30 % compiles, bit-identical) and
+  *matches* the pilot otherwise. (R̂ measures whether independent starts converge
+  to the same distribution — the property that actually fails — so unlike an
+  importance-weight ESS it isn't fooled by a confidently-sampled but truncated
+  support.) Still opt-in, but now safe on any target.
 
 ## [0.7.0] — 2026-06-27
 
