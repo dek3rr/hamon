@@ -179,7 +179,7 @@ def autotune(
     min_chains: int = 3,
     max_chains: int = 128,
     initial_n: int | None = None,
-    seed_from_energy: bool = False,
+    seed_from_energy: bool = True,
     gibbs_steps_per_round: int | None = None,
     search_exploration: bool = False,
     max_exploration_steps: int = 8,
@@ -246,7 +246,8 @@ def autotune(
             Λ̂ (no PT ladder) so it converges in one probe — but only when local
             exploration mixes; a Gelman–Rubin R̂ check falls back to the robust
             ``max_chains`` pilot on glassy targets, so it never under-provisions.
-            Same discovered N, fewer compiles when it applies; see
+            Same discovered N, fewer compiles when it applies. Default ``True``;
+            pass ``False`` to always run the pilot; see
             :func:`hamon.tuning.tune_chains`.
         gibbs_steps_per_round: pin n_expl to this value, skipping both the device
             default and the search (step 2). For hardware you have already

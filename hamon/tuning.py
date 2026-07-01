@@ -525,7 +525,7 @@ def tune_chains(
     beta_range: tuple[float, float] = (0.0, 1.0),
     gibbs_steps_per_round: int = 0,
     initial_n: int | None = None,
-    seed_from_energy: bool = False,
+    seed_from_energy: bool = True,
     target_acceptance: float = 0.5,
     rounds_per_probe: int = 200,
     n_tune_per_probe: int = 4,
@@ -582,10 +582,11 @@ def tune_chains(
         initial_n: starting chain count. The default ``None`` runs a high pilot
             probe at ``max_chains`` for an unbiased Λ̂ (no initial guess needed),
             unless ``seed_from_energy`` is set; pass an int to start there instead.
-        seed_from_energy: when ``True`` (and ``initial_n`` is ``None``), seed the
-            search from a cheap energy-variance Λ̂ (Theorem 2, no PT ladder; see
-            :func:`_estimate_barrier_energy`) so it converges in one probe instead
-            of the ``max_chains`` pilot's two — fewer compiles. **Self-guarding:**
+        seed_from_energy: seed the search from a cheap energy-variance Λ̂
+            (Theorem 2, no PT ladder; see :func:`_estimate_barrier_energy`) so it
+            converges in one probe instead of the ``max_chains`` pilot's two —
+            fewer compiles. Default ``True`` (applies when ``initial_n`` is
+            ``None``); pass ``False`` to always run the pilot. **Self-guarding:**
             the estimate is only trustworthy when local exploration mixes, so the
             energy probe also returns a Gelman–Rubin R̂; if R̂ exceeds the cutoff
             (trapping — a glassy target where the estimate would be unreliable)

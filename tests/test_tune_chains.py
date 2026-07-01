@@ -73,7 +73,7 @@ class TestDiscoverChainCount:
             rounds_per_probe=60,
             n_tune_per_probe=2,
         )
-        pilot = tune_chains(jax.random.key(7), **kw)
+        pilot = tune_chains(jax.random.key(7), seed_from_energy=False, **kw)
         energy = tune_chains(jax.random.key(7), seed_from_energy=True, **kw)
         assert energy["n_chains"] == pilot["n_chains"]
         assert jnp.allclose(jnp.asarray(energy["betas"]), jnp.asarray(pilot["betas"]))
@@ -125,6 +125,9 @@ class TestDiscoverChainCount:
             max_chains=64,
             rounds_per_probe=40,
             n_tune_per_probe=2,
+            # Pin the pilot path: this test exercises the running-max Λ̂
+            # mechanism itself, not the energy seed's R̂ fallback into it.
+            seed_from_energy=False,
         )
         N, Lam = int(result["n_chains"]), float(result["Lambda"])
         assert 3 <= N <= 64  # non-degenerate, within bounds
