@@ -350,3 +350,101 @@ class TestNodeIdentity:
         ebms_a = _ebm_factory(jnp.array([0.5, 1.0]))
         ebms_b = _ebm_factory(jnp.array([0.3, 0.7, 1.2]))
         assert ebms_a[0].nodes[0] is ebms_b[0].nodes[0]
+
+
+# ---------------------------------------------------------------------------
+# Chain masking (pad_probes / nrpt pad_chains_to)
+# ---------------------------------------------------------------------------
+
+
+class TestChainMasking:
+    """Masking is a pure compile-sharing optimization: the live prefix of a
+    padded run is bit-identical to an unpadded run (threefry key/uniform
+    streams are prefix-stable, masked pairs keep the identity permutation)."""
+
+    def _template(self):
+        ebm = IsingEBM(_NODES, _EDGES, _BIASES, _WEIGHTS, jnp.array(1.0))
+        return ebm, IsingSamplingProgram(ebm, _FREE_BLOCKS, [])
+
+    def test_nrpt_padded_bit_identical(self):
+        from hamon.nrpt import nrpt
+
+        ebm, program = self._template()
+        nc = 5
+        betas = jnp.linspace(0.0, 1.0, nc)
+        inits = _init_factory(nc, [ebm] * nc, [program] * nc)
+        kw = dict(betas=betas, track_round_trips=True, device=None)
+        key = jax.random.key(3)
+        s_a, st_a = nrpt(key, ebm, program, inits, [], 40, 2, **kw)
+        for pad in (nc, 12):  # pad == n (structural no-op) and pad > n
+            s_b, st_b = nrpt(
+                key, ebm, program, inits, [], 40, 2, pad_chains_to=pad, **kw
+            )
+            for c in range(nc):
+                for b in range(len(s_a[c])):
+                    assert np.array_equal(
+                        np.asarray(s_a[c][b]), np.asarray(s_b[c][b])
+                    ), (pad, c, b)
+            for k2 in ("accepted", "attempted"):
+                assert np.array_equal(np.asarray(st_a[k2]), np.asarray(st_b[k2]))
+            rt_a = st_a["round_trip_diagnostics"]
+            rt_b = st_b["round_trip_diagnostics"]
+            for k2 in ("round_trips_per_chain", "restarts_per_chain"):
+                assert np.array_equal(np.asarray(rt_a[k2]), np.asarray(rt_b[k2]))
+
+    def test_pad_probes_bit_identical_discovery(self):
+        ebm, program = self._template()
+        kw = dict(
+            ebm=ebm,
+            program=program,
+            init_factory=_init_factory,
+            clamp_state=[],
+            beta_range=(0.0, 1.0),
+            gibbs_steps_per_round=1,
+            max_chains=16,
+            rounds_per_probe=60,
+            n_tune_per_probe=2,
+        )
+        plain = tune_chains(jax.random.key(7), **kw)
+        masked = tune_chains(jax.random.key(7), pad_probes=True, **kw)
+        assert masked["n_chains"] == plain["n_chains"]
+        assert np.array_equal(np.asarray(masked["betas"]), np.asarray(plain["betas"]))
+        assert masked["Lambda"] == plain["Lambda"]
+        assert [h["n"] for h in masked["history"]] == [h["n"] for h in plain["history"]]
+
+    def test_pad_rejects_factory_route_and_observer(self):
+        from hamon.nrpt import nrpt
+        from hamon.observers import NRPTEnergyObserver
+
+        ebm, program = self._template()
+        nc = 4
+        betas = jnp.linspace(0.0, 1.0, nc)
+        ebms = _ebm_factory(betas)
+        programs = _program_factory(ebms)
+        inits = _init_factory(nc, ebms, programs)
+        with pytest.raises(ValueError, match="temperature-linear"):
+            nrpt(
+                jax.random.key(0),
+                ebms,
+                programs,
+                inits,
+                [],
+                10,
+                1,
+                pad_chains_to=8,
+                device=None,
+            )
+        with pytest.raises(ValueError, match="observer"):
+            nrpt(
+                jax.random.key(0),
+                ebm,
+                program,
+                inits,
+                [],
+                10,
+                1,
+                betas=betas,
+                observer=NRPTEnergyObserver(nc),
+                pad_chains_to=8,
+                device=None,
+            )
