@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Chain-masked probes: one compiled round loop for the whole autotune.** XLA
+  compile dominates the cold cost of `tune_chains` (measured ~85% of stage-1
+  wall on GPU; the actual sampling work of both probes is <1s), because every
+  probe at a new chain count recompiles the round loop at new array shapes.
+  `nrpt` gains `pad_chains_to`: the ladder is padded to a fixed length with
+  copies of the coldest chain and the true count enters the jitted loop as
+  *traced* data — swaps beyond the live prefix are forced-rejected (identity
+  permutation, so the padding is fully decoupled by DEO's nearest-neighbour
+  coupling), attempt counters and the round-trip "top" are masked to the live
+  prefix, and all outputs are sliced back to the true count, so schedule
+  optimization and every downstream consumer see unpadded semantics.
+  `tune_chains(pad_probes=)` pads every probe to `max_chains`, and
+  `autotune(pad_probes=None)` auto-enables this on an accelerator in template
+  mode (padding Gibbs work is ~free on a dispatch-bound GPU; off on CPU where
+  it is real compute) — the polish/production stage then runs masked too, so
+  one padded executable serves every stage. Because JAX's threefry key and
+  uniform streams are prefix-stable, the live prefix of a masked run is
+  **bit-identical** to the unpadded run — same states, same accept/reject
+  decisions, same discovered N/Λ/schedule (regression-tested, and verified
+  exactly on the full planted-Ising benchmark suite, ground-state hit-rate 1.0
+  preserved on every config). Cold autotune −6% at the default two probes;
+  glassy multi-probe searches −34% (each extra probe now reuses the loop).
+
+- **Stage-1 probes run at the final `n_expl` when it is already known.** The
+  Gibbs-sweep count is the `lax.scan` length inside the round loop, so probing
+  at `n_expl=1` and polishing at the device default (4 on GPU) compiled the
+  big round loop twice. When `n_expl` is pinned or comes from the
+  deterministic device default (i.e. the wall-timed search is off), stage 1
+  now probes at that final value — scan length doesn't change compile time,
+  extra sweeps are ~free on a dispatch-bound accelerator, and stage 3 reuses
+  stage 1's executable instead of recompiling it (−15% cold autotune wall
+  measured on GPU). The opt-in exploration search still probes at `n_expl=1`.
+
 - **Round-trip identifiability flag on the barrier estimate.** On a glassy target
   the barrier estimate `Λ̂ = Σ rejection_rates` is only meaningful once the index
   process actually round-trips: a stalled DEO conveyor (too few chains, or an

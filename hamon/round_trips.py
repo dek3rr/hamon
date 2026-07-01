@@ -45,14 +45,16 @@ def init_index_state(n_chains: int) -> dict:
 def update_index_state(
     index_state: dict,
     perm: jax.Array,
-    n_chains: int,
+    n_chains: int | jax.Array,
 ) -> dict:
     """Update the index process after a swap pass.
 
     Args:
         index_state: current tracking dict
         perm: (n_chains,) int array — permutation applied to states
-        n_chains: total number of chains
+        n_chains: total number of chains; may be a traced scalar (the live
+            count of a padded ladder), which redefines the round-trip "top"
+            without changing array shapes
     """
     old_m2c = index_state["machine_to_chain"]
     visited = index_state["visited_top"]

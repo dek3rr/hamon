@@ -305,11 +305,14 @@ def _build_swap_passes(
     n_chains: int,
     n_free_blocks: int,
     track_round_trips: bool,
+    live_chains: jax.Array | None = None,
 ):
     """Build the even/odd DEO swap branches for ``lax.cond``.
 
     Returns ``(do_even, do_odd)`` — the two parity branches the round loop
     alternates between (single-pass DEO preserves non-reversibility).
+    ``live_chains`` (traced) masks the pass to the live prefix of a padded
+    ladder — see ``_make_swap_branch``.
     """
     n_pairs = n_chains - 1
     even_pairs = jnp.arange(0, n_pairs, 2, dtype=jnp.int32)
@@ -318,7 +321,15 @@ def _build_swap_passes(
     att_odd = jnp.zeros(n_pairs, dtype=jnp.int32).at[odd_pairs].set(1)
     base_perm = jnp.arange(n_chains, dtype=jnp.int32)
 
-    swap_args = (betas, n_chains, n_pairs, n_free_blocks, base_perm, track_round_trips)
+    swap_args = (
+        betas,
+        n_chains,
+        n_pairs,
+        n_free_blocks,
+        base_perm,
+        track_round_trips,
+        live_chains,
+    )
     do_even = _make_swap_branch(even_pairs, len(even_pairs), att_even, *swap_args)
     do_odd = _make_swap_branch(odd_pairs, len(odd_pairs), att_odd, *swap_args)
     return do_even, do_odd
@@ -383,8 +394,17 @@ def _nrpt_rounds(
     energy_delta_fn: Callable | None,
     observer: AbstractNRPTObserver | None,
     track_round_trips: bool,
+    live_chains: jax.Array | None = None,
 ) -> tuple[NRPTCarry, Any]:
     """The jitted NRPT round loop: vmapped Gibbs sweeps + DEO swaps.
+
+    ``live_chains`` (a **traced** scalar, or ``None``) enables chain masking:
+    the arrays are padded to a fixed ladder length, only the first
+    ``live_chains`` chains form the live ladder (swaps at pair index ≥
+    live_chains − 1 are forced-rejected, so the padding is fully decoupled),
+    and because it is traced data, probes at every live count share ONE
+    compiled executable. Padding chains still do (wasted, harmless) Gibbs
+    work. Callers slice results back to the live prefix.
 
     Module-level and ``eqx.filter_jit``-decorated so the compilation cache
     persists across calls: repeated invocations with the same program/observer
@@ -417,7 +437,7 @@ def _nrpt_rounds(
         n_free_blocks,
     )
     do_even, do_odd = _build_swap_passes(
-        betas, n_chains, n_free_blocks, track_round_trips
+        betas, n_chains, n_free_blocks, track_round_trips, live_chains
     )
     energy_compute = _build_energy_compute(
         energy_delta_fn, ebm_ref, beta_ref, base_spec, clamp_state
@@ -737,10 +757,24 @@ def nrpt(
     energy_delta_fn: Callable | None = None,
     observer: AbstractNRPTObserver | None = None,
     device: DeviceLike = "auto",
+    pad_chains_to: int | None = None,
     _emit_diagnostics: bool = True,
     _return_stacked: bool = False,
 ) -> tuple[list, dict]:
     """Non-Reversible Parallel Tempering with vectorized swaps.
+
+    ``pad_chains_to`` (≥ n_chains) enables **chain masking**: the ladder is
+    padded to that fixed length with copies of the coldest chain and the round
+    loop runs with the true chain count as *traced* data — swaps beyond the
+    live prefix are forced-rejected (identity permutation), so the padding is
+    fully decoupled from the live ladder. All returned states/stats are sliced
+    back to the true count, so callers see exactly the shapes and semantics of
+    an unpadded run. The point: probes at *different* chain counts padded to
+    the same length share ONE compiled round loop instead of recompiling per
+    count (the dominant cold cost of ``tune_chains``), at the price of wasted
+    Gibbs work on the padding chains (~free on a dispatch-bound accelerator).
+    Temperature-linear mode only; incompatible with ``observer`` and
+    ``energy_delta_fn``.
 
     Single-pass DEO: one swap parity per round, alternating even/odd.
     Multi-pass breaks non-reversibility (even∘odd∘odd∘even = identity).
@@ -817,6 +851,24 @@ def nrpt(
 
     _validate_beta_ladder(betas, n_chains)
 
+    # --- Chain-masking validation ----------------------------------------------
+    pad_to = int(pad_chains_to) if pad_chains_to is not None else None
+    if pad_to is not None:
+        if pad_to < n_chains:
+            raise ValueError(
+                f"pad_chains_to={pad_to} must be >= the chain count ({n_chains})."
+            )
+        if base_pbi is None:
+            raise ValueError(
+                "pad_chains_to requires temperature-linear mode (single template "
+                "ebm/program); per-chain sequences are not supported."
+            )
+        if observer is not None or energy_delta_fn is not None:
+            raise ValueError(
+                "pad_chains_to is incompatible with observer / energy_delta_fn "
+                "(they would see the padded ladder)."
+            )
+
     # --- Device routing --------------------------------------------------------
     dev = resolve_entry_device(
         device,
@@ -862,6 +914,28 @@ def nrpt(
             init_states, stacked_init, n_chains, n_free_blocks
         )
 
+        # --- Chain masking (padding) -------------------------------------------
+        # Pad the ladder to the fixed pad_to length with copies of the coldest
+        # chain and hand the round loop the true count as traced data. In
+        # temperature-linear mode chain_data IS the betas array, so one padded
+        # array serves both.
+        live_chains = None
+        betas_run = betas
+        chain_data_run = chain_data
+        if pad_to is not None:
+            live_chains = jnp.asarray(n_chains, dtype=jnp.int32)
+            pad = pad_to - n_chains
+            if pad > 0:
+
+                def _pad_rows(x):
+                    return jnp.concatenate(
+                        [x, jnp.broadcast_to(x[-1:], (pad, *x.shape[1:]))]
+                    )
+
+                betas_run = _pad_rows(betas)
+                chain_data_run = betas_run
+                stacked_states = [_pad_rows(st) for st in stacked_states]
+
         # --- Run --------------------------------------------------------------
         n_pairs = n_chains - 1
         if n_rounds > 0:
@@ -878,16 +952,28 @@ def nrpt(
                 ebm_ref,
                 beta_ref,
                 base_pbi,
-                chain_data,
+                chain_data_run,
                 stacked_states,
                 clamp_state,
-                betas,
+                betas_run,
                 n_rounds_arg,
                 gibbs_steps_per_round,
                 energy_delta_fn,
                 observer,
                 track_round_trips,
+                live_chains,
             )
+            # Slice every padded carry field back to the live prefix, so the
+            # public return is indistinguishable in shape and semantics from an
+            # unpadded run at n_chains.
+            if pad_to is not None and pad_to > n_chains:
+                final = final._replace(
+                    states=[st[:n_chains] for st in final.states],
+                    accepted=final.accepted[: n_chains - 1],
+                    attempted=final.attempted[: n_chains - 1],
+                    idx_state={k: v[:n_chains] for k, v in final.idx_state.items()},
+                    base_E=final.base_E[:n_chains],
+                )
         else:
             final = NRPTCarry(
                 key=key,

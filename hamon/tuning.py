@@ -138,8 +138,15 @@ def tune_schedule(
     round_stable_k: int = 2,
     lambda_rtol: float = 0.05,
     device: DeviceLike = "auto",
+    pad_chains_to: int | None = None,
 ) -> tuple[list, dict]:
     """NRPT with iterative schedule optimization (Algorithm 4).
+
+    ``pad_chains_to`` enables chain masking in every phase's round loop (see
+    :func:`hamon.nrpt.nrpt`): phases at different chain counts padded to the
+    same length share one compiled executable. Stats and states are sliced
+    back to the true count before any tuning math sees them, so the schedule
+    optimization is untouched. Incompatible with ``observer``.
 
     Adapts the β schedule over tuning phases, then runs the final ``n_rounds``
     production phase with the optimized schedule. Each phase logs one INFO line
@@ -230,6 +237,7 @@ def tune_schedule(
             track_round_trips=track_round_trips,
             observer=phase_observer,
             device=dev,
+            pad_chains_to=pad_chains_to,
             _emit_diagnostics=emit_diag,
             _return_stacked=return_stacked,
         )
@@ -531,6 +539,7 @@ def tune_chains(
     tune_tol: float | None = None,
     safety_margin: float = 0.05,
     device: DeviceLike = "auto",
+    pad_probes: bool = False,
 ) -> dict:
     """Iteratively discover the right chain count for a given target acceptance.
 
@@ -598,6 +607,16 @@ def tune_chains(
         safety_margin: small fractional pad on N* (default 0.05) covering residual
             barrier bias and ELE-assumption violations; 0.0 gives the bare
             round-trip-optimal count
+        pad_probes: run every probe's round loop padded to ``max_chains`` with
+            chain masking (see :func:`hamon.nrpt.nrpt`), so probes at different
+            chain counts share ONE compiled round loop instead of recompiling
+            per count — the dominant cold cost of discovery. Padding chains do
+            wasted-but-decoupled Gibbs work (~free on a dispatch-bound
+            accelerator; real cost on CPU, so leave off there). Template
+            (temperature-linear) mode only. Probe *statistics* are computed on
+            the sliced live prefix, but the probe RNG stream differs from an
+            unpadded run, so discovered N can shift within its normal
+            probe-to-probe variability.
 
     Returns:
         dict with keys:
@@ -682,6 +701,7 @@ def tune_chains(
             ebm=ebm,
             program=program,
             device=dev,
+            pad_chains_to=max_chains if pad_probes else None,
         )
         rej = np.asarray(stats["rejection_rates"])
         out: dict[str, Any] = {

@@ -191,6 +191,7 @@ def autotune(
     n_polish: int = 2,
     n_rounds: int = 1000,
     compile_cache: bool | str = True,
+    pad_probes: bool | None = None,
     device: DeviceLike = "auto",
 ) -> NRPTPlan:
     """Autotune the full NRPT configuration: N, exploration count, and schedule.
@@ -199,8 +200,11 @@ def autotune(
     dependency-ordered, cheap→expensive recipe and returns an :class:`NRPTPlan`
     you draw from with :meth:`NRPTPlan.sample`:
 
-    1. **N** via :func:`tune_chains` at n_expl=1 (cheapest probes; Λ — hence N\\* —
-       is invariant to n_expl).
+    1. **N** via :func:`tune_chains`, probed at the final n_expl when it is
+       already known (pinned or the deterministic device default) so stage 3
+       reuses stage 1's compiled round loop — the biggest cold-run compile.
+       When the n_expl search is on, probes run at n_expl=1 instead (cheapest;
+       Λ — hence N\\* — is invariant to n_expl).
     2. **n_expl** — by default a deterministic device-calibrated count
        (accelerator → a fixed mid-range value, CPU → 1): reproducible across runs
        and ~free, since the ESS-per-wall-second objective is flat in n_expl on a
@@ -274,6 +278,13 @@ def autotune(
             default path, a ``str`` enables it at that path, ``False`` leaves
             placement untouched. See
             :func:`hamon.enable_persistent_compile_cache`.
+        pad_probes: chain-mask the stage-1 probes — pad every probe's round
+            loop to ``max_chains`` so all probes share ONE compiled loop
+            instead of recompiling per chain count (see
+            :func:`hamon.tuning.tune_chains`). ``None`` (default) enables it
+            on an accelerator in template mode (where the padding Gibbs work
+            is ~free) and disables it on CPU or the factory route. Stages 2-3
+            and the production draw always run unpadded.
         device: where to run; resolved once and reused across every stage.
 
     Returns:
@@ -306,7 +317,31 @@ def autotune(
 
     k_chains, k_expl, k_polish = jax.random.split(key, 3)
 
-    # --- Stage 1: chain count at n_expl = 1 ---
+    # --- Stage 1: chain count ---
+    # Probe at the final n_expl whenever it is already known (pinned, or the
+    # deterministic device default because the search is off). The scan length
+    # doesn't change compile time and extra sweeps are ~free on a
+    # dispatch-bound accelerator, while stage 3 then reuses stage 1's compiled
+    # round loop instead of recompiling it at a new n_expl — the single
+    # biggest cold-run compile. The wall-timed search still probes at
+    # n_expl=1 (cheapest; Λ — hence N* — is invariant to n_expl).
+    if gibbs_steps_per_round is not None:
+        if int(gibbs_steps_per_round) < 1:
+            raise ValueError("gibbs_steps_per_round must be >= 1.")
+        probe_n_expl = int(gibbs_steps_per_round)
+    elif search_exploration and max_exploration_steps > 1:
+        probe_n_expl = 1
+    else:
+        probe_n_expl = _default_gibbs_steps(dev)
+
+    # Chain masking default: on for accelerator + template mode (padding Gibbs
+    # work is ~free there and masking needs temperature-linear β scaling); off
+    # on CPU (padding is real compute) and on the factory route.
+    if pad_probes is None:
+        platform = getattr(dev, "platform", "cpu") if dev is not None else "cpu"
+        pad_probes = bool(platform != "cpu" and ebm is not None and program is not None)
+    pad_probes = bool(pad_probes)
+
     disc = tune_chains(
         k_chains,
         ebm_factory,
@@ -314,7 +349,7 @@ def autotune(
         init_factory,
         clamp_state,
         beta_range=beta_range,
-        gibbs_steps_per_round=1,
+        gibbs_steps_per_round=probe_n_expl,
         target_acceptance=target_acceptance,
         rounds_per_probe=rounds_per_probe,
         n_tune_per_probe=n_tune,
@@ -325,6 +360,7 @@ def autotune(
         ebm=ebm,
         program=program,
         device=dev,
+        pad_probes=pad_probes,
     )
     n_chains = int(disc["n_chains"])
     Lambda = float(disc["Lambda"])
@@ -341,11 +377,11 @@ def autotune(
     # default (reproducible and ~free, since the ESS/sec objective is flat in
     # n_expl on a dispatch-bound accelerator).
     exploration: dict | None = None
-    if gibbs_steps_per_round is not None:
-        if int(gibbs_steps_per_round) < 1:
-            raise ValueError("gibbs_steps_per_round must be >= 1.")
-        n_expl = int(gibbs_steps_per_round)
-    elif search_exploration and max_exploration_steps > 1:
+    if gibbs_steps_per_round is not None or not (
+        search_exploration and max_exploration_steps > 1
+    ):
+        n_expl = probe_n_expl
+    else:
         exploration = tune_exploration(
             k_expl,
             ebm_factory,
@@ -365,14 +401,15 @@ def autotune(
             device=dev,
         )
         n_expl = int(exploration["gibbs_steps_per_round"])
-    else:
-        n_expl = _default_gibbs_steps(dev)
 
     # --- Stage 3: schedule polish at (N, n_expl) + warm cold state ---
     # The production run uses n_rounds (not the short probe budget): it both
     # equilibrates the warm cold state and measures a representative round-trip
     # rate. A round trip needs >= ~2N rounds, so a short window badly
     # underestimates tau_obs / efficiency for large N.
+    # When probes were masked, the polish + production run masked too: the same
+    # padded round loop then serves every stage (one big compile total), instead
+    # of stage 3 re-compiling an exact-shape loop the probes no longer built.
     warm_states, polish_stats = tune_schedule(
         k_polish,
         ebm_factory,
@@ -387,6 +424,7 @@ def autotune(
         ebm=ebm,
         program=program,
         device=dev,
+        pad_chains_to=max_chains if pad_probes else None,
     )
     betas = jnp.asarray(polish_stats["betas"])
     warm_cold = warm_states[-1]  # cold chain = highest β
