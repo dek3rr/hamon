@@ -100,6 +100,14 @@ def test_keeps_best_schedule():
     assert np.allclose(np.asarray(stats["betas"]), np.asarray(best["betas"]), atol=1e-5)
 
 
+def test_tune_schedule_exposes_barrier_identified():
+    """The production run reports the round-trip trust gate in stats."""
+    ebm, prog, fb, betas, inits = _setup(4, 0.5, 6)
+    stats = _run(ebm, prog, betas, inits, n_tune=2, rounds_per_tune=120)
+    assert "barrier_identified" in stats
+    assert stats["barrier_identified"] in (True, False)
+
+
 def test_compile_count_bounded():
     """With round_batch == n_rounds, the tuning batches and the production run
     share one compiled round loop (<= 2 traces total)."""

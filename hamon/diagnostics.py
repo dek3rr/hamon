@@ -369,6 +369,11 @@ class NRPTHealthReport:
         Lambda / tau_observed / tau_predicted / efficiency /
         total_round_trips: Round-trip diagnostics (``None`` when the run was
             made with ``track_round_trips=False``).
+        barrier_identified: ``False`` when the index process did not round-trip
+            (a stalled conveyor), so ``Lambda`` is a within-basin artifact and
+            must not be trusted — add chains / equalize the ladder. ``True`` when
+            round trips flowed; ``None`` when round-trip diagnostics were
+            unavailable. See :func:`hamon.round_trips.barrier_is_identified`.
         recommended_n_chains: Suggested chain count when efficiency is low.
         efficiency_limiter: When round-trip efficiency is low, which knob to
             turn — ``"schedule"`` (the ladder is not equalized: tune it further
@@ -400,6 +405,7 @@ class NRPTHealthReport:
     tau_predicted: float | None = None
     efficiency: float | None = None
     total_round_trips: int | None = None
+    barrier_identified: bool | None = None
     recommended_n_chains: int | None = None
     efficiency_limiter: str | None = None
     barrier_peak_beta: float | None = None
@@ -428,11 +434,16 @@ class NRPTHealthReport:
                 if self.efficiency_limiter
                 else ""
             )
+            unident = (
+                "  BARRIER NOT IDENTIFIED (conveyor stalled)"
+                if self.barrier_identified is False
+                else ""
+            )
             lines.append(
                 f"  Lambda={self.Lambda:.3f}  tau_obs={self.tau_observed:.4f}  "
                 f"tau_pred={self.tau_predicted:.4f}  "
                 f"efficiency={self.efficiency:.3f}  "
-                f"round_trips={self.total_round_trips}{limiter}"
+                f"round_trips={self.total_round_trips}{limiter}{unident}"
             )
         if self.marginal_entropy is not None:
             note = ""
@@ -543,15 +554,23 @@ def report_nrpt_diagnostics(
 
     rt = stats.get("round_trip_diagnostics")
     if rt is not None:
+        from hamon.round_trips import barrier_is_identified
+
         report.Lambda = float(rt["Lambda"])
         report.tau_observed = float(rt["tau_observed"])
         report.tau_predicted = float(rt["tau_predicted"])
         report.efficiency = float(rt["efficiency"])
         report.total_round_trips = int(np.sum(np.asarray(rt["round_trips_per_chain"])))
+        report.barrier_identified = barrier_is_identified(
+            report.tau_observed, report.total_round_trips, tau_min=tau_min
+        )
 
-        if report.tau_observed < tau_min:
+        if not report.barrier_identified:
             _flag(
-                f"near-zero round trip rate (tau_obs={report.tau_observed:.4f}) — information not flowing"
+                f"near-zero round trip rate (tau_obs={report.tau_observed:.4f}, "
+                f"round_trips={report.total_round_trips}) — conveyor stalled, "
+                f"barrier estimate Lambda={report.Lambda:.2f} not identified "
+                f"(within-basin artifact); add chains / equalize the ladder"
             )
         elif report.efficiency < efficiency_warn:
             from hamon.round_trips import recommend_n_chains
