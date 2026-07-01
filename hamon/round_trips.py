@@ -131,6 +131,42 @@ def empirical_round_trip_rate(
     return total_rts / jnp.maximum(n_rounds, 1)
 
 
+# Round-trip floor below which the barrier estimate is not identified. A single
+# completed traversal is the bare minimum for Σrej to reflect anything the cold
+# chain saw beyond its own basin; below it the estimate is a within-basin
+# artifact (see :func:`barrier_is_identified`).
+_MIN_ROUND_TRIPS = 1
+_TAU_MIN = 0.01
+
+
+def barrier_is_identified(
+    tau_observed: float,
+    total_round_trips: int,
+    *,
+    tau_min: float = _TAU_MIN,
+    min_round_trips: int = _MIN_ROUND_TRIPS,
+) -> bool:
+    """Whether ``Λ̂ = Σ rejection_rates`` is a trustworthy barrier estimate.
+
+    The estimate is only meaningful once the DEO index process **round-trips**:
+    a stalled conveyor (too few chains, or an unequalized ladder saturating at
+    β_c) freezes every chain in a single metastable basin, so ``Σ rejection``
+    measures within-basin energy fluctuations, not the equilibrium barrier —
+    biased *low*, and biased the same way for every independent replica, so
+    replicas *agree* on the artifact (low cross-replica spread is then a false
+    consistency signal, not identification). Identification therefore cannot be
+    read off the rejection rates alone; it needs the index process. We require
+    both a non-negligible round-trip **rate** (``tau_observed ≥ tau_min``) and at
+    least ``min_round_trips`` completed traversals, so a lucky single swap does
+    not read as identified.
+
+    Returns ``True`` when the barrier is identified. When ``False``, ``Λ̂`` should
+    not be trusted downward — add chains / equalize the ladder to un-stall the
+    conveyor rather than believing a low estimate.
+    """
+    return bool(tau_observed >= tau_min and total_round_trips >= min_round_trips)
+
+
 # ---------------------------------------------------------------------------
 # Diagnostics
 # ---------------------------------------------------------------------------

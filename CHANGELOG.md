@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Round-trip identifiability flag on the barrier estimate.** On a glassy target
+  the barrier estimate `Λ̂ = Σ rejection_rates` is only meaningful once the index
+  process actually round-trips: a stalled DEO conveyor (too few chains, or an
+  unequalized ladder saturating at β_c) leaves every chain frozen in its basin,
+  so `Λ̂` measures a within-basin artifact rather than the equilibrium barrier —
+  and independent replicas *agree* on that artifact (low spread is a false
+  consistency signal). `report_nrpt_diagnostics` now exposes `barrier_identified`
+  (and the round-trip count driving it): `False` means the conveyor is starved
+  and `Λ̂` should not be trusted downward. `tune_schedule` logs the flag per
+  phase, and `tune_chains` records it per probe — making explicit the guard that
+  the running-max `Λ̂` (below) was already applying implicitly.
+
 ### Fixed
 
 - **`tune_chains` no longer collapses to a too-low chain count on glassy

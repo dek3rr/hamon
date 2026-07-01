@@ -214,6 +214,31 @@ class TestNRPTHealthReport(unittest.TestCase):
         self.assertFalse(report.healthy)
         self.assertTrue(any("round trip" in i for i in report.issues))
 
+    def test_barrier_identified_on_healthy_run(self):
+        """Round trips flowing ⇒ the barrier estimate is identified."""
+        report = report_nrpt_diagnostics(self._stats())
+        self.assertTrue(report.barrier_identified)
+
+    def test_barrier_not_identified_when_conveyor_stalled(self):
+        """Zero round trips ⇒ Λ̂ is a within-basin artifact, flagged not identified."""
+        report = report_nrpt_diagnostics(self._stats(tau_obs=0.0))
+        self.assertFalse(report.barrier_identified)
+        self.assertTrue(any("not identified" in i for i in report.issues))
+        self.assertIn("BARRIER NOT IDENTIFIED", report.summary())
+
+    def test_barrier_identified_none_without_round_trips(self):
+        """No round-trip diagnostics ⇒ identifiability is unknown (None)."""
+        report = report_nrpt_diagnostics(self._stats(with_rt=False))
+        self.assertIsNone(report.barrier_identified)
+
+    def test_barrier_is_identified_helper(self):
+        from hamon.round_trips import barrier_is_identified
+
+        self.assertTrue(barrier_is_identified(0.05, 10))
+        self.assertFalse(barrier_is_identified(0.0, 0))  # no round trips
+        self.assertFalse(barrier_is_identified(0.05, 0))  # rate>0 but 0 completed
+        self.assertFalse(barrier_is_identified(0.005, 5))  # rate below floor
+
     def test_low_efficiency_fails_with_recommendation(self):
         report = report_nrpt_diagnostics(self._stats(efficiency=0.1))
         self.assertFalse(report.healthy)

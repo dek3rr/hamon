@@ -20,6 +20,7 @@ from hamon.block_sampling import BlockSamplingProgram
 from hamon.device import DeviceLike, resolve_entry_device
 from hamon.models.ebm import AbstractEBM
 from hamon.observers import AbstractNRPTObserver
+from hamon.round_trips import barrier_is_identified
 from hamon.nrpt import (
     _ChainSource,
     _phase_diagnostics,
@@ -356,6 +357,24 @@ def tune_schedule(
         subkey, betas, current_states, n_rounds, phase_observer=observer, emit_diag=True
     )
     stats["tuning_history"] = tuning_history
+
+    # Round-trip trust gate: Σrej only estimates Λ once the index process
+    # round-trips. Flag a stalled conveyor so callers (and tune_chains) don't
+    # trust a within-basin barrier artifact. No-op when round trips weren't tracked.
+    rtd = stats.get("round_trip_diagnostics")
+    if rtd is not None:
+        n_rt = int(np.sum(np.asarray(rtd["round_trips_per_chain"])))
+        identified = barrier_is_identified(float(rtd["tau_observed"]), n_rt)
+        stats["barrier_identified"] = identified
+        if not identified:
+            logger.warning(
+                "tune_schedule: barrier NOT identified (tau_obs=%.4f, round_trips=%d) "
+                "— DEO conveyor stalled, Lambda=%.2f is a within-basin artifact "
+                "(biased low); add chains or equalize the ladder",
+                float(rtd["tau_observed"]),
+                n_rt,
+                float(rtd["Lambda"]),
+            )
     return states, stats
 
 
@@ -372,6 +391,7 @@ def _probe_history_entry(
     n_recommended: int,
     rejection_rates,
     betas,
+    barrier_identified: bool | None = None,
 ) -> dict[str, Any]:
     """One ``tune_chains`` per-probe history record."""
     return {
@@ -382,6 +402,7 @@ def _probe_history_entry(
         "n_recommended": int(n_recommended),
         "rejection_rates": rejection_rates,
         "betas": betas,
+        "barrier_identified": barrier_identified,
     }
 
 
@@ -586,7 +607,10 @@ def tune_chains(
             Lambda_raw: last raw estimate (may be lower than Lambda)
             target_acceptance: the target used
             converged_reason: "chain_count" | "lambda_stable" | "max_iters"
-            history: list of per-probe dicts
+            barrier_identified: whether the final count's ladder round-tripped, so
+                the reported Lambda is identified rather than a stalled-conveyor
+                within-basin artifact (``None`` if round trips were not tracked).
+            history: list of per-probe dicts (each carries ``barrier_identified``)
     """
     source = _ChainSource(ebm_factory, program_factory, ebm, program)
 
@@ -665,7 +689,18 @@ def tune_chains(
             "Lambda_raw": float(np.sum(rej)),
             "rejection_rates": rej,
             "betas": np.asarray(stats["betas"]),
+            # Round-trip trust gate: whether this probe's ladder round-tripped, so
+            # its Λ̂ is a real barrier estimate and not a within-basin artifact.
+            "barrier_identified": stats.get("barrier_identified"),
         }
+        if out["barrier_identified"] is False:
+            logger.warning(
+                "tune_chains: probe at n=%d did not round-trip; its Lambda_raw=%.2f "
+                "is biased low (conveyor stalled). The running-max Lambda guards N* "
+                "against this — a higher-N probe that round-trips will dominate.",
+                n,
+                out["Lambda_raw"],
+            )
         probed[n] = out
         return out
 
@@ -745,6 +780,7 @@ def tune_chains(
                 n_star,
                 res["rejection_rates"],
                 res["betas"],
+                res.get("barrier_identified"),
             )
         )
         if abs(n_star - n) <= 1:
@@ -781,6 +817,7 @@ def tune_chains(
                 n_final,
                 final_stats["rejection_rates"],
                 final_stats["betas"],
+                final_stats.get("barrier_identified"),
             )
         )
 
@@ -791,6 +828,9 @@ def tune_chains(
         "Lambda_raw": float(lambda_raw),
         "target_acceptance": target_acceptance,
         "converged_reason": reason,
+        # Whether the final chosen count's ladder round-tripped, so the reported
+        # Lambda is identified (not a stalled-conveyor within-basin artifact).
+        "barrier_identified": final_stats.get("barrier_identified"),
         "history": history,
     }
 
