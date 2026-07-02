@@ -138,32 +138,35 @@ more = plan.sample(jax.random.key(2), 5000)
 For Ising models, `ising_sample` wraps this in a one-liner (biases, edges,
 weights → samples) and autotunes everything automatically.
 
-Key features of the NRPT implementation:
+Key design elements:
 
 - **Full autotuning**: `autotune` runs chain count → exploration count →
-  schedule in dependency order, reusing the schedule across exploration probes
-  and never re-discovering N; returns an `NRPTPlan` for cheap repeated draws
-- **Device-calibrated exploration**: `tune_exploration` picks
-  `gibbs_steps_per_round` by maximizing ESS per *measured* wall-second, so it
-  self-calibrates (n_expl=1 on a compute-bound CPU, n_expl>1 on a dispatch-bound
-  GPU where extra sweeps are nearly free — measured 1.7–2.3× ESS/sec)
-- **Vectorized swaps**: 1 energy evaluation per chain (not 4 per pair), all
-  non-overlapping swaps execute simultaneously via permutation indexing
-- **Temperature-linear mode**: one β = 1 base program serves every chain;
-  interactions are scaled by each chain's β inside the kernel, so no
-  per-chain program construction and n_chains× less interaction memory
-- **Chain count discovery**: `tune_chains` probes for the right N from Λ
-- **Adaptive scheduling**: `tune_schedule` equalizes rejection rates,
-  minimizing the global communication barrier Λ
-- **Round trip tracking**: estimates Λ and predicted optimal rate τ̄ = 1/(2+2Λ)
-- **Effective sample size**: `effective_sample_size` reports per-variable ESS
-  (the honest denominator on Monte-Carlo error); folded into
-  `report_nrpt_diagnostics`
-- **Log normalizing constant**: opt-in `NRPTEnergyObserver` +
-  `thermodynamic_integration` recover log Z / model evidence / free energy from
-  the tempering energies — the quantity ordinary MCMC discards
-- **Compile cache by default**: autotune enables JAX's persistent compile cache
-  to amortize the multi-probe recompiles across runs
+  schedule in dependency order and returns an `NRPTPlan` for cheap repeated
+  draws. Every default is chosen to be **reproducible**: identical inputs give
+  identical tuning decisions and samples.
+- **Robust chain-count discovery**: `tune_chains` pilots at `max_chains` (an
+  over-resolved ladder gives an unbiased first Λ̂) and takes
+  `N* = 2Λ + 1`, the round-trip optimum at rejection r\* = ½ (Syed et al.).
+  The **running-max Λ̂** over probes keeps glassy targets — where a coarse
+  ladder under-resolves the barrier and biases Λ̂ low — from collapsing to a
+  chain count that cannot mix. `seed_from_energy` skips the pilot using the
+  closed-form energy-variance barrier (Theorem 2), gated by a Gelman–Rubin R̂
+  across independent restarts that falls back to the pilot when local
+  exploration traps.
+- **Deterministic exploration count**: `gibbs_steps_per_round` defaults to a
+  fixed device-calibrated value (accelerator → 4, CPU → 1) at the flat top of
+  the ESS-per-second curve. The wall-timed search (`search_exploration=True`)
+  is opt-in because its argmax is not reproducible across runs — best used
+  once per hardware, then pinned.
+- **Trustworthy diagnostics**: round-trip tracking with an identifiability
+  gate — `barrier_identified=False` flags a stalled DEO conveyor whose Λ̂ is a
+  within-basin artifact; `efficiency_limiter` attributes low round-trip
+  efficiency to the schedule vs. local exploration; per-variable ESS and
+  opt-in log Z via thermodynamic integration (`NRPTEnergyObserver`).
+- **Vectorized swaps + temperature-linear mode**: one energy evaluation per
+  chain, all non-overlapping swaps as a single permutation; one β = 1 base
+  program serves every chain with interactions scaled by β inside the kernel
+  (no per-chain program construction or interaction copies).
 
 ### Log Z and effective sample size
 
@@ -197,22 +200,29 @@ print(report.summary())  # includes ess(min)/ess(median)/ess_fraction
 
 ## What makes Hamon fast
 
-**All chains run in one kernel.** Parallel tempering uses `jax.vmap` over chains
-instead of a Python loop. Compile time is constant regardless of chain count.
+On a GPU the wall-clock cost of tuning-heavy sampling is **XLA compilation,
+not the sampling itself** (measured ~85% of a cold chain-count search; the
+actual device work is well under a second). Hamon is engineered so everything
+compiles once:
 
-**No redundant work in the sampler loop.** Global state is threaded through
-`lax.scan` as a carry. Block updates write back via contiguous slice updates
-with static offsets (scatters only as a fallback for non-contiguous layouts)
-instead of rebuilding the full state tensor each iteration.
+**One kernel, compiled once, for every configuration.** All chains run under
+one `jax.vmap` (compile time is flat in chain count), the round count is
+traced (any number of rounds reuses one executable), and **chain-masked
+probes** pad the ladder to a fixed width with the live count as traced data —
+so the entire autotune (every probe, polish, and production) shares a single
+compiled round loop. Masking is bit-identical to the unpadded run: JAX's
+key/uniform streams are prefix-stable and masked swaps keep the identity
+permutation.
 
-**Energy evaluation skips unnecessary work.** Pre-built `BlockSpec` objects are
-passed through directly — no reconstruction on every `energy()` call. Padded
-interaction entries are pre-zeroed at program construction, so samplers skip
-the per-step active-mask multiply.
+**Caches that actually hit.** Jit caches key on program *structure*
+(value-based `BlockSpec` equality), so `with_ebm` rebuilds and repeated tuner
+calls reuse executables; the persistent compile cache is on by default in
+`autotune`, so a repeat run in a new process does **zero** XLA compiles.
 
-**Accumulator dtypes are explicit.** The moment accumulator pins its dtype at
-construction, and conditional samplers accumulate in the weights' dtype,
-avoiding silent promotion on GPU and seeding float64 sums with float32 zeros.
+**A lean sampler loop.** State threads through `lax.scan` as a carry with
+static-offset slice writebacks; post-hoc diagnostics run in host numpy (no
+per-shape kernel compiles, one device→host transfer) and hot paths avoid
+per-edge host syncs and eager dispatch.
 
 ## Citing Hamon
 

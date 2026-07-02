@@ -83,6 +83,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`seed_from_energy` is now the default for chain-count discovery**
+  (`tune_chains` and `autotune`; pass `seed_from_energy=False` for the
+  unconditional `max_chains` pilot). The energy-variance seed converges in one
+  probe instead of two, and its Gelman–Rubin R̂ gate already makes it safe on
+  any target: when local exploration mixes (R̂ ≈ 1) the seeded probe is
+  key-aligned with the pilot — same discovered N and schedule, fewer compiles;
+  when it traps (R̂ ≫ 1, a glassy target) the search falls back to exactly the
+  pilot, paying only the cheap energy probe. Validated on the planted-Ising
+  suite: every glassy config correctly routes to the pilot and still finds the
+  certified ground state (hit-rate 1.0). **On well-mixing targets the
+  discovered N can differ slightly from the pilot's** when the seeded fixed
+  point converges from a different start (within the search's normal
+  tolerance), so `ising_sample` output can change for a given problem.
+
 - **`autotune` sets the local-exploration count (`n_expl`) deterministically by
   default** instead of by a wall-timed search. The previous ESS-per-second search
   was not reproducible across runs: the objective is flat in `n_expl` near its
