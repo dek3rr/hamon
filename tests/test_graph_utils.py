@@ -124,9 +124,7 @@ def test_matches_reference_on_random_graphs(seed):
     rng = np.random.default_rng(seed)
     n = int(rng.integers(1, 80))
     m = int(rng.integers(0, n * 4))
-    edges = [
-        (int(rng.integers(0, n)), int(rng.integers(0, n))) for _ in range(m)
-    ]
+    edges = [(int(rng.integers(0, n)), int(rng.integers(0, n))) for _ in range(m)]
     got = rlf_coloring(n, edges)
     assert got == _reference_rlf(n, edges)
     _assert_proper(got, [(u, v) for u, v in edges if u != v])

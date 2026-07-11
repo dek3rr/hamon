@@ -63,7 +63,9 @@ def rlf_coloring(n_nodes: int, edges: Iterable[tuple[int, int]]) -> list[int]:
         return []
 
     # --- normalise edges to a deduplicated undirected (m, 2) index array ---
-    e = np.asarray(edges if isinstance(edges, np.ndarray) else list(edges), dtype=np.int64)
+    e = np.asarray(
+        edges if isinstance(edges, np.ndarray) else list(edges), dtype=np.int64
+    )
     e = e.reshape(-1, 2)
     e = e[e[:, 0] != e[:, 1]]  # drop self-loops
     if e.shape[0]:
@@ -122,10 +124,13 @@ def rlf_coloring(n_nodes: int, edges: Iterable[tuple[int, int]]) -> list[int]:
             if moved.size:
                 in_U[moved] = False
                 key[moved] = NEG
+                # Gather the moved vertices' CSR rows as one ragged range:
+                # for row i, positions starts[i] .. starts[i]+lens[i)-1.
+                starts = indptr[moved]
+                lens = indptr[moved + 1] - starts
                 mnb = csr_dst[
-                    np.concatenate(
-                        [np.arange(indptr[u], indptr[u + 1]) for u in moved]
-                    )
+                    np.arange(int(lens.sum()))
+                    + np.repeat(starts + lens - np.cumsum(lens), lens)
                 ]
                 np.add.at(cU, mnb, -1)  # moved left U
                 np.add.at(cW, mnb, 1)  # ... and joined W
