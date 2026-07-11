@@ -485,7 +485,7 @@ def ising_sample(
     # sets its XLA compile cost, so minimising colours directly cuts compile —
     # RLF does that more aggressively than greedy heuristics on dense graphs and
     # matches them on sparse/bipartite ones.
-    coloring = rlf_coloring(n, ((int(e[0]), int(e[1])) for e in edges_np))
+    coloring = rlf_coloring(n, edges_np)
     n_colors = (max(coloring) + 1) if n else 1
     color_groups: list[list[AbstractNode]] = [[] for _ in range(n_colors)]
     for idx in range(n):
