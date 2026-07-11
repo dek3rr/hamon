@@ -12,6 +12,7 @@ import time
 from collections.abc import Callable, Sequence
 from typing import Any
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -423,6 +424,22 @@ _ENERGY_RESTARTS = 8  # independent chains per β (coverage + the R̂ trap detec
 _ENERGY_RHAT_MAX = 1.1  # Gelman–Rubin cutoff: above this, trust the PT pilot
 
 
+@eqx.filter_jit
+def _grid_base_energies(base_ebm, beta_ref, spec, stacked, clamp_state):
+    """Base potential V for energy-grid samples.
+
+    Module-level (not a per-call closure) so repeat ``_estimate_barrier_energy``
+    calls share the tracing cache; evaluated per β at the sequential path's
+    (R·ns) batch shape — XLA's reduction strategy (and therefore the
+    floating-point summation order of the energy) can depend on the batch
+    size, so evaluating all G·R·ns rows at once would perturb V in the last
+    bits and break the bit-identity of Λ̂.
+    """
+    from hamon._nrpt_energy import _compute_base_energies
+
+    return _compute_base_energies(base_ebm, beta_ref, spec, stacked, clamp_state)
+
+
 def _energy_mad_halved(v: np.ndarray) -> float:
     """½·E|V₁−V₂| of a 1-D energy sample, via the sorted-Gini formula (O(M log M))."""
     v = np.sort(np.asarray(v))
@@ -467,11 +484,19 @@ def _estimate_barrier_energy(
 
     Returns ``(Λ̂, R̂_max)``.
     """
-    from hamon._nrpt_energy import _compute_base_energies, _make_reference_ebm
-    from hamon.block_sampling import SamplingSchedule, sample_states_batched
+    import contextlib
+
+    from hamon._nrpt_energy import _make_reference_ebm
+    from hamon.block_sampling import (
+        SamplingSchedule,
+        _sample_with_observation_core,
+    )
+    from hamon.device import tree_device_put
+    from hamon.nrpt import _make_pbi_in_axes, _stack_pbi_across_chains
+    from hamon.observers import StateObserver
 
     betas = np.linspace(beta_range[0], beta_range[1], int(n_grid))
-    R, ns = max(2, int(restarts)), int(n_samples)
+    G, R, ns = len(betas), max(2, int(restarts)), int(n_samples)
     sched = SamplingSchedule(int(warmup), ns, 1)
 
     # The base EBM (β=1) and block spec are identical across the grid — only the
@@ -479,31 +504,81 @@ def _estimate_barrier_energy(
     # base-energy kernel so it compiles a single time, reused across the grid.
     one = jnp.asarray(1.0)
     base_ebm, beta_ref = _make_reference_ebm(source.ebms_for_init(one[None]), one[None])
-    spec = source._make_programs(source.ebms_for_init(one[None]))[0].gibbs_spec
-    nb = len(spec.free_blocks)
 
-    @jax.jit
-    def _energies(stacked):  # per-block (R*ns, …) → (R*ns,) base potential V
-        return _compute_base_energies(base_ebm, beta_ref, spec, stacked, clamp_state)
+    # One batched sampling call over the whole (β grid × restarts) lattice
+    # instead of ``n_grid`` sequential dispatch+sync rounds — the grid is
+    # dispatch-bound, not compute-bound. Per-lane keys, inits, and interaction
+    # tensors reproduce the previous per-β
+    # ``sample_states_batched(fold_in(key, i), …)`` runs exactly: lane
+    # ``i·R + c`` gets the key ``split(fold_in(key, i))[c]``, the same init, and
+    # the *actual* β_i-tempered program's interaction arrays (stacked across
+    # lanes and vmapped, the same mechanism as nrpt's per-chain-sequence mode —
+    # no temperature-linearity assumed), so every lane's sample stream and
+    # therefore Λ̂ and R̂ are bit-identical to the sequential path.
+    keys_flat = jnp.concatenate(
+        [jax.random.split(jax.random.fold_in(key, i), R) for i in range(G)]
+    )
+    ebms_0 = source.ebms_for_init(jnp.full((R,), float(betas[0])))
+    programs_0 = source._make_programs(ebms_0)
+    base_prog = programs_0[0]
+    spec = base_prog.gibbs_spec
+    nb = len(spec.free_blocks)
+    init_cols: list[list] = [[] for _ in range(nb)]
+    lane_pbi: list = []  # per-lane per_block_interactions, in lane order
+    for i, b in enumerate(betas):
+        if i == 0:
+            ebms_R, programs_R = ebms_0, programs_0
+        else:
+            betas_R = jnp.full((R,), float(b))
+            ebms_R = source.ebms_for_init(betas_R)
+            programs_R = source._make_programs(ebms_R)  # with_ebm — cheap, cached
+        inits = init_factory(R, ebms_R, programs_R)  # R distinct random inits
+        for blk in range(nb):
+            init_cols[blk].append(jnp.stack([inits[c][blk] for c in range(R)]))
+        lane_pbi.extend([programs_R[0].per_block_interactions] * R)
+    init_flat = [jnp.concatenate(cols) for cols in init_cols]
+    stacked_pbi = [
+        [
+            _stack_pbi_across_chains([lane_pbi[lane][b][g] for lane in range(G * R)])
+            for g in range(len(base_prog.per_block_interactions[b]))
+        ]
+        for b in range(nb)
+    ]
+    pbi_axes = _make_pbi_in_axes(stacked_pbi)
+
+    if dev is not None:
+        keys_flat, base_prog, init_flat, stacked_pbi, clamp_dev = tree_device_put(
+            (keys_flat, base_prog, init_flat, stacked_pbi, clamp_state), dev
+        )
+    else:
+        clamp_dev = clamp_state
+    device_ctx = (
+        jax.default_device(dev) if dev is not None else contextlib.nullcontext()
+    )
+
+    f_obs = StateObserver(spec.free_blocks)
+    carry = f_obs.init()
+
+    def _one_lane(k, init_free, pbi_c):
+        prog_c = eqx.tree_at(lambda p: p.per_block_interactions, base_prog, pbi_c)
+        _, res = _sample_with_observation_core(
+            k, prog_c, sched, init_free, clamp_dev, carry, f_obs
+        )
+        return res
+
+    with device_ctx:
+        raw = jax.vmap(_one_lane, in_axes=(0, [0] * nb, pbi_axes))(
+            keys_flat, init_flat, stacked_pbi
+        )  # list per free block, each (G*R, ns, …)
 
     lambdas, rhats = [], []
     for i, b in enumerate(betas):
-        betas_R = jnp.full((R,), float(b))
-        ebms_R = source.ebms_for_init(betas_R)
-        programs_R = source._make_programs(ebms_R)  # β-tempered (with_ebm), cached
-        inits = init_factory(R, ebms_R, programs_R)  # R distinct random inits
-        batched = [jnp.stack([inits[c][blk] for c in range(R)]) for blk in range(nb)]
-        raw = sample_states_batched(
-            jax.random.fold_in(key, i),
-            programs_R[0],
-            sched,
-            batched,
-            clamp_state,
-            spec.free_blocks,
-            device=dev,
-        )  # list per free block, each (R, ns, …)
-        flat = [blk.reshape((R * ns, *blk.shape[2:])) for blk in raw]
-        V = np.asarray(_energies(flat)).reshape(R, ns)
+        flat = [
+            blk[i * R : (i + 1) * R].reshape((R * ns, *blk.shape[2:])) for blk in raw
+        ]
+        V = np.asarray(
+            _grid_base_energies(base_ebm, beta_ref, spec, flat, clamp_state)
+        ).reshape(R, ns)
         lambdas.append(float(np.mean([_energy_mad_halved(V[c]) for c in range(R)])))
         if b > 0.0:  # β=0 mixes trivially; its R̂ is uninformative
             within = float(V.var(axis=1).mean())

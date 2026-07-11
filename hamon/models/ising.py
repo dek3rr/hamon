@@ -442,6 +442,53 @@ def estimate_kl_grad(
         return grad_w, grad_b, (moms_b_pos, moms_w_pos), (moms_b_neg, moms_w_neg)
 
 
+# ising_sample builds fresh SpinNodes per call, and node identity keys every
+# downstream cache — so without this memo a repeat call with the same graph
+# retraces and recompiles every jitted kernel (~3.5 s of XLA at 128² without
+# the persistent compile cache, and a full re-trace even with it). Keyed on
+# graph *content*; bounded FIFO, entries pin nothing external.
+_GRAPH_CACHE: dict = {}
+_GRAPH_CACHE_MAX = 8
+
+
+def _ising_graph(n: int, edges_np: np.ndarray):
+    """(nodes, node_edges, free_blocks) for a variable graph, memoized.
+
+    The colouring is deterministic, so equal-content graphs always produce the
+    same block structure; reusing the node objects is what lets the structure
+    cache and every jit cache hit on repeat calls.
+    """
+    from hamon.graph_utils import rlf_coloring
+
+    key = (n, edges_np.shape, edges_np.tobytes())
+    hit = _GRAPH_CACHE.get(key)
+    if hit is not None:
+        return hit
+
+    nodes: list[AbstractNode] = [SpinNode() for _ in range(n)]
+    # .tolist() converts the whole edge array to Python ints in C, instead of
+    # 2·|edges| per-element int(...) casts on numpy scalars.
+    node_edges: list[Edge] = [(nodes[u], nodes[v]) for u, v in edges_np.tolist()]
+
+    # Recursive-Largest-First colouring of the variable graph: each colour class
+    # is an independent set and becomes one block-Gibbs group. The colour count
+    # is the number of sequential sample groups in the NRPT round loop, which
+    # sets its XLA compile cost, so minimising colours directly cuts compile —
+    # RLF does that more aggressively than greedy heuristics on dense graphs and
+    # matches them on sparse/bipartite ones.
+    coloring = rlf_coloring(n, edges_np)
+    n_colors = (max(coloring) + 1) if n else 1
+    color_groups: list[list[AbstractNode]] = [[] for _ in range(n_colors)]
+    for idx in range(n):
+        color_groups[coloring[idx]].append(nodes[idx])
+    free_blocks: list[SuperBlock] = [Block(group) for group in color_groups]
+
+    if len(_GRAPH_CACHE) >= _GRAPH_CACHE_MAX:
+        _GRAPH_CACHE.pop(next(iter(_GRAPH_CACHE)))
+    _GRAPH_CACHE[key] = (nodes, node_edges, free_blocks)
+    return nodes, node_edges, free_blocks
+
+
 def ising_sample(
     biases: Shaped[Array, " n"],
     edges: Shaped[Array, "m 2"],
@@ -501,7 +548,6 @@ def ising_sample(
         unnecessary) or if all biases are identical (model has no
         per-variable preference).
     """
-    from hamon.graph_utils import rlf_coloring
     from hamon.autotune import autosample
 
     biases = jnp.asarray(biases)
@@ -530,24 +576,11 @@ def ising_sample(
             "per-variable preference; sampling results may be uninformative."
         )
 
-    # --- build graph and colour it for block Gibbs ---
-    nodes: list[AbstractNode] = [SpinNode() for _ in range(n)]
-    # .tolist() converts the whole edge array to Python ints in C, instead of
-    # 2·|edges| per-element int(...) casts on numpy scalars.
-    node_edges: list[Edge] = [(nodes[u], nodes[v]) for u, v in edges_np.tolist()]
-
-    # Recursive-Largest-First colouring of the variable graph: each colour class
-    # is an independent set and becomes one block-Gibbs group. The colour count
-    # is the number of sequential sample groups in the NRPT round loop, which
-    # sets its XLA compile cost, so minimising colours directly cuts compile —
-    # RLF does that more aggressively than greedy heuristics on dense graphs and
-    # matches them on sparse/bipartite ones.
-    coloring = rlf_coloring(n, edges_np)
-    n_colors = (max(coloring) + 1) if n else 1
-    color_groups: list[list[AbstractNode]] = [[] for _ in range(n_colors)]
-    for idx in range(n):
-        color_groups[coloring[idx]].append(nodes[idx])
-    free_blocks: list[SuperBlock] = [Block(group) for group in color_groups]
+    # --- build (or reuse) the coloured graph for block Gibbs ---
+    # Node identity keys every downstream cache (block structure, jit statics),
+    # so a repeat call with the same graph must reuse the same node objects —
+    # otherwise every kernel retraces and recompiles per call.
+    nodes, node_edges, free_blocks = _ising_graph(n, edges_np)
 
     # --- template EBM & program ---
     ebm = IsingEBM(nodes, node_edges, biases, weights, jnp.array(float(beta)))
