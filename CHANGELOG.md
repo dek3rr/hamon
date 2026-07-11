@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Energy-grid barrier seed runs as one batched call; repeat `ising_sample`
+  calls stop recompiling. Bit-identical.** Two cold/warm-path cuts found by a
+  compile audit (`jax_log_compiles` + `jax_explain_cache_misses`):
+  (1) `_estimate_barrier_energy` sampled its 11-β grid sequentially — 11
+  dispatch+sync rounds of an 8-wide kernel, ~2–3 s of device-serial time on
+  every run. It now stacks the *actual* per-β programs' interaction tensors
+  across all β×restart lanes and runs one vmapped call (the same mechanism as
+  nrpt's per-chain-sequence mode — no temperature-linearity assumed). Per-lane
+  keys, inits, and weights reproduce the sequential runs exactly, and the
+  base-energy reduction is still evaluated per β at the sequential path's
+  batch shape (XLA's reduction order can depend on batch size), so Λ̂ and R̂
+  are **exactly equal** (float-identical, verified on CPU and GPU).
+  (2) `ising_sample` built fresh `SpinNode`s per call, and node identity keys
+  every downstream cache — so a repeat call with the same graph re-traced and
+  recompiled every kernel (~3.6 s of XLA at 128², or a full re-trace with the
+  persistent cache). The coloured graph (nodes/edges/blocks) is now memoized
+  on edge-array content, the production draw's observer `Block` is memoized on
+  node identity, and the grid's base-energy kernel is module-level instead of
+  a per-call closure. A second in-process `ising_sample` call now compiles
+  **nothing** (measured 71 → 0 compilations; CPU L=32 repeat wall 5.5 → 2.7 s)
+  and returns byte-identical samples. End-to-end CPU wall at L=64 dropped
+  14.0 → 10.7 s; samples remain byte-equal to the pre-optimization reference.
+
 - **O(1) jit-call statics: the per-call flatten/hash flood is gone,
   bit-identical.** Every jitted entry point that takes an EBM
   (`hinton_init`, the NRPT round loop) flattened `IsingEBM.nodes`/`edges`

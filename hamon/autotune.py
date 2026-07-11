@@ -164,6 +164,29 @@ class NRPTPlan:
         return raw[0]
 
 
+# The production draw's StateObserver carries this Block as a jit static, and
+# Blocks compare by identity — a fresh Block over the same nodes per autotune
+# call would retrace and recompile the draw kernel every call. Keyed on node
+# identities; entries pin their nodes (no id reuse while live), bounded FIFO —
+# the same pattern as the factor-block caches in hamon.models.
+_OBS_BLOCK_CACHE: dict = {}
+_OBS_BLOCK_CACHE_MAX = 32
+
+
+def _obs_block(out_nodes: list):
+    from hamon.block_management import Block
+
+    key = tuple(map(id, out_nodes))
+    hit = _OBS_BLOCK_CACHE.get(key)
+    if hit is not None:
+        return hit[1]
+    blk = Block(out_nodes)
+    if len(_OBS_BLOCK_CACHE) >= _OBS_BLOCK_CACHE_MAX:
+        _OBS_BLOCK_CACHE.pop(next(iter(_OBS_BLOCK_CACHE)))
+    _OBS_BLOCK_CACHE[key] = (tuple(out_nodes), blk)
+    return blk
+
+
 def autotune(
     key: jax.Array,
     *,
@@ -291,7 +314,6 @@ def autotune(
     Returns:
         An :class:`NRPTPlan`.
     """
-    from hamon.block_management import Block
     from hamon.device import enable_persistent_compile_cache
 
     if init_factory is None:
@@ -451,7 +473,7 @@ def autotune(
             "autotune sampling currently supports single-node-type models; "
             "draw manually from plan with sample_states for mixed-type models."
         )
-    obs_block = Block(out_nodes)
+    obs_block = _obs_block(out_nodes)
 
     rt_diag = polish_stats.get("round_trip_diagnostics")
     total_round_trips = (
