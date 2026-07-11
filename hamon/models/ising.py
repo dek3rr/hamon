@@ -34,6 +34,36 @@ logger = logging.getLogger(__name__)
 Edge = tuple[AbstractNode, AbstractNode]
 
 
+# ``IsingEBM.factors`` runs once per chain per ``nrpt`` call (via
+# ``with_beta``/``with_ebm``), and its node-group Blocks depend only on the
+# ``nodes``/``edges`` lists — which ``with_beta`` passes through by reference —
+# never on β or the weights. Rebuilding them cost two O(|edges|) list
+# comprehensions plus three O(|nodes|) Block type scans per rebuild. Keyed on
+# list identity; entries pin their key lists (no id reuse while live) and the
+# cache is a bounded FIFO.
+_FACTOR_BLOCK_CACHE: dict = {}
+_FACTOR_BLOCK_CACHE_MAX = 32
+
+
+def _ising_factor_blocks(
+    nodes: list[AbstractNode], edges: list[Edge]
+) -> tuple[Block, Block, Block]:
+    """Build (cached) the bias Block and the edge head/tail Blocks."""
+    key = (id(nodes), id(edges))
+    hit = _FACTOR_BLOCK_CACHE.get(key)
+    if hit is not None and hit[0] is nodes and hit[1] is edges:
+        return hit[2], hit[3], hit[4]
+
+    bias_block = Block(nodes)
+    head_block = Block([x[0] for x in edges])
+    tail_block = Block([x[1] for x in edges])
+
+    if len(_FACTOR_BLOCK_CACHE) >= _FACTOR_BLOCK_CACHE_MAX:
+        _FACTOR_BLOCK_CACHE.pop(next(iter(_FACTOR_BLOCK_CACHE)))
+    _FACTOR_BLOCK_CACHE[key] = (nodes, edges, bias_block, head_block, tail_block)
+    return bias_block, head_block, tail_block
+
+
 class IsingEBM(AbstractFactorizedEBM):
     r"""An EBM with the energy function,
 
@@ -88,12 +118,12 @@ class IsingEBM(AbstractFactorizedEBM):
 
     @property
     def factors(self) -> list[EBMFactor]:
+        bias_block, head_block, tail_block = _ising_factor_blocks(
+            self.nodes, self.edges
+        )
         return [
-            SpinEBMFactor([Block(self.nodes)], self.beta * self.biases),
-            SpinEBMFactor(
-                [Block([x[0] for x in self.edges]), Block([x[1] for x in self.edges])],
-                self.beta * self.weights,
-            ),
+            SpinEBMFactor([bias_block], self.beta * self.biases),
+            SpinEBMFactor([head_block, tail_block], self.beta * self.weights),
         ]
 
 
@@ -101,15 +131,31 @@ class IsingSamplingProgram(FactorSamplingProgram):
     """A very thin wrapper on FactorSamplingProgram that specializes it to the case of an Ising Model."""
 
     def __init__(
-        self, ebm: IsingEBM, free_blocks: list[SuperBlock], clamped_blocks: list[Block]
+        self,
+        ebm: IsingEBM,
+        free_blocks: list[SuperBlock],
+        clamped_blocks: list[Block],
+        *,
+        _gibbs_spec: BlockGibbsSpec | None = None,
     ):
         samp = SpinGibbsConditional()
-        spec = BlockGibbsSpec(free_blocks, clamped_blocks, ebm.node_shape_dtypes)
+        # _gibbs_spec: internal fast path for with_ebm — the spec is pure
+        # structure (no β, no weights), so a rebuild over the same blocks would
+        # reproduce it node for node while paying an O(|nodes|) location-map
+        # construction.
+        spec = (
+            _gibbs_spec
+            if _gibbs_spec is not None
+            else BlockGibbsSpec(free_blocks, clamped_blocks, ebm.node_shape_dtypes)
+        )
         super().__init__(spec, [samp for _ in spec.free_blocks], ebm.factors, [])
 
     def with_ebm(self, ebm: IsingEBM) -> "IsingSamplingProgram":
         return IsingSamplingProgram(
-            ebm, list(self.gibbs_spec.superblocks), self.gibbs_spec.clamped_blocks
+            ebm,
+            list(self.gibbs_spec.superblocks),
+            self.gibbs_spec.clamped_blocks,
+            _gibbs_spec=self.gibbs_spec,
         )
 
 
@@ -477,7 +523,9 @@ def ising_sample(
 
     # --- build graph and colour it for block Gibbs ---
     nodes: list[AbstractNode] = [SpinNode() for _ in range(n)]
-    node_edges: list[Edge] = [(nodes[int(e[0])], nodes[int(e[1])]) for e in edges_np]
+    # .tolist() converts the whole edge array to Python ints in C, instead of
+    # 2·|edges| per-element int(...) casts on numpy scalars.
+    node_edges: list[Edge] = [(nodes[u], nodes[v]) for u, v in edges_np.tolist()]
 
     # Recursive-Largest-First colouring of the variable graph: each colour class
     # is an independent set and becomes one block-Gibbs group. The colour count

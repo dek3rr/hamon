@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Per-chain program rebuilds are now O(1) in graph size: 35× faster at
+  128×128, bit-identical.** `nrpt` rebuilds one sampling program per chain per
+  call via `program.with_ebm(...)`; an autotuned `ising_sample` does this ~95
+  times (more at higher `max_chains`). Each rebuild re-ran O(|edges|) host
+  Python — `IsingEBM.factors` list comprehensions and Block type scans,
+  `to_interaction_groups` node concatenation, `_merge_groups` rebuilding a
+  *single* group's blocks as an identity copy, a fresh `BlockGibbsSpec`
+  node-location map, and `_structure_cache_key` hashing ~84K node ids just to
+  *hit* the existing structure cache — ~17 ms per rebuild at 128×128, 1.7–6 s
+  per `ising_sample`, all of it pure host tax that rivals the entire cold GPU
+  sampling wall on large graphs. Now: factor node-group Blocks and
+  interaction-group head/tail Blocks are memoized on node identity (bounded
+  LRU caches that pin their keys, mirroring the `_STRUCTURE_CACHE` pattern),
+  `_merge_groups` early-returns single groups, `with_ebm` reuses the existing
+  `BlockGibbsSpec` (pure structure — no β, no weights), Blocks cache their
+  node-id tuples so structure-cache keys are attribute reads, and
+  `Block.__init__`'s type check runs in C via `set(map(type, ...))`. Rebuild
+  cost: 1.4/4.3/9.6/17.4 ms at L=32/64/96/128 → ~0.4 ms flat (the residual is
+  the eager β-scaling device ops). Samples are **bit-identical** (verified
+  byte-equal end-to-end at L=64 against pre-change output); the weight arrays
+  and compiled programs are unchanged — only redundant Python object
+  reconstruction was removed.
+
 - **`rlf_coloring` vectorised: up to ~140× faster graph colouring, identical
   output.** The Recursive-Largest-First colouring that `ising_sample` runs on
   the full variable graph (and `auto_color_blocks` on the block-conflict

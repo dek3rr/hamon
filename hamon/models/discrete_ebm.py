@@ -56,6 +56,64 @@ def _batch_gather(x, *idx):
     return x_flat[(batch_idx,) + idx_flat].reshape(batch_shape)
 
 
+# Head/tail Block construction for the spin branch of ``to_interaction_groups``
+# depends only on the node-group Blocks, never on the weight values, yet it was
+# rebuilt — O(sum of group sizes) Python list concatenation plus Block type
+# scans — on every factor compilation. ``program.with_ebm(...)`` recompiles the
+# factors once per chain per ``nrpt`` call, so this is a hot path for large
+# graphs. Keyed on the node-group Blocks' identities; entries pin their key
+# Blocks (so ids cannot be reused while an entry is live) and the cache is a
+# bounded LRU, mirroring the _STRUCTURE_CACHE pattern in block_sampling.
+_SPIN_IG_BLOCK_CACHE: dict = {}
+_SPIN_IG_BLOCK_CACHE_MAX = 64
+
+
+def _spin_ig_blocks(
+    spin_node_groups: list[Block], categorical_node_groups: list[Block]
+) -> tuple[Block, tuple[Block, ...]]:
+    """Build (cached) the merged head Block and tail Blocks for the spin
+    interaction group: head = all spin groups concatenated, and for each spin
+    combo the remaining spin groups plus the categorical groups as tails."""
+    key = (
+        tuple(map(id, spin_node_groups)),
+        tuple(map(id, categorical_node_groups)),
+    )
+    hit = _SPIN_IG_BLOCK_CACHE.get(key)
+    if hit is not None:
+        return hit[2], hit[3]
+
+    n_spin = len(spin_node_groups)
+    n_total = n_spin + len(categorical_node_groups)
+    spin_inds = list(range(n_spin))
+    spin_combos = [
+        (x, spin_inds[:i] + spin_inds[i + 1 :]) for i, x in enumerate(spin_inds)
+    ]
+
+    all_head_nodes = []
+    all_tail_nodes = [[] for _ in range(n_total - 1)]
+    for combo in spin_combos:
+        all_head_nodes += spin_node_groups[combo[0]].nodes
+        for i, tail_ind in enumerate(combo[1]):
+            all_tail_nodes[i] += spin_node_groups[tail_ind].nodes
+        for j, cat_group in enumerate(categorical_node_groups):
+            all_tail_nodes[n_spin - 1 + j] += cat_group.nodes
+
+    head_block = Block(all_head_nodes)
+    tail_blocks = tuple(Block(x) for x in all_tail_nodes)
+
+    if len(_SPIN_IG_BLOCK_CACHE) >= _SPIN_IG_BLOCK_CACHE_MAX:
+        _SPIN_IG_BLOCK_CACHE.pop(next(iter(_SPIN_IG_BLOCK_CACHE)))
+    # Pin the key blocks in the value: a live entry keeps its keyed objects
+    # alive, so an id() collision with a garbage-collected Block is impossible.
+    _SPIN_IG_BLOCK_CACHE[key] = (
+        tuple(spin_node_groups),
+        tuple(categorical_node_groups),
+        head_block,
+        tail_blocks,
+    )
+    return head_block, tail_blocks
+
+
 class DiscreteEBMFactor(EBMFactor, WeightedFactor):
     """Implements batches of energy function terms of the form s_1 * ... * s_M * W[c_1, ..., c_N],
     where the s_i are spin variables and the c_i are categorical variables.
@@ -122,22 +180,11 @@ class DiscreteEBMFactor(EBMFactor, WeightedFactor):
 
         n_spin = len(self.spin_node_groups)
         n_cat = len(self.categorical_node_groups)
-        n_total = n_spin + n_cat
 
         if n_spin > 0:
-            spin_inds = list(range(len(self.spin_node_groups)))
-            spin_combos = [
-                (x, spin_inds[:i] + spin_inds[i + 1 :]) for i, x in enumerate(spin_inds)
-            ]
-
-            all_head_nodes = []
-            all_tail_nodes = [[] for _ in range(n_total - 1)]
-            for combo in spin_combos:
-                all_head_nodes += self.spin_node_groups[combo[0]].nodes
-                for i, tail_ind in enumerate(combo[1]):
-                    all_tail_nodes[i] += self.spin_node_groups[tail_ind].nodes
-                for j, cat_group in enumerate(self.categorical_node_groups):
-                    all_tail_nodes[n_spin - 1 + j] += cat_group.nodes
+            head_block, tail_blocks = _spin_ig_blocks(
+                self.spin_node_groups, self.categorical_node_groups
+            )
 
             tiler = [1] * len(self.weights.shape)
             tiler[0] = n_spin
@@ -146,8 +193,8 @@ class DiscreteEBMFactor(EBMFactor, WeightedFactor):
             interaction_groups.append(
                 InteractionGroup(
                     DiscreteEBMInteraction(n_spin - 1, rep_weights),
-                    Block(all_head_nodes),
-                    [Block(x) for x in all_tail_nodes],
+                    head_block,
+                    list(tail_blocks),
                 )
             )
 
@@ -193,8 +240,11 @@ class DiscreteEBMFactor(EBMFactor, WeightedFactor):
 
 
 def _merge_groups(groups, n_tail_groups):
-    if len(groups) == 0:
-        return groups
+    if len(groups) <= 1:
+        # Nothing to merge: rebuilding the single group's blocks and
+        # concatenating its lone weight tensor would be an identity copy of
+        # O(|nodes|) Python work per program (re)build.
+        return list(groups)
 
     all_head = []
     all_tail = [[] for _ in range(n_tail_groups)]
