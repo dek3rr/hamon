@@ -2,6 +2,7 @@
 
 import contextlib
 import logging
+from collections.abc import Sequence
 
 import equinox as eqx
 import jax
@@ -27,7 +28,7 @@ from hamon.factor import FactorSamplingProgram
 from hamon.models.discrete_ebm import SpinEBMFactor, SpinGibbsConditional
 from hamon.models.ebm import AbstractFactorizedEBM, EBMFactor
 from hamon.observers import MomentAccumulatorObserver
-from hamon.pgm import AbstractNode, SpinNode
+from hamon.pgm import AbstractNode, SpinNode, _IdentitySeq
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,7 @@ _FACTOR_BLOCK_CACHE_MAX = 32
 
 
 def _ising_factor_blocks(
-    nodes: list[AbstractNode], edges: list[Edge]
+    nodes: Sequence[AbstractNode], edges: Sequence[Edge]
 ) -> tuple[Block, Block, Block]:
     """Build (cached) the bias Block and the edge head/tail Blocks."""
     key = (id(nodes), id(edges))
@@ -80,11 +81,19 @@ class IsingEBM(AbstractFactorizedEBM):
     - `edges`: the edges that have an associated weight (i.e $S_2$)
     - `weights`: the weight associated with each pair of nodes in `edges`.
     - `beta`: the scalar temperature parameter for the model.
+
+    ``nodes`` and ``edges`` are stored as immutable, identity-hashed
+    sequences (a single pytree leaf each): the EBM is passed to jitted
+    functions (``hinton_init``, the NRPT round loop), and flattening plain
+    lists would visit and hash every node and edge endpoint — O(|graph|)
+    host work — on every call. They still index, iterate, and ``len()``
+    like lists; ``with_beta`` passes the same objects through, which is
+    what keeps the jit cache hitting.
     """
 
-    nodes: list[AbstractNode]
+    nodes: Sequence[AbstractNode]
     biases: Array
-    edges: list[Edge]
+    edges: Sequence[Edge]
     weights: Array
     beta: Array
 
@@ -92,16 +101,16 @@ class IsingEBM(AbstractFactorizedEBM):
 
     def __init__(
         self,
-        nodes: list[AbstractNode],
-        edges: list[Edge],
+        nodes: Sequence[AbstractNode],
+        edges: Sequence[Edge],
         biases: Array,
         weights: Array,
         beta: Array,
     ):
         sd_map = {nodes[0].__class__: jax.ShapeDtypeStruct((), jnp.bool_)}
         super().__init__(sd_map)
-        self.nodes = nodes
-        self.edges = edges
+        self.nodes = nodes if isinstance(nodes, _IdentitySeq) else _IdentitySeq(nodes)
+        self.edges = edges if isinstance(edges, _IdentitySeq) else _IdentitySeq(edges)
         # β must match the float dtype of the parameters it scales: a strong
         # float64 β (e.g. jnp.array(1.0) with x64 enabled in the host
         # application) would otherwise promote every β·W interaction tensor —
