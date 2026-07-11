@@ -169,8 +169,8 @@ def _structure_cache_key(gibbs_spec: "BlockGibbsSpec", interaction_groups):
         tuple(
             (
                 type(ig),
-                tuple(id(n) for n in ig.head_nodes.nodes),
-                tuple(tuple(id(n) for n in tb.nodes) for tb in ig.tail_nodes),
+                ig.head_nodes._ids(),
+                tuple(tb._ids() for tb in ig.tail_nodes),
             )
             for ig in interaction_groups
         ),

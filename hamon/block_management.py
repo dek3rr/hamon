@@ -39,14 +39,30 @@ class Block(Generic[_Node]):
     """
 
     nodes: tuple[_Node, ...]
+    _id_cache: tuple[int, ...] | None
 
     def __init__(self, nodes: Sequence[_Node]) -> None:
         nodes_tuple = tuple(nodes)
         if nodes_tuple:
             first_type = type(nodes_tuple[0])
-            if {type(node) for node in nodes_tuple} != {first_type}:
+            # set(map(...)) keeps the type scan in C; blocks can hold every
+            # node of a large graph, so this runs O(|V|) per construction.
+            if set(map(type, nodes_tuple)) != {first_type}:
                 raise ValueError("All nodes in a block must be of the same type")
         self.nodes = nodes_tuple
+        self._id_cache = None
+
+    def _ids(self) -> tuple[int, ...]:
+        """Identity key of the node sequence, computed once per Block.
+
+        Structure-cache keys are built from node identities; caching the tuple
+        here turns every repeated key computation over a reused Block from
+        O(|nodes|) ``id()`` calls into an attribute read. ``nodes`` is
+        immutable after construction, so the cache can never go stale."""
+        ids = self._id_cache
+        if ids is None:
+            ids = self._id_cache = tuple(map(id, self.nodes))
+        return ids
 
     @property
     def node_type(self) -> type[_Node]:
@@ -216,7 +232,7 @@ class BlockSpec:
         """
         return (
             type(self),
-            tuple(tuple(id(n) for n in block.nodes) for block in self.blocks),
+            tuple(block._ids() for block in self.blocks),
             tuple(tuple(s) for s in self.block_to_global_slice_spec),
             tuple(tuple(g) for g in getattr(self, "sampling_order", ())),
             frozenset(self.node_shape_dtypes.items()),
