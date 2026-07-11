@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`rlf_coloring` vectorised: up to ~140× faster graph colouring, identical
+  output.** The Recursive-Largest-First colouring that `ising_sample` runs on
+  the full variable graph (and `auto_color_blocks` on the block-conflict
+  graph) evaluated its selection rule with per-candidate Python set
+  intersections — O(|V|·|E|) with a large constant, and quadratic in practice
+  (1.1 s on a 64×64 periodic lattice, 18 s at 128×128, dwarfing the sampling
+  itself on GPU). The selection rule is now evaluated with incrementally
+  maintained neighbour counters over a CSR adjacency and a packed-key
+  vectorised argmax: 64×64 → 27 ms (41×), 128×128 → 127 ms (143×),
+  ER n=8192 → 76 ms (102×). Tie-breaking is reproduced exactly, so colourings
+  — and therefore block structures and sample streams — are **bit-identical**
+  to the previous implementation (fuzz-verified on 400 random graphs;
+  end-to-end `ising_sample` samples verified equal at L=32/64). RLF's colour
+  quality is unchanged: 1–2 fewer sequential block-Gibbs groups than greedy
+  first-fit on non-bipartite graphs (fewer groups = less NRPT round-loop
+  compile), matching DSATUR everywhere tested. `rlf_coloring` also accepts an
+  ``(m, 2)`` edge array directly; `ising_sample` passes its edge array without
+  the per-edge Python cast round-trip.
+
 ## [0.8.0] — 2026-07-01
 
 ### Added
