@@ -229,14 +229,30 @@ class BlockSpec:
         stay distinct, which is what we want: the surrounding program's blocks
         carry those same nodes and are themselves identity-compared in the cache
         key, so structural-only equality would buy nothing here.)
+
+        The key and its hash are cached on the instance: the spec rides along
+        as a static leaf of every jitted program call, so `__hash__` runs per
+        call — uncached it rebuilds and rehashes O(|nodes|) tuples each time.
+        Layout mutation after construction (`to_per_block_layout`) must drop
+        the cache via `_invalidate_structure_key`.
         """
-        return (
-            type(self),
-            tuple(block._ids() for block in self.blocks),
-            tuple(tuple(s) for s in self.block_to_global_slice_spec),
-            tuple(tuple(g) for g in getattr(self, "sampling_order", ())),
-            frozenset(self.node_shape_dtypes.items()),
-        )
+        key = self._structure_key_cache
+        if key is None:
+            key = self._structure_key_cache = (
+                type(self),
+                tuple(block._ids() for block in self.blocks),
+                tuple(tuple(s) for s in self.block_to_global_slice_spec),
+                tuple(tuple(g) for g in getattr(self, "sampling_order", ())),
+                frozenset(self.node_shape_dtypes.items()),
+            )
+        return key
+
+    _structure_key_cache = None
+    _structure_hash_cache = None
+
+    def _invalidate_structure_key(self):
+        self._structure_key_cache = None
+        self._structure_hash_cache = None
 
     def __eq__(self, other):
         return isinstance(other, BlockSpec) and (
@@ -244,7 +260,10 @@ class BlockSpec:
         )
 
     def __hash__(self):
-        return hash(self._structure_key())
+        h = self._structure_hash_cache
+        if h is None:
+            h = self._structure_hash_cache = hash(self._structure_key())
+        return h
 
 
 def _stack(*args):
@@ -511,6 +530,9 @@ def to_per_block_layout(spec):
         for block_idx, block in enumerate(spec.blocks)
         for k, node in enumerate(block.nodes)
     }
+    # The shallow copy carried the original's cached structure key, which the
+    # slice-spec rewrite above just made stale.
+    new_spec._invalidate_structure_key()
     return new_spec
 
 

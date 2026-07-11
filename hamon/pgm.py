@@ -1,9 +1,75 @@
 import abc
+from collections.abc import Sequence
 from dataclasses import dataclass, is_dataclass
-from typing import ClassVar
+from typing import ClassVar, TypeVar
 
 import jax
 from jax import numpy as jnp
+
+_T = TypeVar("_T")
+
+
+class _IdentitySeq(Sequence[_T]):
+    """Immutable sequence that is a single opaque pytree leaf.
+
+    Storing a large node or edge list directly on an ``eqx.Module`` makes
+    every ``filter_jit`` call flatten it into one Python leaf per element and
+    hash each element for the jit-cache lookup — O(|graph|) host work per
+    call (measured: ~48K leaf visits and node ``__hash__`` calls per call on
+    a 96×96 Ising model). This wrapper is not a registered pytree container,
+    so the whole sequence is one leaf whose hash is computed once and cached.
+
+    Equality/hash follow **element identity** — the same semantics the raw
+    sequences had, since nodes are unique by construction (``_UniqueID``) and
+    never compare equal across independently built models. Two wrappers over
+    the same element objects (e.g. several ``IsingEBM``\\ s built from one
+    ``nodes`` list, or ``with_beta`` passing the wrapper through) compare
+    equal and share the jit cache; wrappers over different node objects
+    differ, exactly as before.
+    """
+
+    __slots__ = ("_items", "_hash")
+
+    def __init__(self, items):
+        self._items = items if isinstance(items, tuple) else tuple(items)
+        self._hash: int | None = None
+
+    def __getitem__(self, index):
+        return self._items[index]
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __iter__(self):
+        return iter(self._items)
+
+    def __hash__(self) -> int:
+        h = self._hash
+        if h is None:
+            # id()-based: mirrors the unique-by-construction node semantics
+            # without calling each element's Python-level __hash__. Edge
+            # entries are (node, node) tuples, whose own ids are not stable
+            # across rebuilds — canonicalise one level so freshly built
+            # tuples over the same nodes hash (and compare) equal.
+            h = self._hash = hash(
+                tuple(
+                    tuple(map(id, x)) if isinstance(x, tuple) else id(x)
+                    for x in self._items
+                )
+            )
+        return h
+
+    def __eq__(self, other) -> bool:
+        if self is other:
+            return True
+        if not isinstance(other, _IdentitySeq):
+            return NotImplemented
+        # Tuple comparison short-circuits on identical elements (C-level
+        # pointer check), so the same-nodes case never runs Python __eq__.
+        return self._items == other._items
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}({list(self._items)!r})"
 
 
 class _CounterMeta(abc.ABCMeta):

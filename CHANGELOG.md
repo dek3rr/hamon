@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **O(1) jit-call statics: the per-call flatten/hash flood is gone,
+  bit-identical.** Every jitted entry point that takes an EBM
+  (`hinton_init`, the NRPT round loop) flattened `IsingEBM.nodes`/`edges`
+  into one Python leaf per element and hashed each for the jit-cache lookup —
+  ~48K leaf visits and node-`__hash__` calls *per call* on a 96×96 model
+  (measured: `equinox.hashable_partition` 3.3 s, `is_array` ×5.4M,
+  `isinstance` ×7.9M, node `__hash__` ×6.2M per `ising_sample`). `IsingEBM`
+  now stores `nodes`/`edges` as immutable identity-hashed sequences
+  (`_IdentitySeq`): a single opaque pytree leaf with O(1) hash, still
+  indexable/iterable like a list; `with_beta` passes the wrappers through by
+  reference, which is what keeps the jit cache hitting (identity semantics
+  are unchanged — nodes were already unique by construction, so
+  independently built models never compared equal before either). An
+  `IsingEBM` is now 6 pytree leaves regardless of graph size.
+  `BlockSpec._structure_key`/`__hash__` are also cached on the instance (the
+  spec rides along as a static leaf of every jitted program call, so its
+  hash ran per call, rebuilding O(|nodes|) tuples each time);
+  `to_per_block_layout` invalidates the cache after its layout rewrite.
+  Flood after: `isinstance` ×0.9M, node hash ×0.8M (57 ms), partition/
+  `is_array` out of the profile top-40. Samples bit-identical (byte-equal
+  end-to-end at L=64 against the original pre-optimization reference).
+
+### Changed
+
 - **Per-chain program rebuilds are now O(1) in graph size: 35× faster at
   128×128, bit-identical.** `nrpt` rebuilds one sampling program per chain per
   call via `program.with_ebm(...)`; an autotuned `ising_sample` does this ~95
