@@ -17,7 +17,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from hamon.block_sampling import BlockSamplingProgram
+from hamon.block_sampling import BlockSamplingProgram, SamplingSchedule
 from hamon.device import DeviceLike, resolve_entry_device
 from hamon.models.ebm import AbstractEBM
 from hamon.observers import AbstractNRPTObserver
@@ -719,6 +719,234 @@ def _estimate_barrier_energy(
     return float(np.trapezoid(np.asarray(lambdas), betas)), float(
         max(rhats, default=1.0)
     )
+
+
+# ~p95 of the null single-series window R̂ at (8 restarts, 4-batch window):
+# simulated p50≈1.03, p95≈1.25. The grid's _ENERGY_WARMUP_RHAT is looser
+# (1.45) because it maximises over 10 grid points; a single chain family
+# needs the tighter cut. Recalibrate if the window/restart counts change.
+_REPLICA_RHAT = 1.25
+_TAU_PROBE_TAG = 0x54415550  # "TAUP": fold_in tag for the autocorrelation probe
+
+
+@eqx.filter_jit
+def _replica_sweep(keys, program, sched, states, clamp_state, f_obs, carry):
+    """Vmapped sweep of independent replicas sharing one program.
+
+    The single-program sibling of ``_grid_sweep``: serves the warmup batches
+    and probe passes of :func:`tune_sampling_schedule`.
+    """
+    from hamon.block_sampling import _sample_with_observation_core
+
+    nb = len(states)
+
+    def _lane(k, init_free):
+        _, res = _sample_with_observation_core(
+            k, program, sched, init_free, clamp_state, carry, f_obs
+        )
+        return res
+
+    return jax.vmap(_lane, in_axes=(0, [0] * nb))(keys, states)
+
+
+def _integrated_autocorr(series: np.ndarray, max_lag: int) -> float:
+    """Pooled integrated autocorrelation time of (R, M) series.
+
+    τ_int = 1 + 2·Σ ρ_k, truncated at the first lag whose pooled
+    autocorrelation drops below 0.05 (a simple, conservative cut)."""
+    x = series - series.mean(axis=1, keepdims=True)
+    denom = float((x * x).sum())
+    if denom <= 0.0:
+        return 1.0
+    tau = 1.0
+    for k in range(1, max_lag):
+        rho = float((x[:, :-k] * x[:, k:]).sum()) / denom
+        if rho < 0.05:
+            break
+        tau += 2.0 * rho
+    return tau
+
+
+def tune_sampling_schedule(
+    key: jax.Array,
+    ebm,
+    program: BlockSamplingProgram,
+    init_states: list,
+    clamp_state: list | None = None,
+    *,
+    target_ess: int = 64,
+    warmup_cap: int = _ENERGY_WARMUP_MAX,
+    probe_samples: int = 200,
+    rhat_threshold: float = _REPLICA_RHAT,
+    device: DeviceLike = "auto",
+) -> tuple[SamplingSchedule, dict]:
+    """Calibrate a :class:`~hamon.SamplingSchedule` for plain block-Gibbs runs.
+
+    Answers "what warmup, thinning, and sample count does *this* model at
+    *these* parameters need?" — the numbers users otherwise hand-pick for
+    ``estimate_kl_grad`` phases or ``sample_states`` draws. Designed as a
+    calibrate-then-freeze step (e.g. once per training epoch, at the current
+    θ): the returned schedule is static, so a jitted epoch stays one compiled
+    scan.
+
+    Mechanics, reusing the energy-grid warmup machinery:
+
+    - **n_warmup** — adaptive: ``_ENERGY_WARMUP_BATCH``-sweep batches over the
+      independent replica chains in ``init_states``, stopped by the windowed
+      cross-replica R̂ of batch-end energies (stable / plateau / ``warmup_cap``
+      exits, exactly as in ``_estimate_barrier_energy``). A plateau exit means
+      the replicas are trapped in separate basins: the returned warmup is then
+      a floor, not a guarantee — plain Gibbs cannot equilibrate that target
+      and tempered sampling (``autotune``) is the honest fix.
+    - **steps_per_sample** — the pooled integrated autocorrelation time of the
+      chain energy, measured over a ``probe_samples``-sweep probe after
+      warmup; thinning at ~τ makes recorded samples approximately
+      independent.
+    - **n_samples** — ``target_ess``: after thinning at τ the effective sample
+      size is roughly the recorded count (mild residual correlation makes
+      this an approximation, not a bound).
+
+    Arguments:
+        key: PRNG key.
+        ebm: the model (energies are evaluated through its β = 1 base, the
+            same scale the NRPT swap step uses).
+        program: sampling program for the phase being calibrated (clamped
+            blocks included for e.g. a positive/data-clamped phase).
+        init_states: per-block arrays with a leading replica axis ``(R, …)``
+            — e.g. ``hinton_init(key, ebm, free_blocks, (R,))``. R ≥ 2.
+        clamp_state: clamped-block values shared by all replicas.
+        target_ess: recorded samples (≈ effective samples after thinning).
+        warmup_cap: warmup ceiling in sweeps.
+        probe_samples: sweeps recorded for the autocorrelation estimate.
+        rhat_threshold: stopping threshold for the windowed replica R̂.
+        device: where to run; resolved once, as elsewhere.
+
+    Returns:
+        ``(schedule, info)`` — the calibrated schedule and a dict with
+        ``n_warmup``, ``warmup_exit``, ``tau``, ``rhat_final`` (the window R̂
+        at the stop), and ``steps_per_sample``.
+    """
+    import contextlib
+
+    from hamon._nrpt_energy import _make_reference_ebm
+    from hamon.block_sampling import SamplingSchedule
+    from hamon.device import free_node_count, tree_device_put
+    from hamon.observers import StateObserver
+
+    if clamp_state is None:
+        clamp_state = []
+    R = int(jax.tree.leaves(init_states)[0].shape[0])
+    if R < 2:
+        raise ValueError("tune_sampling_schedule needs at least 2 replicas.")
+
+    spec = program.gibbs_spec
+    base_ebm, beta_ref = _make_reference_ebm([ebm], jnp.ones(1))
+
+    dev = resolve_entry_device(
+        device,
+        n_chains=R,
+        n_nodes=free_node_count(program),
+        arrays=(init_states, clamp_state, key),
+    )
+    if dev is not None:
+        key, program, init_states, clamp_dev = tree_device_put(
+            (key, program, init_states, clamp_state), dev
+        )
+    else:
+        clamp_dev = clamp_state
+    device_ctx = (
+        jax.default_device(dev) if dev is not None else contextlib.nullcontext()
+    )
+
+    sched_batch = SamplingSchedule(_ENERGY_WARMUP_BATCH, 1, 1)
+    sched_probe = SamplingSchedule(0, int(probe_samples), 1)
+    f_obs = StateObserver(spec.free_blocks)
+    carry = f_obs.init()
+    keys_flat = jax.random.split(key, R)
+    fold_all = jax.vmap(jax.random.fold_in, in_axes=(0, None))
+    one_beta = np.ones(1)
+
+    cap = max(int(warmup_cap), _ENERGY_WARMUP_BATCH)
+    check_from = min(_ENERGY_WARMUP_MIN, cap)
+
+    with device_ctx:
+        states = init_states
+        e_hist: list[np.ndarray] = []
+        rh = float("nan")
+        rh_best, rh_passes, rh_stalls = float("inf"), 0, 0
+        total, exit_reason = 0, "cap"
+        while total < cap:
+            out = _replica_sweep(
+                fold_all(keys_flat, total // _ENERGY_WARMUP_BATCH),
+                program,
+                sched_batch,
+                states,
+                clamp_dev,
+                f_obs,
+                carry,
+            )
+            states = [o[:, 0] for o in out]
+            total += _ENERGY_WARMUP_BATCH
+            e_hist.append(
+                np.asarray(
+                    _grid_base_energies(base_ebm, beta_ref, spec, states, clamp_state)
+                ).reshape(1, R)
+            )
+            if total < check_from or len(e_hist) < _ENERGY_WARMUP_WINDOW:
+                continue
+            rh = _window_rhat_max(np.stack(e_hist[-_ENERGY_WARMUP_WINDOW:]), one_beta)
+            logger.debug(
+                "tune_sampling_schedule warmup: %d sweeps, window rhat=%.3f",
+                total,
+                rh,
+            )
+            rh_passes = rh_passes + 1 if rh < rhat_threshold else 0
+            if rh_passes >= _ENERGY_WARMUP_PASSES:
+                exit_reason = "stable"
+                break
+            if rh < rh_best * (1.0 - _ENERGY_PLATEAU_TOL):
+                rh_best, rh_stalls = rh, 0
+            else:
+                rh_stalls += 1
+                if rh_stalls >= _ENERGY_PLATEAU_K:
+                    exit_reason = "plateau"
+                    break
+
+        raw = _replica_sweep(
+            fold_all(keys_flat, _TAU_PROBE_TAG),
+            program,
+            sched_probe,
+            states,
+            clamp_dev,
+            f_obs,
+            carry,
+        )  # per free block: (R, probe_samples, …)
+        M = int(probe_samples)
+        flat = [blk.reshape((R * M, *blk.shape[2:])) for blk in raw]
+        E = np.asarray(
+            _grid_base_energies(base_ebm, beta_ref, spec, flat, clamp_state)
+        ).reshape(R, M)
+
+    tau = _integrated_autocorr(E, max_lag=M // 4)
+    steps = max(1, int(np.ceil(tau)))
+    if exit_reason == "plateau":
+        logger.warning(
+            "tune_sampling_schedule: replicas did not merge (window rhat=%.2f) — "
+            "plain Gibbs is trapped on this target; the returned warmup is a "
+            "floor, consider tempered sampling (autotune).",
+            rh,
+        )
+
+    schedule = SamplingSchedule(total, int(target_ess), steps)
+    info = {
+        "n_warmup": total,
+        "warmup_exit": exit_reason,
+        "tau": float(tau),
+        "steps_per_sample": steps,
+        "rhat_final": float(rh),
+    }
+    logger.debug("tune_sampling_schedule: %s", info)
+    return schedule, info
 
 
 def tune_chains(

@@ -553,3 +553,76 @@ class TestAdaptiveGridWarmup:
         msg = [r.getMessage() for r in caplog.records if "exit)" in r.getMessage()][-1]
         sweeps = int(msg.split()[3])
         assert sweeps < cap + _ENERGY_WARMUP_BATCH
+
+
+class TestTuneSamplingSchedule:
+    """tune_sampling_schedule: calibrated warmup / thinning / sample count."""
+
+    def _model(self, scale=0.5):
+        rng = np.random.default_rng(0)
+        n = 24
+        nodes = [SpinNode() for _ in range(n)]
+        edges = [(nodes[i], nodes[(i + 1) % n]) for i in range(n)]
+        ebm = IsingEBM(
+            nodes,
+            edges,
+            jnp.asarray(rng.normal(0, 0.2, n)),
+            jnp.ones(n) * scale,
+            jnp.array(1.0),
+        )
+        program = IsingSamplingProgram(ebm, [Block(nodes[::2]), Block(nodes[1::2])], [])
+        return ebm, program
+
+    def test_returns_sane_schedule(self):
+        from hamon import tune_sampling_schedule
+
+        ebm, program = self._model()
+        init = hinton_init(jax.random.key(1), ebm, program.gibbs_spec.free_blocks, (4,))
+        sched, info = tune_sampling_schedule(
+            jax.random.key(2), ebm, program, init, target_ess=16, device=None
+        )
+        assert sched.n_samples == 16
+        assert sched.steps_per_sample >= 1
+        assert sched.n_warmup >= 1
+        assert sched.n_warmup == info["n_warmup"]
+        assert info["warmup_exit"] in ("stable", "plateau", "cap")
+        assert info["tau"] >= 1.0
+        assert math.isfinite(info["rhat_final"])
+
+    def test_deterministic(self):
+        from hamon import tune_sampling_schedule
+
+        ebm, program = self._model()
+        init = hinton_init(jax.random.key(1), ebm, program.gibbs_spec.free_blocks, (4,))
+        a = tune_sampling_schedule(
+            jax.random.key(2), ebm, program, init, target_ess=8, device=None
+        )
+        b = tune_sampling_schedule(
+            jax.random.key(2), ebm, program, init, target_ess=8, device=None
+        )
+        assert a[0] == b[0] and a[1] == b[1]
+
+    def test_cap_respected(self):
+        from hamon import tune_sampling_schedule
+        from hamon.tuning import _ENERGY_WARMUP_BATCH
+
+        ebm, program = self._model()
+        init = hinton_init(jax.random.key(1), ebm, program.gibbs_spec.free_blocks, (4,))
+        sched, info = tune_sampling_schedule(
+            jax.random.key(2),
+            ebm,
+            program,
+            init,
+            target_ess=8,
+            warmup_cap=100,
+            device=None,
+        )
+        assert info["n_warmup"] < 100 + _ENERGY_WARMUP_BATCH
+
+    def test_rejects_single_replica(self):
+        from hamon import tune_sampling_schedule
+
+        ebm, program = self._model()
+        init = hinton_init(jax.random.key(1), ebm, program.gibbs_spec.free_blocks, (1,))
+        with pytest.raises(ValueError, match="2 replicas"):
+            tune_sampling_schedule(jax.random.key(2), ebm, program, init, device=None)

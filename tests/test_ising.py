@@ -2,6 +2,7 @@ import unittest
 
 import equinox as eqx
 import jax
+import numpy as np
 from jax import numpy as jnp
 
 from hamon.block_management import Block
@@ -279,3 +280,113 @@ class TestIsingSample(unittest.TestCase):
 
         max_err = jnp.max(jnp.abs(empirical_marginals - exact_marginals))
         self.assertLess(float(max_err), 0.05)
+
+
+class TestPersistentChainAPI(unittest.TestCase):
+    """estimate_moments / estimate_kl_grad final-state returns (PCD support)."""
+
+    def setUp(self):
+        rng = np.random.default_rng(0)
+        n = 16
+        self.nodes = [SpinNode() for _ in range(n)]
+        self.edges = [(self.nodes[i], self.nodes[(i + 1) % n]) for i in range(n)]
+        self.ebm = IsingEBM(
+            self.nodes,
+            self.edges,
+            jnp.asarray(rng.normal(0, 0.2, n)),
+            jnp.ones(n) * 0.5,
+            jnp.array(1.0),
+        )
+        self.free_blocks = [Block(self.nodes[::2]), Block(self.nodes[1::2])]
+        self.program = IsingSamplingProgram(self.ebm, self.free_blocks, [])
+        self.schedule = SamplingSchedule(5, 4, 2)
+
+    def test_moments_unchanged_by_state_capture(self):
+        from hamon.models.ising import estimate_moments
+
+        init = hinton_init(
+            jax.random.key(0), self.ebm, self.program.gibbs_spec.free_blocks, ()
+        )
+        nm, em = estimate_moments(
+            jax.random.key(1),
+            self.nodes,
+            self.edges,
+            self.program,
+            self.schedule,
+            init,
+            [],
+        )
+        nm2, em2, final = estimate_moments(
+            jax.random.key(1),
+            self.nodes,
+            self.edges,
+            self.program,
+            self.schedule,
+            init,
+            [],
+            return_state=True,
+        )
+        assert jnp.array_equal(nm, nm2) and jnp.array_equal(em, em2)
+        assert len(final) == len(init)
+        for a, b in zip(final, init):
+            assert a.shape == b.shape and a.dtype == b.dtype
+
+    def test_kl_grad_negative_state_roundtrip(self):
+        from hamon.models.ising import IsingTrainingSpec, estimate_kl_grad
+
+        spec = IsingTrainingSpec(
+            self.ebm,
+            [Block([self.nodes[0]])],
+            [],
+            [Block(self.nodes[2::2]), Block(self.nodes[1::2])],
+            self.free_blocks,
+            SamplingSchedule(2, 3, 1),
+            SamplingSchedule(0, 3, 1),
+        )
+        pos_init = hinton_init(
+            jax.random.key(4),
+            self.ebm,
+            spec.program_positive.gibbs_spec.free_blocks,
+            (1, 2),
+        )
+        neg_init = hinton_init(jax.random.key(5), self.ebm, self.free_blocks, (3,))
+        data = [jnp.zeros((2, 1), dtype=bool)]
+
+        gw, gb, _, _, neg_final = estimate_kl_grad(
+            jax.random.key(6),
+            spec,
+            self.nodes,
+            self.edges,
+            data,
+            [],
+            pos_init,
+            neg_init,
+            return_negative_state=True,
+        )
+        # Gradients identical with/without state capture.
+        gw0, gb0, _, _ = estimate_kl_grad(
+            jax.random.key(6),
+            spec,
+            self.nodes,
+            self.edges,
+            data,
+            [],
+            pos_init,
+            neg_init,
+        )
+        assert jnp.array_equal(gw, gw0) and jnp.array_equal(gb, gb0)
+        # Final states have the init structure and feed the next step (PCD).
+        for a, b in zip(neg_final, neg_init):
+            assert a.shape == b.shape and a.dtype == b.dtype
+        out2 = estimate_kl_grad(
+            jax.random.key(7),
+            spec,
+            self.nodes,
+            self.edges,
+            data,
+            [],
+            pos_init,
+            neg_final,
+            return_negative_state=True,
+        )
+        assert len(out2) == 5

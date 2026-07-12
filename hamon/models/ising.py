@@ -3,6 +3,7 @@
 import contextlib
 import logging
 from collections.abc import Sequence
+from typing import Literal, overload
 
 import equinox as eqx
 import jax
@@ -27,7 +28,7 @@ from hamon.block_sampling import (
 from hamon.factor import FactorSamplingProgram
 from hamon.models.discrete_ebm import SpinEBMFactor, SpinGibbsConditional
 from hamon.models.ebm import AbstractFactorizedEBM, EBMFactor
-from hamon.observers import MomentAccumulatorObserver
+from hamon.observers import AbstractObserver, MomentAccumulatorObserver
 from hamon.pgm import AbstractNode, SpinNode, _IdentitySeq
 
 logger = logging.getLogger(__name__)
@@ -249,6 +250,35 @@ def hinton_init(
     return result
 
 
+class _MomentsAndStateObserver(AbstractObserver):
+    """Wrap a moment accumulator so the carry also tracks the latest state.
+
+    The final recorded free-block state is exactly the chain state when
+    sampling ends, which is what persistent-chain (PCD) training needs to
+    seed the next gradient step. The carry is ``(inner_carry, last_state)``;
+    the state slot must be seeded with a same-structure pytree (the initial
+    state) so the scan carry structure is fixed.
+    """
+
+    inner: MomentAccumulatorObserver
+
+    def __call__(
+        self,
+        program,
+        state_free,
+        state_clamped,
+        carry,
+        iteration,
+        global_state=None,
+    ):
+        mem, _ = carry
+        mem, obs = self.inner(
+            program, state_free, state_clamped, mem, iteration, global_state
+        )
+        return (mem, state_free), obs
+
+
+@overload
 def estimate_moments(
     key: Key[Array, ""],
     first_moment_nodes: list[AbstractNode],
@@ -258,6 +288,36 @@ def estimate_moments(
     init_state: list[Array],
     clamped_data: list[Array],
     *,
+    return_state: Literal[False] = False,
+    device: DeviceLike = "auto",
+) -> tuple[Array, Array]: ...
+
+
+@overload
+def estimate_moments(
+    key: Key[Array, ""],
+    first_moment_nodes: list[AbstractNode],
+    second_moment_edges: list[Edge],
+    program: BlockSamplingProgram,
+    schedule: SamplingSchedule,
+    init_state: list[Array],
+    clamped_data: list[Array],
+    *,
+    return_state: Literal[True],
+    device: DeviceLike = "auto",
+) -> tuple[Array, Array, list[Array]]: ...
+
+
+def estimate_moments(
+    key: Key[Array, ""],
+    first_moment_nodes: list[AbstractNode],
+    second_moment_edges: list[Edge],
+    program: BlockSamplingProgram,
+    schedule: SamplingSchedule,
+    init_state: list[Array],
+    clamped_data: list[Array],
+    *,
+    return_state: bool = False,
     device: DeviceLike = "auto",
 ):
     """
@@ -271,8 +331,12 @@ def estimate_moments(
         schedule: the schedule to use for sampling
         init_state: the variable values to use to initialize the sampling
         clamped_data: the variable values to assign to the clamped nodes
+        return_state: when True, also return the final free-block chain state
+            (the state at the last recorded sample), so callers can continue
+            the chain — e.g. persistent-chain (PCD) training.
     Returns:
-        the first and second moment data
+        the first and second moment data, plus the final chain state when
+        ``return_state`` is set.
     """
     moment_spec = []
     if first_moment_nodes:
@@ -283,18 +347,31 @@ def estimate_moments(
         return [2 * x.astype(jnp.int8) - 1 for x in state]
 
     observer = MomentAccumulatorObserver(moment_spec, _spin_transform)
-    init_mem = observer.init()
 
-    moments, _ = sample_with_observation(
-        key,
-        program,
-        schedule,
-        init_state,
-        clamped_data,
-        init_mem,
-        observer,
-        device=device,
-    )
+    if return_state:
+        state_observer = _MomentsAndStateObserver(observer)
+        (moments, final_state), _ = sample_with_observation(
+            key,
+            program,
+            schedule,
+            init_state,
+            clamped_data,
+            (observer.init(), init_state),
+            state_observer,
+            device=device,
+        )
+    else:
+        final_state = None
+        moments, _ = sample_with_observation(
+            key,
+            program,
+            schedule,
+            init_state,
+            clamped_data,
+            observer.init(),
+            observer,
+            device=device,
+        )
 
     if first_moment_nodes:
         node_sums, edge_sums = moments
@@ -305,6 +382,8 @@ def estimate_moments(
     node_moments = node_sums / schedule.n_samples
     edge_moments = edge_sums / schedule.n_samples
 
+    if return_state:
+        return node_moments, edge_moments, final_state
     return node_moments, edge_moments
 
 
@@ -318,6 +397,7 @@ def estimate_kl_grad(
     init_state_positive: list[Array],
     init_state_negative: list[Array],
     *,
+    return_negative_state: bool = False,
     device: DeviceLike = "auto",
 ) -> tuple:
     r"""
@@ -349,8 +429,17 @@ def estimate_kl_grad(
          shape [n_chains_pos batch nodes]
         init_state_negative: initial state for the negative sampling chain. Each array has
          shape [n_chains_neg nodes]
+        return_negative_state: when True, append the negative chains' final
+         states (same structure as ``init_state_negative``) to the returned
+         tuple. Feeding them back as the next step's ``init_state_negative``
+         gives persistent-chain (PCD) training: the chains track the slowly
+         moving model distribution instead of re-warming from scratch every
+         gradient step, so the negative schedule's ``n_warmup`` can drop to
+         ~0. (The positive phase is clamped to per-batch data, so persisting
+         it across batches is not meaningful and it is not returned.)
     Returns:
-        the weight gradients and the bias gradients
+        the weight gradients and the bias gradients (plus the final negative
+        chain state when ``return_negative_state`` is set)
     """
     n_chains_pos, batch_size = init_state_positive[0].shape[:2]
     n_chains_neg = init_state_negative[0].shape[0]
@@ -418,17 +507,32 @@ def estimate_kl_grad(
 
         keys_neg = jax.random.split(key_neg, n_chains_neg)
 
-        moms_b_neg, moms_w_neg = jax.vmap(
-            lambda k, i: estimate_moments(
-                k,
-                bias_nodes,
-                weight_edges,
-                training_spec.program_negative,
-                training_spec.schedule_negative,
-                i,
-                conditioning_values,
-            )
-        )(keys_neg, init_state_negative)
+        if return_negative_state:
+            moms_b_neg, moms_w_neg, final_state_neg = jax.vmap(
+                lambda k, i: estimate_moments(
+                    k,
+                    bias_nodes,
+                    weight_edges,
+                    training_spec.program_negative,
+                    training_spec.schedule_negative,
+                    i,
+                    conditioning_values,
+                    return_state=True,
+                )
+            )(keys_neg, init_state_negative)
+        else:
+            final_state_neg = None
+            moms_b_neg, moms_w_neg = jax.vmap(
+                lambda k, i: estimate_moments(
+                    k,
+                    bias_nodes,
+                    weight_edges,
+                    training_spec.program_negative,
+                    training_spec.schedule_negative,
+                    i,
+                    conditioning_values,
+                )
+            )(keys_neg, init_state_negative)
 
         float_type = training_spec.ebm.beta.dtype
         grad_b = -training_spec.ebm.beta * (
@@ -439,6 +543,14 @@ def estimate_kl_grad(
             jnp.mean(moms_w_pos, axis=(0, 1), dtype=float_type)
             - jnp.mean(moms_w_neg, axis=0, dtype=float_type)
         )
+        if return_negative_state:
+            return (
+                grad_w,
+                grad_b,
+                (moms_b_pos, moms_w_pos),
+                (moms_b_neg, moms_w_neg),
+                final_state_neg,
+            )
         return grad_w, grad_b, (moms_b_pos, moms_w_pos), (moms_b_neg, moms_w_neg)
 
 

@@ -7,8 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`tune_sampling_schedule`: calibrated `SamplingSchedule`s instead of
+  hand-picked constants.** Measures, at the current model parameters, the
+  warmup a plain block-Gibbs phase needs (the adaptive batched R̂ machinery
+  from the energy grid, run over independent replicas — stable / plateau /
+  cap exits; single-series stopping threshold 1.25, the ~p95 of its null),
+  the energy autocorrelation time τ (thinning ≈ τ makes recorded samples
+  approximately independent), and sets `n_samples` from a target effective
+  sample size. Designed as a calibrate-then-freeze step — e.g. once per
+  training epoch — so a jitted epoch stays one compiled scan. A plateau exit
+  logs a warning: plain Gibbs is trapped on that target and tempered
+  sampling (`autotune`) is the honest fix.
+
+- **Persistent-chain (PCD) training support.** `estimate_moments` gains
+  `return_state=True` (the final free-block chain state, via an observer
+  wrapper — moments are bit-identical with or without capture) and
+  `estimate_kl_grad` gains `return_negative_state=True`, so the negative
+  chains can persist across gradient steps instead of re-warming from a
+  fresh `hinton_init` every step: they track the slowly moving model
+  distribution and the negative schedule's warmup drops to zero after a
+  single up-front pre-warm. Gradients are bit-identical with or without the
+  flag.
+
 ### Changed
 
+- **MNIST training test:** vectorized (numpy) graph construction; schedules
+  are now calibrated via `tune_sampling_schedule` instead of hand-picked
+  constants — separately for the data-clamped positive phase, the free
+  negative phase, and the eval draw. Calibration is repeated over several
+  segments per epoch because the chain mixing time τ grows as the parameters
+  move away from zero (measured: negative τ 1.0 → 1.7 in the first 20 of ~360
+  steps), so a schedule fixed at the start of the epoch under-thins the later
+  steps; thinning is quantised to powers of two to bound recompiles. The
+  negative phase trains with persistent chains (PCD) threaded through the
+  segment scans. Runtime ~800 s → ~490 s at equal accuracy.
 - **The energy-grid barrier seed's warmup is now adaptive** (was a fixed 500
   sweeps). Warmup runs in 50-sweep batches and stops on the earliest of:
   **stable** — a running cross-restart Gelman–Rubin R̂ of batch-end energies
@@ -26,8 +60,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   data-dependent, so grid-seeded results are **not bit-identical** to the
   previous fixed-warmup behaviour (a deliberate behaviour change; the
   `warmup` parameter now means the cap).
-
-### Changed
 
 - **Energy-grid barrier seed runs as one batched call; repeat `ising_sample`
   calls stop recompiling. Bit-identical.** Two cold/warm-path cuts found by a
@@ -73,8 +105,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Flood after: `isinstance` ×0.9M, node hash ×0.8M (57 ms), partition/
   `is_array` out of the profile top-40. Samples bit-identical (byte-equal
   end-to-end at L=64 against the original pre-optimization reference).
-
-### Changed
 
 - **Per-chain program rebuilds are now O(1) in graph size: 35× faster at
   128×128, bit-identical.** `nrpt` rebuilds one sampling program per chain per

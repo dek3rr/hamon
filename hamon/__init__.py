@@ -55,6 +55,7 @@ from .nrpt import optimize_schedule as optimize_schedule
 from .tuning import tune_schedule as tune_schedule
 from .tuning import tune_chains as tune_chains
 from .tuning import tune_exploration as tune_exploration
+from .tuning import tune_sampling_schedule as tune_sampling_schedule
 from .autotune import autotune as autotune
 from .autotune import autosample as autosample
 from .autotune import NRPTPlan as NRPTPlan
