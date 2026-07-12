@@ -451,3 +451,105 @@ class TestChainMasking:
                 pad_chains_to=8,
                 device=None,
             )
+
+
+class TestAdaptiveGridWarmup:
+    """The energy-grid barrier seed's adaptive warmup (batched, R̂-stopped)."""
+
+    def _source(self, weight_scale=0.3, frustrated=False, seed=0):
+        from hamon.nrpt import _ChainSource
+
+        rng = np.random.default_rng(seed)
+        n = 36
+        nodes = [SpinNode() for _ in range(n)]
+        edges = [(nodes[i], nodes[(i + 1) % n]) for i in range(n)]
+        if frustrated:
+            w = jnp.asarray(rng.choice([-1.0, 1.0], size=n) * weight_scale)
+        else:
+            w = jnp.ones(n) * weight_scale
+        biases = jnp.asarray(rng.normal(0, 0.1, size=n))
+        ebm = IsingEBM(nodes, edges, biases, w, jnp.array(1.0))
+        program = IsingSamplingProgram(ebm, [Block(nodes[::2]), Block(nodes[1::2])], [])
+        src = _ChainSource(None, None, ebm, program)
+        k = jax.random.key(11)
+
+        def init_factory(n_chains, ebms, programs):
+            fb = programs[0].gibbs_spec.free_blocks
+            ks = jax.random.split(k, n_chains)
+            return [hinton_init(ks[i], ebms[0], fb, ()) for i in range(n_chains)]
+
+        return src, init_factory
+
+    def test_window_rhat_converged_vs_split(self):
+        from hamon.tuning import _ENERGY_WARMUP_RHAT, _window_rhat_max
+
+        rng = np.random.default_rng(0)
+        betas = np.linspace(0.0, 1.0, 11)
+        # Converged: iid energies across restarts — R̂ near 1, below the
+        # calibrated stopping threshold in the typical case.
+        conv = rng.normal(size=(4, 11, 8))
+        rh_conv = np.median(
+            [_window_rhat_max(rng.normal(size=(4, 11, 8)), betas) for _ in range(20)]
+        )
+        assert rh_conv < _ENERGY_WARMUP_RHAT
+        # Split basins: two well-separated means — R̂ far above the threshold.
+        split = rng.normal(size=(4, 11, 8)) * 0.1
+        split[:, :, :4] += 10.0
+        assert _window_rhat_max(split, betas) > 2.0
+        # β = 0 lane is excluded: split ONLY at β=0 must not trigger.
+        only_b0 = rng.normal(size=(4, 11, 8)) * 0.1
+        only_b0[:, 0, :4] += 10.0
+        assert _window_rhat_max(only_b0, betas) < _ENERGY_WARMUP_RHAT
+        del conv, split
+
+    def test_easy_target_stops_early(self, caplog):
+        import logging
+
+        from hamon.tuning import _estimate_barrier_energy
+
+        src, init_factory = self._source(weight_scale=0.3)
+        with caplog.at_level(logging.DEBUG, logger="hamon.tuning"):
+            lam, rhat = _estimate_barrier_energy(
+                jax.random.key(3),
+                src,
+                init_factory,
+                [],
+                (0.0, 1.0),
+                None,
+                n_grid=5,
+                n_samples=60,
+                restarts=4,
+            )
+        assert math.isfinite(lam) and lam >= 0.0
+        assert math.isfinite(rhat)
+        exits = [r for r in caplog.records if "exit)" in r.getMessage()]
+        assert exits, "expected a warmup-exit log line"
+        msg = exits[-1].getMessage()
+        assert "stable exit" in msg or "plateau exit" in msg
+        # Never runs past the cap.
+        sweeps = int(msg.split()[3])
+        assert sweeps <= 2000
+
+    def test_cap_is_respected(self, caplog):
+        import logging
+
+        from hamon.tuning import _ENERGY_WARMUP_BATCH, _estimate_barrier_energy
+
+        src, init_factory = self._source(weight_scale=0.3)
+        cap = 100
+        with caplog.at_level(logging.DEBUG, logger="hamon.tuning"):
+            _estimate_barrier_energy(
+                jax.random.key(3),
+                src,
+                init_factory,
+                [],
+                (0.0, 1.0),
+                None,
+                n_grid=5,
+                warmup=cap,
+                n_samples=40,
+                restarts=4,
+            )
+        msg = [r.getMessage() for r in caplog.records if "exit)" in r.getMessage()][-1]
+        sweeps = int(msg.split()[3])
+        assert sweeps < cap + _ENERGY_WARMUP_BATCH

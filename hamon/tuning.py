@@ -319,8 +319,7 @@ def tune_schedule(
         )
         phase += 1
         logger.info(
-            "tune_schedule tune %d/%d: Lambda=%.3f mean_acceptance=%.3f "
-            "rej_std=%.4g max|dbeta|=%.4g rounds=%d",
+            "tune_schedule tune %d/%d: Lambda=%.3f mean_acceptance=%.3f rej_std=%.4g max|dbeta|=%.4g rounds=%d",
             phase,
             n_tune,
             phase_lambda,
@@ -418,10 +417,78 @@ def _probe_history_entry(
 # Energy-variance barrier pre-estimate (Syed et al. 2021, Theorem 2). Used to
 # seed the chain-count search so it converges in one probe instead of two.
 _ENERGY_GRID = 11
-_ENERGY_WARMUP = 500
 _ENERGY_SAMPLES = 500
 _ENERGY_RESTARTS = 8  # independent chains per β (coverage + the R̂ trap detector)
 _ENERGY_RHAT_MAX = 1.1  # Gelman–Rubin cutoff: above this, trust the PT pilot
+
+# Adaptive warmup: run in fixed-size batches and stop on a running
+# cross-restart R̂ of the batch-end energies. Easy targets equilibrate in a
+# couple hundred sweeps (the old fixed 500 was pure margin); hard-but-mixing
+# targets may extend up to _ENERGY_WARMUP_MAX; trapped (glassy) targets show
+# an R̂ plateau — more local sweeps cannot merge basins — and exit early, since
+# the downstream R̂ trust gate will route them to the max_chains pilot anyway.
+_ENERGY_WARMUP_BATCH = 50  # sweeps per warmup batch (one compiled kernel)
+_ENERGY_WARMUP_MIN = 200  # earliest sweep count at which stopping is checked
+_ENERGY_WARMUP_MAX = 2000  # hard ceiling (was a fixed 500 — hard targets get 4x)
+_ENERGY_WARMUP_WINDOW = 4  # batch-end snapshots per restart in the running R̂
+_ENERGY_WARMUP_PASSES = 2  # consecutive R̂ passes required (guards noisy R̂)
+# Stopping threshold for the *window* R̂ — deliberately looser than the final
+# trust gate's _ENERGY_RHAT_MAX: with only W=4 snapshots per restart the R̂
+# estimator is noisy even for perfectly converged chains. Calibrated as the
+# ~p95 of the null distribution of max-over-grid R̂ at (R=8 restarts, W=4,
+# 10 informative β) — simulated: p50≈1.22, p90≈1.38, p95≈1.44 — so converged
+# chains pass ~95% of checks while split basins (R̂ ≳ 2) never do. Recalibrate
+# if _ENERGY_WARMUP_WINDOW, _ENERGY_RESTARTS, or _ENERGY_GRID change.
+_ENERGY_WARMUP_RHAT = 1.45
+_ENERGY_PLATEAU_K = 3  # consecutive no-improvement checks ⇒ trapped, stop
+_ENERGY_PLATEAU_TOL = 0.02  # relative R̂ improvement that resets the plateau
+_ENERGY_SAMPLING_TAG = 0x53414D50  # "SAMP": fold_in tag for the sampling keys
+
+
+@eqx.filter_jit
+def _grid_sweep(keys, base_prog, sched, states, clamp_state, stacked_pbi, f_obs, carry):
+    """One vmapped sweep over every (β, restart) lane of the energy grid.
+
+    Each lane runs ``_sample_with_observation_core`` with its own β-tempered
+    interaction tensors (stacked and vmapped, as in nrpt's per-chain-sequence
+    mode). Serves both warmup batches (``sched = (B, 1, 1)`` — returns the
+    state after B sweeps) and the recording pass (``sched = (0, ns, 1)``).
+    Module-level so all batches and repeat calls share one traced kernel per
+    schedule.
+    """
+    from hamon.block_sampling import _sample_with_observation_core
+    from hamon.nrpt import _make_pbi_in_axes
+
+    nb = len(states)
+    pbi_axes = _make_pbi_in_axes(stacked_pbi)
+
+    def _lane(k, init_free, pbi_c):
+        prog_c = eqx.tree_at(lambda p: p.per_block_interactions, base_prog, pbi_c)
+        _, res = _sample_with_observation_core(
+            k, prog_c, sched, init_free, clamp_state, carry, f_obs
+        )
+        return res
+
+    return jax.vmap(_lane, in_axes=(0, [0] * nb, pbi_axes))(keys, states, stacked_pbi)
+
+
+def _window_rhat_max(e_window: np.ndarray, betas: np.ndarray) -> float:
+    """Max over β>0 of the Gelman–Rubin R̂ of batch-end energy snapshots.
+
+    ``e_window``: (W, G, R) — W batch-end snapshots for R restarts at G grid
+    points. Same estimator as the final trust gate, with the recorded-sample
+    window replaced by the batch-end window.
+    """
+    W = e_window.shape[0]
+    rhs = []
+    for i, b in enumerate(betas):
+        if b <= 0.0:  # β=0 mixes trivially; its R̂ is uninformative
+            continue
+        v = e_window[:, i, :]  # (W, R)
+        within = float(v.var(axis=0).mean())
+        between = W * float(v.mean(axis=0).var(ddof=1))
+        rhs.append(np.sqrt(((W - 1) / W * within + between / W) / max(within, 1e-12)))
+    return float(max(rhs, default=1.0))
 
 
 @eqx.filter_jit
@@ -456,7 +523,7 @@ def _estimate_barrier_energy(
     dev,
     *,
     n_grid: int = _ENERGY_GRID,
-    warmup: int = _ENERGY_WARMUP,
+    warmup: int = _ENERGY_WARMUP_MAX,
     n_samples: int = _ENERGY_SAMPLES,
     restarts: int = _ENERGY_RESTARTS,
 ) -> tuple[float, float]:
@@ -482,6 +549,27 @@ def _estimate_barrier_energy(
     but truncated support — it measures whether independent starts converge to the
     same distribution, which is exactly the property that fails.
 
+    **Adaptive warmup.** Warmup runs in ``_ENERGY_WARMUP_BATCH``-sweep batches
+    and stops on the earliest of three exits, so easy targets pay a fraction of
+    a fixed budget while hard-but-mixing targets get up to ``warmup`` (default
+    ``_ENERGY_WARMUP_MAX`` — 4× the old fixed 500) sweeps:
+
+    - **stable** — the running cross-restart R̂ of batch-end energies (same
+      estimator as the final trust gate, over a ``_ENERGY_WARMUP_WINDOW``-batch
+      window) is below ``_ENERGY_RHAT_MAX`` for ``_ENERGY_WARMUP_PASSES``
+      consecutive checks;
+    - **plateau** — R̂ has stopped improving while still failing: the restarts
+      are trapped in separate basins and more *local* sweeps cannot merge them
+      (the identifiability failure mode of glassy targets), so further warmup
+      is wasted — the final R̂ gate will route the caller to the max_chains
+      pilot regardless;
+    - **cap** — ``warmup`` total sweeps.
+
+    Stability detection is necessary, not sufficient — a trapped chain looks
+    stable — which is why early stopping only ever triggers on *cross-restart
+    agreement*, and the post-hoc R̂ trust gate on the recorded window remains
+    the arbiter, unchanged.
+
     Returns ``(Λ̂, R̂_max)``.
     """
     import contextlib
@@ -489,15 +577,15 @@ def _estimate_barrier_energy(
     from hamon._nrpt_energy import _make_reference_ebm
     from hamon.block_sampling import (
         SamplingSchedule,
-        _sample_with_observation_core,
     )
     from hamon.device import tree_device_put
-    from hamon.nrpt import _make_pbi_in_axes, _stack_pbi_across_chains
+    from hamon.nrpt import _stack_pbi_across_chains
     from hamon.observers import StateObserver
 
     betas = np.linspace(beta_range[0], beta_range[1], int(n_grid))
     G, R, ns = len(betas), max(2, int(restarts)), int(n_samples)
-    sched = SamplingSchedule(int(warmup), ns, 1)
+    sched_batch = SamplingSchedule(_ENERGY_WARMUP_BATCH, 1, 1)
+    sched_sample = SamplingSchedule(0, ns, 1)
 
     # The base EBM (β=1) and block spec are identical across the grid — only the
     # tempered SAMPLING program (weights) changes. Build them once and jit the
@@ -505,16 +593,16 @@ def _estimate_barrier_energy(
     one = jnp.asarray(1.0)
     base_ebm, beta_ref = _make_reference_ebm(source.ebms_for_init(one[None]), one[None])
 
-    # One batched sampling call over the whole (β grid × restarts) lattice
-    # instead of ``n_grid`` sequential dispatch+sync rounds — the grid is
-    # dispatch-bound, not compute-bound. Per-lane keys, inits, and interaction
-    # tensors reproduce the previous per-β
-    # ``sample_states_batched(fold_in(key, i), …)`` runs exactly: lane
-    # ``i·R + c`` gets the key ``split(fold_in(key, i))[c]``, the same init, and
-    # the *actual* β_i-tempered program's interaction arrays (stacked across
-    # lanes and vmapped, the same mechanism as nrpt's per-chain-sequence mode —
-    # no temperature-linearity assumed), so every lane's sample stream and
-    # therefore Λ̂ and R̂ are bit-identical to the sequential path.
+    # Batched sampling over the whole (β grid × restarts) lattice — one vmapped
+    # call per warmup batch and one for the recording pass, instead of
+    # ``n_grid`` sequential dispatch+sync rounds. Lane ``i·R + c`` owns the key
+    # ``split(fold_in(key, i))[c]``; warmup batch ``b`` folds in ``b`` and the
+    # recording pass folds in ``_ENERGY_SAMPLING_TAG``, so streams are
+    # deterministic per seed (the adaptive warmup makes the sweep count — and
+    # hence the streams — data-dependent, unlike the old fixed-warmup run).
+    # Each lane samples with the *actual* β_i-tempered program's interaction
+    # arrays (stacked and vmapped, the same mechanism as nrpt's
+    # per-chain-sequence mode — no temperature-linearity assumed).
     keys_flat = jnp.concatenate(
         [jax.random.split(jax.random.fold_in(key, i), R) for i in range(G)]
     )
@@ -544,7 +632,6 @@ def _estimate_barrier_energy(
         ]
         for b in range(nb)
     ]
-    pbi_axes = _make_pbi_in_axes(stacked_pbi)
 
     if dev is not None:
         keys_flat, base_prog, init_flat, stacked_pbi, clamp_dev = tree_device_put(
@@ -558,17 +645,60 @@ def _estimate_barrier_energy(
 
     f_obs = StateObserver(spec.free_blocks)
     carry = f_obs.init()
+    fold_all = jax.vmap(jax.random.fold_in, in_axes=(0, None))
 
-    def _one_lane(k, init_free, pbi_c):
-        prog_c = eqx.tree_at(lambda p: p.per_block_interactions, base_prog, pbi_c)
-        _, res = _sample_with_observation_core(
-            k, prog_c, sched, init_free, clamp_dev, carry, f_obs
-        )
-        return res
+    cap = max(int(warmup), _ENERGY_WARMUP_BATCH)
+    check_from = min(_ENERGY_WARMUP_MIN, cap)
 
     with device_ctx:
-        raw = jax.vmap(_one_lane, in_axes=(0, [0] * nb, pbi_axes))(
-            keys_flat, init_flat, stacked_pbi
+        states = init_flat
+        e_hist: list[np.ndarray] = []  # batch-end energies, each (G, R)
+        rh_best, rh_passes, rh_stalls = float("inf"), 0, 0
+        total, exit_reason = 0, "cap"
+        while total < cap:
+            out = _grid_sweep(
+                fold_all(keys_flat, total // _ENERGY_WARMUP_BATCH),
+                base_prog,
+                sched_batch,
+                states,
+                clamp_dev,
+                stacked_pbi,
+                f_obs,
+                carry,
+            )
+            states = [o[:, 0] for o in out]
+            total += _ENERGY_WARMUP_BATCH
+            e_hist.append(
+                np.asarray(
+                    _grid_base_energies(base_ebm, beta_ref, spec, states, clamp_state)
+                ).reshape(G, R)
+            )
+            if total < check_from or len(e_hist) < _ENERGY_WARMUP_WINDOW:
+                continue
+            rh = _window_rhat_max(np.stack(e_hist[-_ENERGY_WARMUP_WINDOW:]), betas)
+            logger.debug("energy grid warmup: %d sweeps, window rhat=%.3f", total, rh)
+            rh_passes = rh_passes + 1 if rh < _ENERGY_WARMUP_RHAT else 0
+            if rh_passes >= _ENERGY_WARMUP_PASSES:
+                exit_reason = "stable"
+                break
+            if rh < rh_best * (1.0 - _ENERGY_PLATEAU_TOL):
+                rh_best, rh_stalls = rh, 0
+            else:
+                rh_stalls += 1
+                if rh_stalls >= _ENERGY_PLATEAU_K:
+                    exit_reason = "plateau"  # trapped basins: local sweeps
+                    break  # cannot help; the final R̂ gate handles trust
+
+        logger.debug("energy grid warmup: %d sweeps (%s exit)", total, exit_reason)
+        raw = _grid_sweep(
+            fold_all(keys_flat, _ENERGY_SAMPLING_TAG),
+            base_prog,
+            sched_sample,
+            states,
+            clamp_dev,
+            stacked_pbi,
+            f_obs,
+            carry,
         )  # list per free block, each (G*R, ns, …)
 
     lambdas, rhats = [], []
