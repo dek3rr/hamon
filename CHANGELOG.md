@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The energy-grid barrier seed's warmup is now adaptive** (was a fixed 500
+  sweeps). Warmup runs in 50-sweep batches and stops on the earliest of:
+  **stable** — a running cross-restart Gelman–Rubin R̂ of batch-end energies
+  (window of 4 batches, threshold 1.45 — calibrated as the p95 of the null
+  max-over-grid R̂ at this window size, so converged chains pass while split
+  basins, R̂ ≳ 2, never do) passes twice consecutively; **plateau** — R̂ has
+  stopped improving while failing, i.e. the restarts are trapped in separate
+  basins and more local sweeps cannot merge them, so warmup stops early and
+  the existing post-hoc R̂ trust gate (unchanged) routes to the max_chains
+  pilot as before; or **cap** — now 2000 sweeps (4× the old fixed budget), so
+  hard-but-mixing targets that genuinely need more than 500 sweeps get them.
+  Measured: easy targets stop at 250 sweeps (2× less warmup; the old fixed
+  500 was ~26% of the CPU grid stage), trapped targets stop at ~350 instead
+  of burning 500. Warmup sweep counts are deterministic per seed but
+  data-dependent, so grid-seeded results are **not bit-identical** to the
+  previous fixed-warmup behaviour (a deliberate behaviour change; the
+  `warmup` parameter now means the cap).
+
+### Changed
+
 - **Energy-grid barrier seed runs as one batched call; repeat `ising_sample`
   calls stop recompiling. Bit-identical.** Two cold/warm-path cuts found by a
   compile audit (`jax_log_compiles` + `jax_explain_cache_misses`):
