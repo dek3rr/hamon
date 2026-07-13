@@ -375,14 +375,32 @@ def tune_schedule(
         identified = barrier_is_identified(float(rtd["tau_observed"]), n_rt)
         stats["barrier_identified"] = identified
         if not identified:
-            logger.warning(
-                "tune_schedule: barrier NOT identified (tau_obs=%.4f, round_trips=%d) "
-                "— DEO conveyor stalled, Lambda=%.2f is a within-basin artifact "
-                "(biased low); add chains or equalize the ladder",
-                float(rtd["tau_observed"]),
-                n_rt,
-                float(rtd["Lambda"]),
-            )
+            # A DEO round trip needs >= 2*(N-1) rounds to complete one 0->top->0
+            # traversal. Below that, 0 round trips is a *budget* artifact — the
+            # conveyor had no chance, so Σrej is simply the best estimate on hand;
+            # say so instead of crying "within-basin / add chains" (which is wrong
+            # advice when the ladder was never given room to round-trip).
+            min_rt_rounds = 2 * (int(betas.shape[0]) - 1)
+            if n_rounds < min_rt_rounds:
+                logger.info(
+                    "tune_schedule: barrier not identified, but the window is "
+                    "budget-limited (n_rounds=%d < 2*(N-1)=%d — too short to complete "
+                    "a round trip); Lambda=%.2f is the Σrej estimate, used as-is. "
+                    "Give it more rounds to identify the barrier.",
+                    n_rounds,
+                    min_rt_rounds,
+                    float(rtd["Lambda"]),
+                )
+            else:
+                logger.warning(
+                    "tune_schedule: barrier NOT identified (tau_obs=%.4f, "
+                    "round_trips=%d) — DEO conveyor stalled, Lambda=%.2f is a "
+                    "within-basin artifact (biased low); add chains or equalize "
+                    "the ladder",
+                    float(rtd["tau_observed"]),
+                    n_rt,
+                    float(rtd["Lambda"]),
+                )
     return states, stats
 
 
@@ -949,6 +967,17 @@ def tune_sampling_schedule(
     return schedule, info
 
 
+# Production-window floor for a discovery probe, as a multiple of the minimum
+# traversal length 2*(n-1). A DEO round trip needs >= 2*(n-1) rounds just to
+# complete once; a few more are needed for the observed rate tau_obs to clear
+# the identification floor (see hamon.round_trips.barrier_is_identified).
+# Empirically ~5-6x identifies a high-N pilot on a 2D Ising ferromagnet, so a
+# probe whose rounds_per_probe falls short is topped up to this — which only
+# ever lifts high-N probes (the max keeps rounds_per_probe otherwise), and only
+# the production window (the cheaper tuning phases stay at rounds_per_probe).
+_PROBE_MIN_RT_ROUNDS_FACTOR = 6
+
+
 def tune_chains(
     key: jax.Array,
     ebm_factory: Callable | None = None,
@@ -1032,7 +1061,10 @@ def tune_chains(
         target_acceptance: desired per-pair swap acceptance rate. Default 0.5 —
             the round-trip-optimal rejection r* = 1/2 (N* ≈ 2Λ; Syed et al.), not
             the 0.77 from the reversible-PT literature.
-        rounds_per_probe: rounds per probe (and for the final production probe)
+        rounds_per_probe: rounds per probe. A probe's production window is topped
+            up to ``6*(n-1)`` when that exceeds this (so a high-N pilot can
+            actually round-trip and identify the barrier); the tuning phases and
+            low-N probes stay at ``rounds_per_probe``.
         n_tune_per_probe: schedule tuning iterations for the final probe
         max_iters: maximum discovery iterations
         min_chains: floor on chain count
@@ -1114,6 +1146,14 @@ def tune_chains(
         programs = source.programs_for_init(n, ebms)
         inits = init_factory(n, ebms, programs)
         key, k_probe = jax.random.split(key)
+        # Size the production window so a round trip is actually feasible at this
+        # N: a high-N pilot with only rounds_per_probe rounds can't complete one
+        # (2*(n-1) > rounds_per_probe), so its Σrej barrier reads as an
+        # unidentified within-basin artifact purely on budget. Top up to
+        # _PROBE_MIN_RT_ROUNDS_FACTOR*(n-1) — production only; the tuning phases
+        # stay at rounds_per_probe (they estimate Σrej, which needs no round
+        # trips). The max leaves low-N probes untouched.
+        probe_rounds = max(rounds_per_probe, _PROBE_MIN_RT_ROUNDS_FACTOR * (n - 1))
         # Forward whichever route the caller used; tune_schedule re-dispatches
         # through its own _ChainSource. The concrete device (or None) bypasses its
         # heuristic, so probes never flip devices. Tuning is adaptive, so a
@@ -1124,7 +1164,7 @@ def tune_chains(
             program_factory,
             inits,
             clamp_state,
-            n_rounds=rounds_per_probe,
+            n_rounds=probe_rounds,
             gibbs_steps_per_round=gibbs_steps_per_round,
             initial_betas=betas0,
             n_tune=n_tune_per_probe,
@@ -1148,11 +1188,16 @@ def tune_chains(
             "barrier_identified": stats.get("barrier_identified"),
         }
         if out["barrier_identified"] is False:
-            logger.warning(
-                "tune_chains: probe at n=%d did not round-trip; its Lambda_raw=%.2f "
-                "is biased low (conveyor stalled). The running-max Lambda guards N* "
-                "against this — a higher-N probe that round-trips will dominate.",
+            # tune_schedule already logged the authoritative gate message (INFO
+            # if this window was budget-limited, WARNING if a genuine stall).
+            # Add only the discovery-specific reassurance, at INFO, so a probe
+            # that under-resolves Λ does not read as an error.
+            logger.info(
+                "tune_chains: probe at n=%d (%d rounds) did not round-trip; its "
+                "Lambda_raw=%.2f may under-estimate the barrier. The running-max "
+                "Lambda guards N* — a higher-N probe that round-trips dominates.",
                 n,
+                probe_rounds,
                 out["Lambda_raw"],
             )
         probed[n] = out

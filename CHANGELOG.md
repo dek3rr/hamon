@@ -19,6 +19,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   samples and all modes are represented. On the 16×16 ferromagnet at β=1 the
   magnetization is now bimodal (~50/50) where it used to sit in one mode.
 
+- **Chain-count discovery no longer cries wolf on the high-N pilot.** With the
+  default `rounds_per_probe=200` and `max_chains=128`, `tune_chains`' fallback
+  pilot could never round-trip — a DEO round trip needs `≥ 2·(N−1) = 254` rounds
+  — so it always tripped the round-trip trust gate with a "barrier NOT identified
+  / within-basin artifact (biased low); add chains" WARNING, on exactly the
+  multimodal targets NRPT is for. Each discovery probe's **production window** is
+  now topped up to `6·(N−1)` rounds when that exceeds `rounds_per_probe` (production
+  only — the tuning phases, which estimate Λ from `Σ rej` and need no round trips,
+  stay at `rounds_per_probe`; low-N probes are untouched). The pilot now round-trips
+  and the barrier is genuinely identified at discovery (`barrier_identified=True`),
+  at the same discovered `N`.
+
 ### Changed
 
 - **`NRPTPlan.sample` and `autosample` gain a `tempered` flag (default `True`).**
@@ -30,6 +42,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   miss modes regardless of `tempered`). For the tempered path `steps_per_sample`
   thins by NRPT rounds and `n_warmup` discards leading rounds; the drawn sample
   count is independent of the tuning `n_rounds`.
+
+- **`tune_schedule`'s round-trip trust gate is budget-aware.** When the barrier
+  is not identified but the production window was too short for even one round
+  trip (`n_rounds < 2·(N−1)`), it now logs an INFO explaining the estimate is
+  budget-limited (Σrej used as-is) instead of the misleading "within-basin
+  artifact / add chains" WARNING, which is reserved for a genuine stall on an
+  adequate budget.
 
 ## [0.9.0] — 2026-07-12
 
