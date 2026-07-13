@@ -2,6 +2,8 @@
 tune_chains: adaptive per-phase rounds, keep-best schedule, combined
 phase stop, and the legacy (adaptive_tuning=False) escape hatch."""
 
+import logging
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -162,6 +164,52 @@ def test_discover_forwards_tune_tol():
         device="cpu",
     )
     assert 3 <= out["n_chains"] <= 24
+
+
+def test_budget_limited_stall_is_info_not_warning(caplog):
+    """A window too short for even one round trip (n_rounds < 2*(N-1)) is a
+    budget artifact, not a stalled conveyor: report it as INFO, not the scary
+    'within-basin artifact / add chains' WARNING (option 1)."""
+    # 64 chains but only n_rounds=60 < 2*(64-1)=126, so no round trip can complete.
+    ebm, prog, fb, betas, inits = _setup(4, 1.0, 64)
+    with caplog.at_level(logging.INFO, logger="hamon.tuning"):
+        stats = _run(ebm, prog, betas, inits, n_tune=1, rounds_per_tune=60)
+    assert stats["barrier_identified"] is False
+    msgs = [(r.levelname, r.getMessage()) for r in caplog.records]
+    assert any(lv == "INFO" and "budget-limited" in m for lv, m in msgs)
+    assert not any(lv == "WARNING" and "within-basin" in m for lv, m in msgs)
+
+
+def test_discovery_identifies_barrier_via_pilot_budget():
+    """The high-N pilot is topped up to _PROBE_MIN_RT_ROUNDS_FACTOR*(n-1) rounds
+    so it can actually round-trip — discovery then identifies the barrier on a
+    bimodal ferromagnet instead of returning a budget-stalled artifact (option 2).
+    """
+    nodes, edges, fb, ebms, progs = make_ising_grid(8, [1.0], coupling=1.0)
+
+    def init_factory(n_chains, chain_ebms, chain_programs):
+        f = chain_programs[0].gibbs_spec.free_blocks
+        return [
+            hinton_init(k, chain_ebms[0], f, ())
+            for k in jax.random.split(jax.random.key(7), n_chains)
+        ]
+
+    out = tune_chains(
+        jax.random.key(0),
+        ebm=ebms[-1],
+        program=progs[-1],
+        init_factory=init_factory,
+        beta_range=(0.2, 1.0),
+        gibbs_steps_per_round=2,
+        # 6*(48-1)=282 > rounds_per_probe, so the n=48 pilot is topped up from
+        # 200 to 282 production rounds (one traversal needs 2*(48-1)=94).
+        rounds_per_probe=200,
+        max_chains=48,
+        device="cpu",
+    )
+    # The barrier is identified (pilot round-tripped), not a within-basin artifact.
+    assert out["barrier_identified"] is True
+    assert out["history"][0]["barrier_identified"] is True  # the n=48 pilot
     assert out["converged_reason"] in {
         "chain_count",
         "lambda_stable",
