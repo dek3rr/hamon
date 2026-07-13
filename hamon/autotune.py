@@ -7,6 +7,8 @@ in ``hamon.nrpt``.
 
 from __future__ import annotations
 
+import logging
+import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -20,6 +22,8 @@ from hamon.device import DeviceLike, resolve_entry_device
 from hamon.models.ebm import AbstractEBM
 from hamon.nrpt import _ChainSource
 from hamon.tuning import tune_chains, tune_exploration, tune_schedule
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -108,13 +112,26 @@ class AutotuneReport:
         return "\n".join(lines)
 
 
+def _cold_trace_from_observations(observations: list, col_perm: jax.Array) -> jax.Array:
+    """Stack a cold-chain ``NRPTStateObserver`` output into ``(T, n_nodes)``.
+
+    ``observations`` is one array per free block, each ``(T, 1, *block_shape)``
+    — the leading axis is the round, the size-1 axis is the single observed
+    (cold) chain. Concatenate the blocks in free-block order, then permute the
+    columns into the caller's ``sample_nodes`` order via ``col_perm``.
+    """
+    cols = [jnp.reshape(o[:, 0], (o.shape[0], -1)) for o in observations]
+    flat = jnp.concatenate(cols, axis=1)
+    return flat[:, col_perm]
+
+
 @dataclass
 class NRPTPlan:
-    """A tuned NRPT configuration plus a warm cold-chain state.
+    """A tuned NRPT configuration plus a warm, equilibrated ladder.
 
     Returned by :func:`autotune`. Holds the discovered hyperparameters (N,
-    schedule, n_expl) and an equilibrated cold-chain state, so :meth:`sample`
-    can draw repeatedly and cheaply — no re-tuning, reusing the compiled loop.
+    schedule, n_expl) and the warm state of *every* chain, so :meth:`sample`
+    can draw repeatedly with no re-tuning, reusing the compiled round loop.
 
     Attributes:
         n_chains / betas / gibbs_steps_per_round / Lambda: the tuned config.
@@ -128,6 +145,12 @@ class NRPTPlan:
     Lambda: float
     device: Any
     report: AutotuneReport
+    # Tempered-draw state (the correct, multimodal-safe sampler):
+    _source: _ChainSource
+    _betas_dev: jax.Array
+    _warm_ladder: list
+    _col_perm: jax.Array
+    # Single-chain fast-draw state (tempered=False):
     _cold_program: BlockSamplingProgram
     _warm_state: list
     _clamp_state: list
@@ -140,16 +163,96 @@ class NRPTPlan:
         *,
         n_warmup: int = 0,
         steps_per_sample: int = 1,
+        tempered: bool = True,
     ) -> jax.Array:
-        """Draw ``n_samples`` from the target (cold chain) — cheap and repeatable.
+        """Draw ``n_samples`` from the target (cold chain).
 
-        Runs single-chain block Gibbs at the tuned cold β from the stored warm
-        state (the established post-NRPT draw). Returns a ``(n_samples,
-        n_nodes)`` array; call again with a fresh ``key`` for more, with no
-        re-tuning.
+        ``tempered=True`` (default) draws the **tempered cold chain**: it runs
+        the tuned NRPT ladder from the stored warm ladder and records the cold
+        chain each round. Because tempering stays active during the draw, the
+        hot chains keep crossing energy barriers and DEO swaps carry that mixing
+        down to the cold chain — so the samples represent *all* modes of a
+        multimodal target. This is the correct sampler whenever the cold chain
+        does not mix on its own (the case NRPT exists for). Returns a
+        ``(n_samples, n_nodes)`` array in ``sample_nodes`` column order; call
+        again with a fresh ``key`` for independent draws, with no re-tuning (the
+        compiled round loop is reused across same-shape draws).
+
+        ``tempered=False`` runs plain single-chain block Gibbs at the tuned cold
+        β from one warm cold state — cheaper, but a single chain **cannot cross
+        barriers**, so it mode-collapses on a multimodal target. Use it only
+        when the cold chain is known to mix on its own (unimodal / low barrier).
+        A warning is emitted if the tuning run round-tripped, which is direct
+        evidence the target needs tempering to mix.
+
+        ``steps_per_sample`` is the number of rounds between recorded samples
+        (thinning); ``n_warmup`` leading rounds are discarded before recording.
         """
+        if tempered:
+            return self._sample_tempered(
+                key, int(n_samples), int(n_warmup), int(steps_per_sample)
+            )
+        return self._sample_cold_gibbs(key, n_samples, n_warmup, steps_per_sample)
+
+    def _sample_tempered(
+        self, key: jax.Array, n_samples: int, n_warmup: int, steps_per_sample: int
+    ) -> jax.Array:
+        from hamon.nrpt import nrpt
+        from hamon.observers import NRPTStateObserver
+
+        steps = max(1, steps_per_sample)
+        n_total = n_warmup + n_samples * steps
+        dev = self.device if self.device is not None else "auto"
+        ebms, programs = self._source.nrpt_args(self._betas_dev)
+        _, stats = nrpt(
+            key,
+            ebms,
+            programs,
+            self._warm_ladder,
+            self._clamp_state,
+            n_total,
+            self.gibbs_steps_per_round,
+            betas=self._betas_dev,
+            track_round_trips=False,
+            observer=NRPTStateObserver(chain_indices=(-1,)),
+            device=dev,
+        )
+        trace = _cold_trace_from_observations(stats["observations"], self._col_perm)
+        # Discard warmup, thin by steps_per_sample, keep exactly n_samples rows.
+        return trace[n_warmup::steps][:n_samples]
+
+    def _sample_cold_gibbs(
+        self,
+        key: jax.Array,
+        n_samples: int,
+        n_warmup: int,
+        steps_per_sample: int,
+    ) -> jax.Array:
         from hamon.block_sampling import SamplingSchedule, sample_states
 
+        # Flag the silent-collapse risk of a decoupled cold chain, keyed on the
+        # tuning run's round-trip evidence. warnings.warn (not logging) so it is
+        # visible by default and, under the default filter, fires once per
+        # call-site rather than once per draw.
+        rt = self.report.total_round_trips if self.report is not None else None
+        if rt:
+            warnings.warn(
+                f"NRPTPlan.sample(tempered=False): the tuning run round-tripped "
+                f"{rt} time(s), so the cold target is multimodal and a single "
+                f"decoupled chain will mode-collapse. Use tempered=True (the "
+                f"default) for correct samples.",
+                stacklevel=3,
+            )
+        elif rt == 0:
+            # PT itself stalled — tempering never crossed the barrier, so even a
+            # tempered draw may miss modes; flag the ambiguity here too.
+            warnings.warn(
+                "NRPTPlan.sample(tempered=False): the tuning run recorded 0 round "
+                "trips — the ladder never crossed the barrier, so samples may "
+                "under-represent modes regardless of tempered. Raise max_chains "
+                "or n_rounds; otherwise prefer tempered=True.",
+                stacklevel=3,
+            )
         schedule = SamplingSchedule(n_warmup, n_samples, steps_per_sample)
         dev = self.device if self.device is not None else "auto"
         raw = sample_states(
@@ -475,12 +578,29 @@ def autotune(
         )
     obs_block = _obs_block(out_nodes)
 
+    # Column permutation mapping the tempered draw's free-block-order cold-chain
+    # observations to ``out_nodes`` order (identity when out_nodes is the default
+    # free-block order). Keyed by node identity — the free nodes are shared
+    # across every chain's program, so this is stable across the ladder.
+    flat_nodes = [n for b in cold_program.gibbs_spec.free_blocks for n in b.nodes]
+    _flat_pos = {id(n): j for j, n in enumerate(flat_nodes)}
+    try:
+        col_perm = jnp.asarray([_flat_pos[id(n)] for n in out_nodes], dtype=jnp.int32)
+    except KeyError as exc:
+        raise ValueError("sample_nodes must all be free nodes of the program.") from exc
+
     rt_diag = polish_stats.get("round_trip_diagnostics")
     total_round_trips = (
         int(np.sum(np.asarray(rt_diag["round_trips_per_chain"])))
         if rt_diag is not None
         else None
     )
+    if total_round_trips == 0:
+        logger.warning(
+            "autotune: the production run recorded 0 round trips — the cold "
+            "chain is not crossing barriers, so samples (tempered or not) may "
+            "under-represent some modes. Consider raising max_chains or n_rounds."
+        )
     report = AutotuneReport(
         n_chains=n_chains,
         gibbs_steps_per_round=n_expl,
@@ -500,6 +620,10 @@ def autotune(
         Lambda=Lambda,
         device=dev,
         report=report,
+        _source=source,
+        _betas_dev=betas,
+        _warm_ladder=warm_states,
+        _col_perm=col_perm,
         _cold_program=cold_program,
         _warm_state=warm_cold,
         _clamp_state=clamp_state,
@@ -513,6 +637,7 @@ def autosample(
     n_samples: int,
     n_warmup: int = 0,
     steps_per_sample: int = 1,
+    tempered: bool = True,
     **autotune_kwargs,
 ) -> tuple[jax.Array, AutotuneReport]:
     """One-shot: :func:`autotune` then draw — returns ``(samples, report)``.
@@ -522,10 +647,18 @@ def autosample(
     ``beta_range``, ``device``, …), then draws ``n_samples`` from the tuned plan.
     For repeated draws from one tuned configuration, call :func:`autotune` once
     and reuse :meth:`NRPTPlan.sample`.
+
+    ``tempered=True`` (default) draws the tempered cold chain, which represents
+    all modes of a multimodal target; pass ``tempered=False`` only when the cold
+    chain is known to mix on its own. See :meth:`NRPTPlan.sample`.
     """
     k_tune, k_draw = jax.random.split(key)
     plan = autotune(k_tune, **autotune_kwargs)
     samples = plan.sample(
-        k_draw, n_samples, n_warmup=n_warmup, steps_per_sample=steps_per_sample
+        k_draw,
+        n_samples,
+        n_warmup=n_warmup,
+        steps_per_sample=steps_per_sample,
+        tempered=tempered,
     )
     return samples, plan.report
