@@ -10,6 +10,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from hamon import Block, SpinNode, autosample, autotune
 from hamon.models import IsingEBM, IsingSamplingProgram, hinton_init
@@ -42,6 +43,51 @@ _KW = dict(
     n_rounds=300,
     device="cpu",
 )
+
+
+def _ferro_grid(L=8, coupling=1.0):
+    """Small 2D ferromagnet — strongly bimodal (all-up / all-down) at β=1."""
+    n2 = [[SpinNode() for _ in range(L)] for _ in range(L)]
+    nodes = [n for row in n2 for n in row]
+    edges = []
+    for i in range(L):
+        for j in range(L):
+            if j + 1 < L:
+                edges.append((n2[i][j], n2[i][j + 1]))
+            if i + 1 < L:
+                edges.append((n2[i][j], n2[i + 1][j]))
+    biases = jnp.zeros(len(nodes))
+    weights = jnp.ones(len(edges)) * coupling
+    even = [n2[i][j] for i in range(L) for j in range(L) if (i + j) % 2 == 0]
+    odd = [n2[i][j] for i in range(L) for j in range(L) if (i + j) % 2 == 1]
+    ebm = IsingEBM(nodes, edges, biases, weights, jnp.array(1.0))
+    program = IsingSamplingProgram(ebm, [Block(even), Block(odd)], [])
+
+    def init_factory(n_chains, ebms, programs):
+        fb = programs[0].gibbs_spec.free_blocks
+        keys = jax.random.split(jax.random.key(42), n_chains)
+        return [hinton_init(keys[c], ebms[0], fb, ()) for c in range(n_chains)]
+
+    return nodes, ebm, program, init_factory
+
+
+_BIMODAL_KW = dict(
+    clamp_state=[],
+    beta_range=(0.2, 1.0),
+    gibbs_steps_per_round=2,
+    max_chains=24,
+    rounds_per_probe=150,
+    n_tune=2,
+    n_polish=2,
+    n_rounds=400,
+    device="cpu",
+)
+
+
+def _mode_fractions(samples):
+    """Fraction of samples in the +m and -m magnetization modes."""
+    m = (2.0 * np.asarray(samples).astype(float) - 1.0).mean(axis=1)
+    return float((m > 0.2).mean()), float((m < -0.2).mean())
 
 
 class TestAutotune:
@@ -147,3 +193,59 @@ class TestAutotune:
             **_KW,
         )
         assert plan.n_chains >= 2
+
+
+class TestMultimodalSampling:
+    """The tempered draw must recover a multimodal target that a single decoupled
+    cold chain cannot (the whole point of NRPT)."""
+
+    def test_tempered_draw_recovers_both_modes(self):
+        # The tuned ladder round-trips on a bimodal ferromagnet, so the tempered
+        # draw (default) must visit BOTH magnetization modes, while the decoupled
+        # single-chain draw (tempered=False) collapses into one.
+        nodes, ebm, program, init_factory = _ferro_grid(8)
+        plan = autotune(
+            jax.random.key(0),
+            ebm=ebm,
+            program=program,
+            init_factory=init_factory,
+            sample_nodes=nodes,
+            **_BIMODAL_KW,
+        )
+        assert plan.report.total_round_trips and plan.report.total_round_trips > 0
+
+        tempered = plan.sample(jax.random.key(1), 400)  # default == tempered
+        # The decoupled draw warns (this model round-tripped), evidence of the
+        # collapse risk it is about to demonstrate.
+        with pytest.warns(UserWarning, match="mode-collapse"):
+            cold = plan.sample(jax.random.key(1), 400, tempered=False)
+        assert tempered.shape == (400, len(nodes)) and tempered.dtype == jnp.bool_
+        assert cold.shape == (400, len(nodes)) and cold.dtype == jnp.bool_
+
+        # default draw is the tempered path (same key ⇒ bit-identical)
+        again = plan.sample(jax.random.key(1), 400, tempered=True)
+        assert np.array_equal(np.asarray(tempered), np.asarray(again))
+
+        t_pos, t_neg = _mode_fractions(tempered)
+        c_pos, c_neg = _mode_fractions(cold)
+        assert min(t_pos, t_neg) > 0.1, (
+            "tempered should span both modes",
+            t_pos,
+            t_neg,
+        )
+        assert max(c_pos, c_neg) > 0.9, ("single chain should collapse", c_pos, c_neg)
+
+    def test_tempered_thinning_and_warmup_shapes(self):
+        # n_warmup discard + steps_per_sample thinning still yield exactly
+        # n_samples rows (draw length is independent of the production window).
+        nodes, ebm, program, init_factory = _ferro_grid(8)
+        plan = autotune(
+            jax.random.key(0),
+            ebm=ebm,
+            program=program,
+            init_factory=init_factory,
+            sample_nodes=nodes,
+            **_BIMODAL_KW,
+        )
+        s = plan.sample(jax.random.key(3), 120, n_warmup=40, steps_per_sample=3)
+        assert s.shape == (120, len(nodes)) and s.dtype == jnp.bool_

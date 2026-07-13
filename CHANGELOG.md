@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`autotune` / `autosample` now sample multimodal targets correctly.** The
+  tuned plan previously drew final samples with plain single-chain block Gibbs
+  at the cold β from one warm state — which cannot cross energy barriers, so on
+  a multimodal target (the case NRPT exists for) every draw silently collapsed
+  into a single mode. `NRPTPlan.sample` now defaults to a **tempered draw**: it
+  runs the tuned NRPT ladder from the stored warm ladder and records the cold
+  chain each round, so the DEO swaps keep carrying barrier crossings into the
+  samples and all modes are represented. On the 16×16 ferromagnet at β=1 the
+  magnetization is now bimodal (~50/50) where it used to sit in one mode.
+
+### Changed
+
+- **`NRPTPlan.sample` and `autosample` gain a `tempered` flag (default `True`).**
+  `tempered=False` selects the old single-chain cold-β draw for targets whose
+  cold chain mixes on its own (unimodal / low-barrier). It now warns (once per
+  call-site) when the tuning run round-tripped — evidence the target is
+  multimodal and the decoupled draw will collapse — and when the tuning run
+  recorded zero round trips (the ladder itself never crossed, so samples may
+  miss modes regardless of `tempered`). For the tempered path `steps_per_sample`
+  thins by NRPT rounds and `n_warmup` discards leading rounds; the drawn sample
+  count is independent of the tuning `n_rounds`.
+
 ## [0.9.0] — 2026-07-12
 
 ### Added
