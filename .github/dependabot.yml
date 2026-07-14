@@ -1,0 +1,19 @@
+# Keep the actions used in .github/workflows up to date. Dependabot opens a PR
+# when any `uses:` pin has a newer release — the Actions equivalent of the
+# weekly `pre-commit autoupdate` job (update-deps.yml). The two are
+# complementary: Dependabot does not read .pre-commit-config.yaml, so that
+# workflow still handles the hooks.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    # Bundle every action bump into one PR instead of one PR per action.
+    groups:
+      actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "chore"
