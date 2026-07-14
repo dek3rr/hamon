@@ -8,6 +8,7 @@ and rectangular block construction.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 
 import jax
 import jax.numpy as jnp
@@ -159,7 +160,7 @@ def ising_energy_delta(
 def make_ising_delta_fn(
     nodes: list[AbstractNode],
     edges: list[tuple[AbstractNode, AbstractNode]],
-    free_blocks,
+    free_blocks: Iterable[Iterable[AbstractNode]],
     biases: jax.Array,
     weights: jax.Array,
 ):

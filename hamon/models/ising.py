@@ -424,19 +424,19 @@ def estimate_kl_grad(
         weight_edges: the edges for which to estimate the weight gradients
         data: The data values to use for the positive phase of the gradient estimate. Each array has shape [batch nodes]
         conditioning_values: values to assign to the nodes that the model is conditioned on.
-         Each array has shape [nodes]
+            Each array has shape [nodes]
         init_state_positive: initial state for the positive sampling chain. Each array has
-         shape [n_chains_pos batch nodes]
+            shape [n_chains_pos batch nodes]
         init_state_negative: initial state for the negative sampling chain. Each array has
-         shape [n_chains_neg nodes]
+            shape [n_chains_neg nodes]
         return_negative_state: when True, append the negative chains' final
-         states (same structure as ``init_state_negative``) to the returned
-         tuple. Feeding them back as the next step's ``init_state_negative``
-         gives persistent-chain (PCD) training: the chains track the slowly
-         moving model distribution instead of re-warming from scratch every
-         gradient step, so the negative schedule's ``n_warmup`` can drop to
-         ~0. (The positive phase is clamped to per-batch data, so persisting
-         it across batches is not meaningful and it is not returned.)
+            states (same structure as ``init_state_negative``) to the returned
+            tuple. Feeding them back as the next step's ``init_state_negative``
+            gives persistent-chain (PCD) training: the chains track the slowly
+            moving model distribution instead of re-warming from scratch every
+            gradient step, so the negative schedule's ``n_warmup`` can drop to
+            ~0. (The positive phase is clamped to per-batch data, so persisting
+            it across batches is not meaningful and it is not returned.)
     Returns:
         the weight gradients and the bias gradients (plus the final negative
         chain state when ``return_negative_state`` is set)
@@ -624,6 +624,9 @@ def ising_sample(
     exploration count is no longer a fixed argument; it is discovered (and
     device-calibrated) automatically.
 
+    A warning is logged if all coupling weights are zero (NRPT is unnecessary)
+    or if all biases are identical (the model has no per-variable preference).
+
     The energy function is
 
     $$\mathcal{E}(s) = -\beta \left( \sum_i b_i s_i
@@ -654,11 +657,6 @@ def ising_sample(
         ``mean_spins`` (average number of +1 spins per sample), ``device``,
         ``round_trip_diagnostics``, and ``report`` (the full
         :class:`hamon.AutotuneReport`).
-
-    Warns:
-        Logs a warning if all coupling weights are zero (NRPT is
-        unnecessary) or if all biases are identical (model has no
-        per-variable preference).
     """
     from hamon.autotune import autosample
 
