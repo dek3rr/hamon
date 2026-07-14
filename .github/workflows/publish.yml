@@ -9,7 +9,29 @@ permissions:
   contents: read
 
 jobs:
+  # Release gate: the slow scaling benchmark (test_big) is deselected from every
+  # PR and nightly run, so a tag push is the one place it executes. Runs the
+  # WHOLE suite (no "-m not slow") across the support matrix before we build.
+  release-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: true
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+      - name: Install dependencies
+        run: pip install .[testing]
+      - name: Run full test suite (including slow)
+        run: pytest -v tests/
+
   build:
+    needs: release-tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
