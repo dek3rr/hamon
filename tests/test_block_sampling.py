@@ -25,6 +25,7 @@ from hamon.block_sampling import (
     sample_single_block,
     sample_states,
     sample_states_batched,
+    sample_with_observation,
 )
 from hamon.conditional_samplers import (
     AbstractConditionalSampler,
@@ -32,7 +33,8 @@ from hamon.conditional_samplers import (
     _State,
 )
 from hamon.interaction import InteractionGroup
-from hamon.pgm import AbstractNode
+from hamon.observers import MomentAccumulatorObserver, StateObserver
+from hamon.pgm import AbstractNode, SpinNode
 
 
 class ContinousScalarNode(AbstractNode):
@@ -517,3 +519,170 @@ class TestSampleStatesBatched(unittest.TestCase):
         self.assertEqual(batched.shape, looped.shape)
         self.assertEqual(batched.shape[0], n_chains)
         self.assertTrue(jnp.array_equal(batched, looped))
+
+
+# ---------------------------------------------------------------------------
+# Passthrough single-block program: shared fixture for the fast-path / edge-case
+# / observer-through-sampling tests below.
+# ---------------------------------------------------------------------------
+
+
+class PassthroughSampler(AbstractConditionalSampler):
+    """Returns zeros matching output_sd."""
+
+    def sample(self, key, interactions, active_flags, states, sampler_state, output_sd):
+        if isinstance(output_sd, jax.ShapeDtypeStruct):
+            return jnp.zeros(output_sd.shape, output_sd.dtype), sampler_state
+        return jax.tree.map(
+            lambda sd: (
+                jnp.zeros(sd.shape, sd.dtype)
+                if isinstance(sd, jax.ShapeDtypeStruct)
+                else sd
+            ),
+            output_sd,
+        ), sampler_state
+
+    def init(self):
+        return None
+
+
+def _make_passthrough_program():
+    """Single-block SpinNode program with self-interaction and a passthrough sampler."""
+    nodes = [SpinNode() for _ in range(4)]
+    block = Block(nodes)
+    sd = {SpinNode: jax.ShapeDtypeStruct((), jnp.bool_)}
+    spec = BlockGibbsSpec([block], [], sd)
+    ig = InteractionGroup(jnp.ones(4), block, [block])
+    prog = BlockSamplingProgram(spec, [PassthroughSampler()], [ig])
+    state = [jnp.zeros(4, dtype=jnp.bool_)]
+    return prog, state, block
+
+
+class TestSampleSingleBlockGlobalState(unittest.TestCase):
+    def test_with_vs_without_global_state(self):
+        prog, state, _ = _make_passthrough_program()
+        key = jax.random.key(42)
+        out_no_gs, _ = sample_single_block(key, state, [], prog, 0, None)
+        gs = block_state_to_global(state, prog.gibbs_spec)
+        out_with_gs, _ = sample_single_block(
+            key, state, [], prog, 0, None, global_state=gs
+        )
+        self.assertTrue(jnp.array_equal(out_no_gs, out_with_gs))
+
+
+class TestSamplingScheduleEdgeCases(unittest.TestCase):
+    def test_single_sample(self):
+        prog, state, block = _make_passthrough_program()
+        schedule = SamplingSchedule(n_warmup=1, n_samples=1, steps_per_sample=1)
+        samples = sample_states(jax.random.key(0), prog, schedule, state, [], [block])
+        self.assertEqual(samples[0].shape[0], 1)
+
+    def test_zero_warmup(self):
+        prog, state, block = _make_passthrough_program()
+        schedule = SamplingSchedule(n_warmup=0, n_samples=3, steps_per_sample=1)
+        samples = sample_states(jax.random.key(0), prog, schedule, state, [], [block])
+        self.assertEqual(samples[0].shape[0], 3)
+
+
+class TestEmptyClampedBlocks(unittest.TestCase):
+    def test_sampling_no_clamped(self):
+        prog, state, block = _make_passthrough_program()
+        schedule = SamplingSchedule(n_warmup=2, n_samples=3, steps_per_sample=1)
+        samples = sample_states(jax.random.key(0), prog, schedule, state, [], [block])
+        self.assertEqual(samples[0].shape, (3, 4))
+
+
+class TestPrecomputedOutputSDs(unittest.TestCase):
+    def test_matches_runtime_computation(self):
+        """_block_output_sds should match what _resize_sd would produce at call time."""
+        prog, _, _ = _make_passthrough_program()
+        for i, block in enumerate(prog.gibbs_spec.free_blocks):
+            template = prog.gibbs_spec.node_shape_struct[block.node_type]
+
+            def _resize(leaf):
+                if isinstance(leaf, jax.ShapeDtypeStruct):
+                    return jax.ShapeDtypeStruct(
+                        (len(block.nodes), *leaf.shape), leaf.dtype
+                    )
+                return leaf
+
+            expected = jax.tree.map(_resize, template)
+            actual = prog._block_output_sds[i]
+
+            exp_leaves = jax.tree.leaves(expected)
+            act_leaves = jax.tree.leaves(actual)
+            self.assertEqual(len(exp_leaves), len(act_leaves))
+            for e, a in zip(exp_leaves, act_leaves):
+                if isinstance(e, jax.ShapeDtypeStruct):
+                    self.assertEqual(e.shape, a.shape)
+                    self.assertEqual(e.dtype, a.dtype)
+                else:
+                    self.assertEqual(e, a)
+
+
+class TestBlockGibbsSpecSuperblocks(unittest.TestCase):
+    def test_sequential_order(self):
+        sd = {SpinNode: jax.ShapeDtypeStruct((), jnp.bool_)}
+        b1 = Block([SpinNode(), SpinNode()])
+        b2 = Block([SpinNode(), SpinNode(), SpinNode()])
+        spec = BlockGibbsSpec([b1, b2], [], sd)
+        self.assertEqual(spec.sampling_order, [[0], [1]])
+
+    def test_parallel_order(self):
+        sd = {SpinNode: jax.ShapeDtypeStruct((), jnp.bool_)}
+        b1 = Block([SpinNode(), SpinNode()])
+        b2 = Block([SpinNode(), SpinNode(), SpinNode()])
+        spec = BlockGibbsSpec([(b1, b2)], [], sd)
+        self.assertEqual(spec.sampling_order, [[0, 1]])
+
+    def test_clamped_separate(self):
+        sd = {SpinNode: jax.ShapeDtypeStruct((), jnp.bool_)}
+        free = Block([SpinNode(), SpinNode()])
+        clamped = Block([SpinNode()])
+        spec = BlockGibbsSpec([free], [clamped], sd)
+        self.assertEqual(len(spec.free_blocks), 1)
+        self.assertEqual(len(spec.clamped_blocks), 1)
+        self.assertEqual(len(spec.blocks), 2)
+
+
+class TestStateObserverThroughSampling(unittest.TestCase):
+    """StateObserver driven through sample_with_observation (loop integration)."""
+
+    def test_through_sample_with_observation(self):
+        prog, state, block = _make_passthrough_program()
+        observer = StateObserver([block])
+        schedule = SamplingSchedule(n_warmup=2, n_samples=3, steps_per_sample=1)
+        _, samples = sample_with_observation(
+            jax.random.key(0), prog, schedule, state, [], observer.init(), observer
+        )
+        self.assertEqual(samples[0].shape, (3, 4))
+
+
+class TestMomentAccumulatorThroughSampling(unittest.TestCase):
+    """MomentAccumulatorObserver driven through sample_with_observation."""
+
+    def test_accumulation(self):
+        node = SpinNode()
+        block = Block([node])
+        sd = {SpinNode: jax.ShapeDtypeStruct((), jnp.bool_)}
+        spec = BlockGibbsSpec([block], [], sd)
+        ig = InteractionGroup(jnp.ones(1), block, [block])
+        prog = BlockSamplingProgram(spec, [PassthroughSampler()], [ig])
+
+        def spin_transform(state, _):
+            return [2 * x.astype(jnp.float32) - 1 for x in state]
+
+        observer = MomentAccumulatorObserver([[(node,)]], f_transform=spin_transform)
+        schedule = SamplingSchedule(n_warmup=0, n_samples=5, steps_per_sample=1)
+        with jax.numpy_dtype_promotion("standard"):
+            moments, _ = sample_with_observation(
+                jax.random.key(0),
+                prog,
+                schedule,
+                [jnp.array([False])],
+                [],
+                observer.init(),
+                observer,
+            )
+        # PassthroughSampler → 0 (False) → transform → -1; 5 × -1 = -5
+        self.assertAlmostEqual(float(moments[0][0]), -5.0, places=4)

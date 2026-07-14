@@ -244,3 +244,34 @@ class TestNRPTEnergyObserver(unittest.TestCase):
         self.assertEqual(obs._dtype, expected)
         sum_E, _ = obs.init()
         self.assertEqual(sum_E.dtype, expected)
+
+
+class TestMomentAccumulatorDedup(unittest.TestCase):
+    """Verify that the refactored __init__ correctly deduplicates nodes."""
+
+    def test_blocks_to_sample_no_duplicates(self):
+        """A node appearing in multiple moments should appear only once in blocks_to_sample."""
+        n1, n2 = SpinNode(), SpinNode()
+        # n1 appears in both moment types
+        observer = MomentAccumulatorObserver([[(n1,), (n2,)], [(n1, n2)]])
+        total_nodes_in_blocks = sum(len(b) for b in observer.blocks_to_sample)
+        self.assertEqual(
+            total_nodes_in_blocks, 2, "Each node should appear exactly once"
+        )
+
+    def test_flat_scatter_index_is_permutation(self):
+        """After dedup, _flat_scatter_index should contain each index exactly once."""
+        n1, n2, n3 = SpinNode(), SpinNode(), SpinNode()
+        observer = MomentAccumulatorObserver([[(n1, n2)], [(n2, n3)]])
+        idx = observer._flat_scatter_index
+        self.assertEqual(len(idx), 3)
+        self.assertEqual(
+            len(set(idx.tolist())), 3, "Scatter index must be a permutation"
+        )
+
+    def test_flat_value_order_inverts_scatter(self):
+        """_flat_value_order should be argsort(_flat_scatter_index)."""
+        n1, n2 = SpinNode(), CategoricalNode()
+        observer = MomentAccumulatorObserver([[(n1, n2)]])
+        expected = jnp.argsort(observer._flat_scatter_index)
+        self.assertTrue(jnp.array_equal(observer._flat_value_order, expected))

@@ -13,7 +13,22 @@ on:
     - cron: "0 0 * * *"
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Checks with pre-commit
+        uses: pre-commit/action@v3.0.1
+
   unittest:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -26,9 +41,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          cache: "pip"
       - name: Install dependencies
         run: pip install .[testing]
-      - name: Checks with pre-commit
-        uses: pre-commit/action@v3.0.1
+      # Non-3.12 legs run the suite directly. The 3.12 leg (our base supported
+      # version) runs it once under coverage instead, which doubles as this
+      # project's coverage gate — so the suite is never executed twice on the
+      # same interpreter just for coverage.
       - name: Run unit tests
+        if: matrix.python-version != '3.12'
         run: pytest -v -m "not slow" tests/
+      - name: Run unit tests with coverage
+        if: matrix.python-version == '3.12'
+        run: |
+          coverage run --source hamon -m pytest -v -m "not slow" tests/
+          coverage report --fail-under=90

@@ -99,7 +99,8 @@ def _exact_marginals(exact_probs: np.ndarray, n: int) -> np.ndarray:
 
 class TestBoltzmannMarginals:
     @pytest.fixture(scope="class")
-    def model_8(self):
+    @staticmethod
+    def model_8():
         n = 8
         beta_cold = 1.0
         key = jax.random.key(11)

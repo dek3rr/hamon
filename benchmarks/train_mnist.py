@@ -1,12 +1,36 @@
-import unittest
+#!/usr/bin/env python
+"""MNIST training demonstration for hamon.
+
+Trains an Ising energy-based model (a double-grid RBM-style architecture) on a
+filtered 3-class MNIST subset using persistent contrastive divergence (PCD),
+then measures classification accuracy by clamping the image and sampling the
+label spots. The schedules for both training phases are calibrated per segment
+at the current parameters (``tune_sampling_schedule``) rather than hand-picked,
+which is the behaviour this end-to-end run exercises.
+
+This used to live in the unit suite (``tests/test_train_mnist.py``) but it is a
+full training pipeline, not a unit test: it takes minutes, loads ~31 MB of data,
+and asserts a single downstream metric. It belongs with the other benchmarks.
+
+Usage:
+    python benchmarks/train_mnist.py                 # 1 epoch, expects acc > 0.9
+    python benchmarks/train_mnist.py --epochs 3
+
+Exit code is 0 when best accuracy exceeds the threshold (0.9), 1 otherwise.
+"""
+
+from __future__ import annotations
+
+import argparse
+import time
 from collections.abc import Sequence
+from pathlib import Path
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-import pytest
 from jaxtyping import Array, Key
 
 from hamon.block_management import Block
@@ -21,6 +45,9 @@ from hamon.models.ising import (
 )
 from hamon.pgm import AbstractNode, SpinNode
 from hamon.tuning import tune_sampling_schedule
+
+_DATA_DIR = Path(__file__).resolve().parent / "mnist_test_data"
+_ACCURACY_THRESHOLD = 0.9
 
 
 def get_double_grid(
@@ -75,22 +102,18 @@ def get_double_grid(
     )
 
 
-@pytest.mark.slow
-class TestTrainMnist(unittest.TestCase):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+class MnistTraining:
+    def __init__(self, n_epochs: int = 1):
         self.target_classes = [0, 3, 4]
         self.num_label_spots = 10
         label_size = len(self.target_classes) * self.num_label_spots
         data_dim = 28 * 28 + label_size
 
-        self.train_data_filtered = jnp.load(
-            "tests/mnist_test_data/train_data_filtered.npy"
-        )
+        self.train_data_filtered = jnp.load(_DATA_DIR / "train_data_filtered.npy")
         self.sep_images_test = {}
         for digit in self.target_classes:
             self.sep_images_test[digit] = jnp.load(
-                f"tests/mnist_test_data/sep_images_test_{digit}.npy"
+                _DATA_DIR / f"sep_images_test_{digit}.npy"
             )
 
         (
@@ -131,7 +154,7 @@ class TestTrainMnist(unittest.TestCase):
         self.calibration_replicas = 8
 
         self.optim = optax.adam(learning_rate=0.01)
-        self.n_epochs = 1
+        self.n_epochs = n_epochs
 
     @staticmethod
     def _pow2_ceil(x, cap=16):
@@ -201,7 +224,7 @@ class TestTrainMnist(unittest.TestCase):
             (info_neg, info_pos),
         )
 
-    def test_train_mnist(self):
+    def run(self) -> float:
         def do_epoch_simplified(
             key,
             model,
@@ -444,4 +467,28 @@ class TestTrainMnist(unittest.TestCase):
             )
             best_accuracy = max(best_accuracy, accuracy)
 
-        self.assertGreater(best_accuracy, 0.9)
+        return float(best_accuracy)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--epochs", type=int, default=1, help="number of training epochs (default: 1)"
+    )
+    args = parser.parse_args()
+
+    t0 = time.perf_counter()
+    best_accuracy = MnistTraining(n_epochs=args.epochs).run()
+    wall = time.perf_counter() - t0
+
+    passed = best_accuracy > _ACCURACY_THRESHOLD
+    print(
+        f"best accuracy={best_accuracy:.4f}  threshold={_ACCURACY_THRESHOLD}  "
+        f"{'PASS' if passed else 'FAIL'}  | {wall:.1f}s",
+        flush=True,
+    )
+    return 0 if passed else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

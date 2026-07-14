@@ -5,7 +5,7 @@ import jax
 import numpy as np
 from jax import numpy as jnp
 
-from hamon.block_management import Block
+from hamon.block_management import Block, BlockSpec
 from hamon.block_sampling import SamplingSchedule, sample_with_observation
 from hamon.models.ising import (
     IsingEBM,
@@ -390,3 +390,70 @@ class TestPersistentChainAPI(unittest.TestCase):
             return_negative_state=True,
         )
         assert len(out2) == 5
+
+
+class TestIsingEBMFactors(unittest.TestCase):
+    def _make_model(self):
+        nodes = [SpinNode() for _ in range(5)]
+        edges = [(nodes[i], nodes[i + 1]) for i in range(4)]
+        return IsingEBM(nodes, edges, jnp.zeros(5), jnp.ones(4) * 0.5, jnp.array(1.0))
+
+    def test_factors_structurally_consistent(self):
+        """Repeated .factors access returns structurally equivalent objects."""
+        model = self._make_model()
+        f1 = model.factors
+        f2 = model.factors
+        self.assertEqual(len(f1), len(f2))
+        for a, b in zip(f1, f2):
+            self.assertEqual(type(a), type(b))
+
+    def test_energy_deterministic(self):
+        model = self._make_model()
+        blocks = [Block(model.nodes)]
+        state = [jnp.array([True, False, True, False, True])]
+        e1 = model.energy(state, blocks)
+        e2 = model.energy(state, blocks)
+        self.assertTrue(jnp.allclose(e1, e2))
+
+    def test_factors_weights_include_beta_scaling(self):
+        """factors property should return beta * weights / beta * biases."""
+        nodes = [SpinNode() for _ in range(3)]
+        edges = [(nodes[0], nodes[1]), (nodes[1], nodes[2])]
+        biases = jnp.array([1.0, 2.0, 3.0])
+        weights = jnp.array([0.5, 0.7])
+        beta = jnp.array(2.0)
+        model = IsingEBM(nodes, edges, biases, weights, beta)
+        self.assertTrue(jnp.allclose(model.factors[0].weights, beta * biases))
+        self.assertTrue(jnp.allclose(model.factors[1].weights, beta * weights))
+
+    def test_factors_not_cached_for_ad(self):
+        """factors must NOT be cached — AD needs tracer propagation through beta*weights."""
+        model = self._make_model()
+        # Two accesses should produce different list objects (not cached)
+        f1 = model.factors
+        f2 = model.factors
+        self.assertIsNot(f1, f2)
+
+
+class TestEnergyFastPath(unittest.TestCase):
+    def test_blockspec_vs_list(self):
+        nodes = [SpinNode() for _ in range(6)]
+        edges = [(nodes[i], nodes[i + 1]) for i in range(5)]
+        model = IsingEBM(nodes, edges, jnp.ones(6), jnp.ones(5) * 0.3, jnp.array(2.0))
+        blocks = [Block(nodes)]
+        state = [jax.random.bernoulli(jax.random.key(99), 0.5, (6,))]
+        e_list = model.energy(state, blocks)
+        sd = {SpinNode: jax.ShapeDtypeStruct((), jnp.bool_)}
+        e_spec = model.energy(state, BlockSpec(blocks, sd))
+        self.assertTrue(jnp.allclose(e_list, e_spec))
+
+    def test_jit_compatible(self):
+        nodes = [SpinNode() for _ in range(4)]
+        edges = [(nodes[i], nodes[i + 1]) for i in range(3)]
+        model = IsingEBM(nodes, edges, jnp.zeros(4), jnp.ones(3), jnp.array(1.0))
+        sd = {SpinNode: jax.ShapeDtypeStruct((), jnp.bool_)}
+        bs = BlockSpec([Block(nodes)], sd)
+        state = [jnp.array([True, True, False, True])]
+        e_eager = model.energy(state, bs)
+        e_jit = eqx.filter_jit(model.energy)(state, bs)
+        self.assertTrue(jnp.allclose(e_eager, e_jit))
