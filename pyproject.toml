@@ -82,6 +82,17 @@ docs = [
     "mkdocstrings[python]>=0.28",
     "pymdown-extensions>=10.14",
 ]
+# Non-production trial toolchain for evaluating Zensical (the successor to
+# MkDocs + Material for MkDocs) against our existing mkdocs.yml. Install
+# alongside `docs`, i.e. `pip install .[docs,docs-zensical]`: Zensical reads
+# the MkDocs config directly but still relies on the MkDocs plugin packages
+# (mkdocstrings, ipynb, hippogriffe, include-exclude-files) being importable,
+# which the `docs` group supplies. This drives the docs-zensical-trial CI job
+# only; the live site is still built by MkDocs (see docs.yml). See
+# .github/ZENSICAL_TRIAL.md for the current compatibility status.
+docs-zensical = [
+    "zensical>=0.0.50",
+]
 
 [tool.setuptools]
 packages = { find = { include = ["hamon", "hamon.*"] } }

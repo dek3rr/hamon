@@ -1,0 +1,51 @@
+name: Docs (Zensical trial)
+
+# Non-deploying trial build. MkDocs still builds and deploys the live site
+# (see docs.yml); this job builds the SAME mkdocs.yml with Zensical and uploads
+# the result as an artifact so we can track Zensical's compatibility as it
+# matures toward feature parity. It never publishes and never gates other work.
+# Known gaps (notebooks, external cross-refs) are documented in
+# .github/ZENSICAL_TRIAL.md.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "pyproject.toml"
+      - ".github/workflows/docs-zensical-trial.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: "pip"
+      - name: Install docs + Zensical toolchains
+        run: pip install .[docs,docs-zensical]
+      - name: Build with Zensical
+        # Not --strict: the current build still emits dangling nav links for the
+        # notebook examples Zensical can't render yet, which we don't want to
+        # fail on while tracking progress. Inspect the log + artifact instead.
+        run: zensical build --clean 2>&1 | tee zensical-build.log
+      - name: Upload Zensical site + build log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: zensical-trial-site
+          path: |
+            site/
+            zensical-build.log
+          retention-days: 14
