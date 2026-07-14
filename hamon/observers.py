@@ -187,7 +187,7 @@ class MomentAccumulatorObserver(AbstractObserver):
             inside the scan body.
         """
         self.f_transform = f_transform
-        self._accumulate_dtype = jnp.zeros(0, dtype=dtype).dtype
+        self._accumulate_dtype = jax.dtypes.canonicalize_dtype(dtype)
 
         # --- Pass 1: deduplicate nodes and build moment index slices --------
         flat_nodes_list: list[AbstractNode] = []
@@ -420,7 +420,7 @@ class NRPTEnergyObserver(AbstractNRPTObserver):
             ``jnp.float32``; use ``jnp.float64`` for double-precision models.
         """
         self.n_chains = n_chains
-        self._dtype = jnp.zeros(0, dtype=dtype).dtype
+        self._dtype = jax.dtypes.canonicalize_dtype(dtype)
 
     def __call__(
         self,
