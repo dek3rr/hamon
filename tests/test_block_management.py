@@ -14,6 +14,17 @@ from jaxtyping import Array
 
 import hamon.pgm
 from hamon import block_management
+from hamon.block_management import (
+    Block,
+    BlockSpec,
+    block_state_to_global,
+    from_global_state,
+    get_node_locations,
+    make_empty_block_state,
+    scatter_block_to_global,
+    _hash_pytree,
+)
+from hamon.pgm import CategoricalNode, SpinNode
 
 
 class Node1(hamon.pgm.AbstractNode):
@@ -444,3 +455,205 @@ class TestFromGlobalState(unittest.TestCase):
         )
         out = block_management.from_global_state(self.global_state, self.spec, [mixed])
         self.assertTrue(jnp.array_equal(out[0], self._reference(mixed)))
+
+
+class _CompoundState(eqx.Module):
+    data: Array
+    label: int  # static leaf
+
+
+class TestRoundtripFidelity(unittest.TestCase):
+    """block_state_to_global → from_global_state fidelity for hetero pytrees."""
+
+    def test_single_type_scalar(self):
+        nodes_a = [SpinNode() for _ in range(5)]
+        nodes_b = [SpinNode() for _ in range(3)]
+        blocks = [Block(nodes_a), Block(nodes_b)]
+        sd = {SpinNode: jax.ShapeDtypeStruct((), jnp.bool_)}
+        spec = BlockSpec(blocks, sd)
+
+        state = [
+            jnp.array([True, False, True, False, True]),
+            jnp.array([False, True, False]),
+        ]
+        gs = block_state_to_global(state, spec)
+        recovered = from_global_state(gs, spec, blocks)
+        for orig, rec in zip(state, recovered):
+            self.assertTrue(jnp.array_equal(orig, rec))
+
+    def test_multi_type(self):
+        spin_nodes = [SpinNode() for _ in range(4)]
+        cat_nodes = [CategoricalNode() for _ in range(3)]
+        blocks = [Block(spin_nodes), Block(cat_nodes)]
+        sd = {
+            SpinNode: jax.ShapeDtypeStruct((), jnp.bool_),
+            CategoricalNode: jax.ShapeDtypeStruct((), jnp.uint8),
+        }
+        spec = BlockSpec(blocks, sd)
+        state = [
+            jnp.array([True, True, False, False]),
+            jnp.array([0, 2, 1], dtype=jnp.uint8),
+        ]
+        gs = block_state_to_global(state, spec)
+        recovered = from_global_state(gs, spec, blocks)
+        for orig, rec in zip(state, recovered):
+            self.assertTrue(jnp.array_equal(orig, rec))
+
+    def test_subset_extraction(self):
+        nodes_a = [SpinNode() for _ in range(3)]
+        nodes_b = [SpinNode() for _ in range(2)]
+        blocks = [Block(nodes_a), Block(nodes_b)]
+        sd = {SpinNode: jax.ShapeDtypeStruct((), jnp.bool_)}
+        spec = BlockSpec(blocks, sd)
+        state = [jnp.array([True, False, True]), jnp.array([False, True])]
+        gs = block_state_to_global(state, spec)
+        recovered = from_global_state(gs, spec, [blocks[1]])
+        self.assertTrue(jnp.array_equal(recovered[0], state[1]))
+
+
+class TestScatterCorrectness(unittest.TestCase):
+    """scatter_block_to_global matches a full rebuild, incl. heterogeneous SDs."""
+
+    def _setup(self):
+        nodes_a = [SpinNode() for _ in range(4)]
+        nodes_b = [SpinNode() for _ in range(3)]
+        blocks = [Block(nodes_a), Block(nodes_b)]
+        sd = {SpinNode: jax.ShapeDtypeStruct((), jnp.bool_)}
+        spec = BlockSpec(blocks, sd)
+        return blocks, spec
+
+    def test_scatter_matches_full_rebuild(self):
+        blocks, spec = self._setup()
+        state = [jnp.array([True, False, True, False]), jnp.array([True, True, True])]
+        gs = block_state_to_global(state, spec)
+
+        new_b1 = jnp.array([False, False, False])
+        gs_scattered = scatter_block_to_global(gs, new_b1, blocks[1], spec)
+        gs_rebuilt = block_state_to_global([state[0], new_b1], spec)
+
+        for s, r in zip(gs_scattered, gs_rebuilt):
+            if s is not None and r is not None:
+                self.assertTrue(jnp.array_equal(s, r))
+
+    def test_scatter_preserves_unmodified(self):
+        blocks, spec = self._setup()
+        state = [jnp.array([True, False, True, False]), jnp.array([True, True, True])]
+        gs = block_state_to_global(state, spec)
+        gs_new = scatter_block_to_global(
+            gs, jnp.array([False, False, False]), blocks[1], spec
+        )
+        recovered = from_global_state(gs_new, spec, [blocks[0]])
+        self.assertTrue(jnp.array_equal(recovered[0], state[0]))
+
+    def test_scatter_heterogeneous(self):
+        spin_nodes = [SpinNode() for _ in range(3)]
+        cat_nodes = [CategoricalNode() for _ in range(2)]
+        blocks = [Block(spin_nodes), Block(cat_nodes)]
+        sd = {
+            SpinNode: jax.ShapeDtypeStruct((), jnp.bool_),
+            CategoricalNode: jax.ShapeDtypeStruct((), jnp.uint8),
+        }
+        spec = BlockSpec(blocks, sd)
+        state = [jnp.array([True, False, True]), jnp.array([1, 2], dtype=jnp.uint8)]
+        gs = block_state_to_global(state, spec)
+
+        new_cat = jnp.array([0, 0], dtype=jnp.uint8)
+        gs_new = scatter_block_to_global(gs, new_cat, blocks[1], spec)
+        self.assertTrue(
+            jnp.array_equal(from_global_state(gs_new, spec, [blocks[0]])[0], state[0])
+        )
+        self.assertTrue(
+            jnp.array_equal(from_global_state(gs_new, spec, [blocks[1]])[0], new_cat)
+        )
+
+
+class TestHashPytree(unittest.TestCase):
+    def test_identical_equal(self):
+        a = jax.ShapeDtypeStruct((), jnp.float32)
+        b = jax.ShapeDtypeStruct((), jnp.float32)
+        self.assertEqual(_hash_pytree(a), _hash_pytree(b))
+
+    def test_different_dtype(self):
+        a = jax.ShapeDtypeStruct((), jnp.float32)
+        b = jax.ShapeDtypeStruct((), jnp.float64)
+        self.assertNotEqual(_hash_pytree(a), _hash_pytree(b))
+
+    def test_different_shape(self):
+        self.assertNotEqual(
+            _hash_pytree(jax.ShapeDtypeStruct((3,), jnp.float32)),
+            _hash_pytree(jax.ShapeDtypeStruct((4,), jnp.float32)),
+        )
+
+    def test_nested(self):
+        a = [jax.ShapeDtypeStruct((), jnp.bool_), jax.ShapeDtypeStruct((2,), jnp.int8)]
+        b = [jax.ShapeDtypeStruct((), jnp.bool_), jax.ShapeDtypeStruct((2,), jnp.int8)]
+        self.assertEqual(_hash_pytree(a), _hash_pytree(b))
+
+    def test_eqx_module(self):
+        sd = _CompoundState(jax.ShapeDtypeStruct((4,), jnp.float32), 42)
+        self.assertEqual(_hash_pytree(sd), _hash_pytree(sd))
+
+
+class TestGetNodeLocations(unittest.TestCase):
+    def test_unique_positions(self):
+        nodes_a = [SpinNode() for _ in range(5)]
+        nodes_b = [SpinNode() for _ in range(3)]
+        blocks = [Block(nodes_a), Block(nodes_b)]
+        sd = {SpinNode: jax.ShapeDtypeStruct((), jnp.bool_)}
+        spec = BlockSpec(blocks, sd)
+        all_pos = set()
+        for block in blocks:
+            sd_ind, positions = get_node_locations(block, spec)
+            for p in positions.tolist():
+                self.assertNotIn((sd_ind, p), all_pos)
+                all_pos.add((sd_ind, p))
+        self.assertEqual(len(all_pos), 8)
+
+    def test_match_manual_lookup(self):
+        nodes = [SpinNode() for _ in range(4)]
+        blocks = [Block(nodes[:2]), Block(nodes[2:])]
+        sd = {SpinNode: jax.ShapeDtypeStruct((), jnp.bool_)}
+        spec = BlockSpec(blocks, sd)
+        for block in blocks:
+            sd_ind, positions = get_node_locations(block, spec)
+            for j, node in enumerate(block.nodes):
+                exp_sd, exp_pos = spec.node_global_location_map[node]
+                self.assertEqual(sd_ind, exp_sd)
+                self.assertEqual(positions[j].item(), exp_pos)
+
+
+class TestMakeEmptyBlockState(unittest.TestCase):
+    def test_shapes(self):
+        nodes = [SpinNode() for _ in range(5)]
+        sd = {SpinNode: jax.ShapeDtypeStruct((3,), jnp.float32)}
+        state = make_empty_block_state([Block(nodes)], sd)
+        self.assertEqual(state[0].shape, (5, 3))
+
+    def test_batch_shape(self):
+        nodes = [SpinNode() for _ in range(4)]
+        sd = {SpinNode: jax.ShapeDtypeStruct((), jnp.bool_)}
+        state = make_empty_block_state([Block(nodes)], sd, batch_shape=(10, 2))
+        self.assertEqual(state[0].shape, (10, 2, 4))
+
+    def test_all_zeros(self):
+        nodes = [CategoricalNode() for _ in range(3)]
+        sd = {CategoricalNode: jax.ShapeDtypeStruct((), jnp.uint8)}
+        state = make_empty_block_state([Block(nodes)], sd)
+        self.assertTrue(jnp.all(state[0] == 0))
+
+
+class TestBlockEdgeCases(unittest.TestCase):
+    def test_mixed_types_raise(self):
+        with self.assertRaises(ValueError):
+            Block([SpinNode(), CategoricalNode()])
+
+    def test_add_same_type(self):
+        self.assertEqual(len(Block([SpinNode(), SpinNode()]) + Block([SpinNode()])), 3)
+
+    def test_add_different_type_raises(self):
+        with self.assertRaises(ValueError):
+            Block([SpinNode()]) + Block([CategoricalNode()])
+
+    def test_contains(self):
+        n = SpinNode()
+        self.assertIn(n, Block([n, SpinNode()]))

@@ -6,6 +6,7 @@ import unittest
 import jax
 import networkx as nx
 import numpy as np
+import pytest
 from jax import numpy as jnp
 
 from hamon.block_management import Block
@@ -1081,6 +1082,7 @@ class TestHeteroGrid(unittest.TestCase):
         self.assertLess(error, 0.04)
 
 
+@pytest.mark.slow
 class TestBigGrid(unittest.TestCase):
     """
     Make sure that we can compile a sampling program on a big grid.
