@@ -37,6 +37,7 @@ classifiers = [
 ]
 
 dependencies = [
+    "jax>=0.10.0",
     "equinox>=0.11.2",
     "jaxtyping>=0.3.10",
 ]
@@ -56,21 +57,20 @@ examples = [
     "jupyter>=1.0",
     "matplotlib>=3.11.0",
     "networkx>=3.6.0",
-    "scikit-learn>=1.9.0",
 ]
 testing = [
     "coverage>=7.15.0",
     "pytest>=9.1.0",
     "nbmake>=1.5",
     "networkx>=3.6.0",
-    "optax>=0.2.8",
-    "setuptools>=83.0.0",
 ]
 development = [
     "ruff>=0.15.21",
     "pyright>=1.1.411",
-    "pytest-cov>=7.1.0",
     "build>=1.5.1",
+    # optax is used only by benchmarks/train_mnist.py (a manual training demo),
+    # not by the test suite — kept here for developers who run the benchmarks.
+    "optax>=0.2.8",
 ]
 docs = [
     "hippogriffe>=0.2.0",
