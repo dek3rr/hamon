@@ -15,6 +15,8 @@ padding variable-size blocks for JAX array stacking, and verifying consistency.
 
 ::: hamon.block_state_to_global
 
+::: hamon.scatter_block_to_global
+
 ::: hamon.get_node_locations
 
 ::: hamon.from_global_state

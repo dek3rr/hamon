@@ -787,7 +787,7 @@ def _integrated_autocorr(series: np.ndarray, max_lag: int) -> float:
 
 def tune_sampling_schedule(
     key: jax.Array,
-    ebm,
+    ebm: AbstractEBM,
     program: BlockSamplingProgram,
     init_states: list,
     clamp_state: list | None = None,
@@ -1587,8 +1587,12 @@ def tune_exploration(
 
     Args:
         key: PRNG key.
-        ebm_factory / program_factory: per-chain factories, or use ``ebm`` /
-            ``program`` template objects.
+        ebm_factory: per-chain EBM factory.
+        program_factory: per-chain sampling-program factory.
+        ebm: single EBM template (temperature-linear mode; alternative to
+            ``ebm_factory``).
+        program: single sampling-program template (alternative to
+            ``program_factory``).
         init_states: one initial block-state list per chain (fixed across probes).
         clamp_state: clamped block states.
         initial_betas: the (fixed) β ladder; its length sets the chain count.

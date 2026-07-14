@@ -356,8 +356,10 @@ def autotune(
 
     Args:
         key: PRNG key.
-        ebm / program: single template objects (temperature-linear mode), or
-        ebm_factory / program_factory: per-chain factories.
+        ebm: single EBM template (temperature-linear mode).
+        program: single sampling-program template (temperature-linear mode).
+        ebm_factory: per-chain EBM factory (alternative to ``ebm``).
+        program_factory: per-chain program factory (alternative to ``program``).
         init_factory: ``(n_chains, ebms, programs) -> list`` of initial states.
         clamp_state: clamped block states.
         sample_nodes: nodes defining the column order of drawn samples (must be
@@ -367,7 +369,10 @@ def autotune(
         beta_range: ``(β_min, β_max)`` temperature range.
         target_acceptance: per-pair swap acceptance target for the N search.
             Default 0.5 — the round-trip-optimal r* = 1/2 (N* ≈ 2Λ; Syed et al.).
-        min_chains / max_chains / initial_n: N-search bounds / start.
+        min_chains: lower bound for the chain-count (N) search.
+        max_chains: upper bound for the chain-count (N) search; also the pilot size.
+        initial_n: starting chain count for the search; ``None`` runs a pilot at
+            ``max_chains``.
         seed_from_energy: seed the chain-count search from a cheap energy-variance
             Λ̂ (no PT ladder) so it converges in one probe — but only when local
             exploration mixes; a Gelman–Rubin R̂ check falls back to the robust

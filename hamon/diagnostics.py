@@ -366,9 +366,9 @@ class NRPTHealthReport:
         issues: Hard failures — the samples should not be trusted.
         warnings: Soft findings worth investigating.
         acceptance_mean / rejection_std: Swap-rate statistics.
-        Lambda / tau_observed / tau_predicted / efficiency /
-        total_round_trips: Round-trip diagnostics (``None`` when the run was
-            made with ``track_round_trips=False``).
+        Lambda / tau_observed / tau_predicted / efficiency / total_round_trips:
+            Round-trip diagnostics (``None`` when the run was made with
+            ``track_round_trips=False``).
         barrier_identified: ``False`` when the index process did not round-trip
             (a stalled conveyor), so ``Lambda`` is a within-basin artifact and
             must not be trusted — add chains / equalize the ladder. ``True`` when
