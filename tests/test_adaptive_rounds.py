@@ -166,18 +166,25 @@ def test_discover_forwards_tune_tol():
     assert 3 <= out["n_chains"] <= 24
 
 
-def test_budget_limited_stall_is_info_not_warning(caplog):
-    """A window too short for even one round trip (n_rounds < 2*(N-1)) is a
-    budget artifact, not a stalled conveyor: report it as INFO, not the scary
-    'within-basin artifact / add chains' WARNING (option 1)."""
-    # 64 chains but only n_rounds=60 < 2*(64-1)=126, so no round trip can complete.
+def test_short_window_is_not_measured_not_stalled(caplog):
+    """A window too short to observe round trips must report "not measured".
+
+    Resolution is structural (Λ̂ <= N-1) and budget-invariant; the round-trip rate
+    is budget-dependent. Measured at fixed N=47 on a planted 32x32, the *same*
+    well-resolved ladder reads 0 round trips at 500 rounds and 96 at 12000 — so a
+    zero-trip window is indistinguishable from a genuine stall, and reading it as
+    one reports "add chains" for a ladder that is already correct.
+    """
+    # 64 chains but only n_rounds=60: nowhere near enough to observe the rate.
     ebm, prog, fb, betas, inits = _setup(4, 1.0, 64)
     with caplog.at_level(logging.INFO, logger="hamon.tuning"):
         stats = _run(ebm, prog, betas, inits, n_tune=1, rounds_per_tune=60)
-    assert stats["barrier_identified"] is False
+    # Unmeasurable is None — never False, which would mean "stalled".
+    assert stats["conveyor_alive"] is None
     msgs = [(r.levelname, r.getMessage()) for r in caplog.records]
-    assert any(lv == "INFO" and "budget-limited" in m for lv, m in msgs)
-    assert not any(lv == "WARNING" and "within-basin" in m for lv, m in msgs)
+    assert any(lv == "INFO" and "not measured" in m for lv, m in msgs)
+    # The short window must not be used to impugn the barrier estimate.
+    assert not any(lv == "WARNING" and "conveyor" in m for lv, m in msgs)
 
 
 def test_discovery_identifies_barrier_via_pilot_budget():

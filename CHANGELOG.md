@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The barrier trust gate now asks a structural question, and conveyor health is
+  a separate flag.** `barrier_identified` previously required the DEO index
+  process to round-trip at an absolute rate (`tau_observed >= 0.01`). Two things
+  were wrong with that. First, `tau_predicted = 1/(2+2Λ)` shrinks as the target
+  hardens, so an *absolute* floor silently demands an efficiency that **grows**
+  with Λ — 19% of optimal at Λ=8.5, 43% at Λ=21, and **unsatisfiable at Λ>=49**,
+  strictest exactly where a trustworthy estimate matters most. On a planted 32×32
+  the gate reported "not identified" at **every** chain count tried, including
+  N=96 (double the recommended) with **96 completed round trips at 34.7% of
+  optimal** — its own remedy, "add chains", followed to 2× did not work. Second,
+  the round-trip rate is **budget-dependent** while the thing it was gating is
+  not: at fixed N=47 the *same* ladder (Λ̂≈20.7, max rejection ≈0.6) reads 0 round
+  trips at 500 rounds and 96 at 12000, so a zero-trip window is indistinguishable
+  from a genuine stall — and the gate told users to add chains to a ladder that
+  was already correct.
+
+  Resolution is instead read off the ladder itself. Λ̂ = Σ rej is **cap-limited**,
+  not merely noisy: every rejection rate is ≤1, so `Λ̂ <= N-1` arithmetically, and
+  a saturating ladder reports that cap (measured: Λ̂ = 3.00 at N=4 and 7.00 at
+  N=8, i.e. exactly N−1). `barrier_is_identified` now takes the rejection rates
+  and asks whether the ladder saturates — budget-invariant, needs no round-trip
+  observation, and cleanly separates the genuine stall (max rejection 1.000, Λ̂
+  pinned at its cap) from the merely under-observed. The threshold (max
+  rejection < 0.75) is calibrated on three families — planted frustrated-loop,
+  random ±J glass, ferromagnet — where the max-rejection → Λ̂-error relation is
+  monotone and consistent (1.0 → capped; 0.87 → −19%; 0.78 → −11%; ≤0.69 → ≤9%),
+  and 0.75 sits in the measured gap between the ladders the tuner itself
+  converges to (≤0.69 at the design point r\*=0.5) and the under-provisioned
+  band (≥0.78). "Resolved" therefore means Λ̂ is within ~10% — the error a 5%
+  safety margin plus ±1-chain tolerance can absorb.
+
+  The dynamical question gets its own answer: `conveyor_is_alive` gates on
+  **efficiency** (`tau_obs/tau_pred >= 0.15`, so a hard target is not held to a
+  stricter bar than an easy one; measured: genuine stalls read exactly 0.000,
+  saturation-driven crawls 0.03–0.14, and every at-design-N ladder ≥0.21 — the
+  ±J glass family plateaus lowest, which is why the floor is 0.15 and not 0.25)
+  and returns **`None`** when the window affords fewer than 40 expected trips —
+  below that the reading is provably transient-dominated (a healthy N=47 ladder
+  reads 0.000 at 11 expected trips and 0.24 only by 46), so it is reported as
+  "not measured" rather than "stalled". `tune_schedule` now exposes
+  `stats["conveyor_alive"]` alongside `stats["barrier_identified"]`, and the
+  diagnostics report flags a slow conveyor without claiming Λ is wrong.
+
 ### Fixed
 
 - **`autotune` / `autosample` now sample multimodal targets correctly.** The

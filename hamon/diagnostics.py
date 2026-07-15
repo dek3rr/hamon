@@ -561,16 +561,29 @@ def report_nrpt_diagnostics(
         report.tau_predicted = float(rt["tau_predicted"])
         report.efficiency = float(rt["efficiency"])
         report.total_round_trips = int(np.sum(np.asarray(rt["round_trips_per_chain"])))
-        report.barrier_identified = barrier_is_identified(
-            report.tau_observed, report.total_round_trips, tau_min=tau_min
-        )
+        # Resolution is structural (Λ̂ <= N-1; a saturating ladder reports its cap),
+        # so it reads the rejection rates, not the round-trip rate — the latter is
+        # budget-dependent and would call a correct-but-under-observed ladder
+        # stalled. See hamon.round_trips.barrier_is_identified.
+        report.barrier_identified = barrier_is_identified(rej)
 
         if not report.barrier_identified:
             _flag(
-                f"near-zero round trip rate (tau_obs={report.tau_observed:.4f}, "
-                f"round_trips={report.total_round_trips}) — conveyor stalled, "
-                f"barrier estimate Lambda={report.Lambda:.2f} not identified "
-                f"(within-basin artifact); add chains / equalize the ladder"
+                f"ladder saturates (max rejection={rej.max():.3f}) — barrier "
+                f"estimate Lambda={report.Lambda:.2f} is capped by the chain "
+                f"count (Lambda <= N-1 = {rej.size}) rather than measured, so it "
+                f"is an underestimate; add chains / equalize the ladder"
+            )
+        if report.tau_observed < tau_min:
+            # A separate, DYNAMICAL complaint: the conveyor was not observed
+            # traversing. Deliberately does not claim Lambda is wrong — a
+            # well-resolved ladder reads zero round trips on a short window (the
+            # rate is budget-dependent where resolution is not).
+            _flag(
+                f"few round trips observed (tau_obs={report.tau_observed:.4f}) — "
+                f"the conveyor is slow or the window is short, so samples "
+                f"decorrelate slowly. On its own this does not invalidate "
+                f"Lambda={report.Lambda:.2f} (see barrier_identified)"
             )
         elif report.efficiency < efficiency_warn:
             from hamon.round_trips import recommend_n_chains

@@ -21,7 +21,7 @@ from hamon.block_sampling import BlockSamplingProgram, SamplingSchedule
 from hamon.device import DeviceLike, resolve_entry_device
 from hamon.models.ebm import AbstractEBM
 from hamon.observers import AbstractNRPTObserver
-from hamon.round_trips import barrier_is_identified
+from hamon.round_trips import barrier_is_identified, conveyor_is_alive
 from hamon.nrpt import (
     _ChainSource,
     _phase_diagnostics,
@@ -366,41 +366,62 @@ def tune_schedule(
     )
     stats["tuning_history"] = tuning_history
 
-    # Round-trip trust gate: Σrej only estimates Λ once the index process
-    # round-trips. Flag a stalled conveyor so callers (and tune_chains) don't
-    # trust a within-basin barrier artifact. No-op when round trips weren't tracked.
+    # Trust gate: is Λ̂ resolved? This is a *structural* question — Λ̂ = Σrej <=
+    # N-1 arithmetically, so a saturating ladder reports its own cap — and it is
+    # answered by the rejection rates alone, with no round-trip observation. It is
+    # deliberately NOT gated on the round-trip rate: that signal is
+    # budget-dependent and answers the separate "is the conveyor moving?"
+    # question, so using it here reports "add chains" for ladders that are
+    # already correct but merely under-observed (see barrier_is_identified).
+    # Judge the PRODUCTION run's rates — they belong to the kept (best) ladder
+    # and are what Lambda is computed from; the loop-local `rej` is the last
+    # tuning phase's rates for a schedule that may not have been kept.
+    prod_rej = stats["rejection_rates"]
+    resolved = barrier_is_identified(prod_rej)
+    stats["barrier_identified"] = resolved
+    if not resolved:
+        logger.warning(
+            "tune_schedule: barrier NOT resolved — the ladder saturates "
+            "(max rejection=%.3f), so Lambda=%.2f is capped by the chain count "
+            "(Lambda <= N-1 = %d) rather than measuring the barrier; it is an "
+            "underestimate. Add chains or equalize the ladder.",
+            float(np.asarray(prod_rej).max()),
+            float(np.asarray(prod_rej).sum()),
+            int(betas.shape[0]) - 1,
+        )
+
+    # Conveyor health: a *separate*, dynamical diagnostic. None = the window was
+    # too short to tell, which must not be reported as a stall.
     rtd = stats.get("round_trip_diagnostics")
     if rtd is not None:
         n_rt = int(np.sum(np.asarray(rtd["round_trips_per_chain"])))
-        identified = barrier_is_identified(float(rtd["tau_observed"]), n_rt)
-        stats["barrier_identified"] = identified
-        if not identified:
-            # A DEO round trip needs >= 2*(N-1) rounds to complete one 0->top->0
-            # traversal. Below that, 0 round trips is a *budget* artifact — the
-            # conveyor had no chance, so Σrej is simply the best estimate on hand;
-            # say so instead of crying "within-basin / add chains" (which is wrong
-            # advice when the ladder was never given room to round-trip).
-            min_rt_rounds = 2 * (int(betas.shape[0]) - 1)
-            if n_rounds < min_rt_rounds:
-                logger.info(
-                    "tune_schedule: barrier not identified, but the window is "
-                    "budget-limited (n_rounds=%d < 2*(N-1)=%d — too short to complete "
-                    "a round trip); Lambda=%.2f is the Σrej estimate, used as-is. "
-                    "Give it more rounds to identify the barrier.",
-                    n_rounds,
-                    min_rt_rounds,
-                    float(rtd["Lambda"]),
-                )
-            else:
-                logger.warning(
-                    "tune_schedule: barrier NOT identified (tau_obs=%.4f, "
-                    "round_trips=%d) — DEO conveyor stalled, Lambda=%.2f is a "
-                    "within-basin artifact (biased low); add chains or equalize "
-                    "the ladder",
-                    float(rtd["tau_observed"]),
-                    n_rt,
-                    float(rtd["Lambda"]),
-                )
+        alive = conveyor_is_alive(
+            float(rtd["tau_observed"]), float(rtd["tau_predicted"]), n_rounds
+        )
+        stats["conveyor_alive"] = alive
+        if alive is None:
+            logger.info(
+                "tune_schedule: round-trip rate not measured — n_rounds=%d "
+                "affords only %.1f expected trips at the optimal rate "
+                "(tau_pred=%.4f), too few to distinguish a slow conveyor from an "
+                "unlucky window. Lambda=%.2f stands on its own (resolved=%s).",
+                n_rounds,
+                float(rtd["tau_predicted"]) * n_rounds,
+                float(rtd["tau_predicted"]),
+                float(rtd["Lambda"]),
+                resolved,
+            )
+        elif not alive:
+            logger.warning(
+                "tune_schedule: DEO conveyor is slow — %d round trips, "
+                "efficiency=%.3f of the optimal rate over %d rounds. Samples "
+                "decorrelate slowly even though Lambda=%.2f is resolved=%s.",
+                n_rt,
+                float(rtd["efficiency"]),
+                n_rounds,
+                float(rtd["Lambda"]),
+                resolved,
+            )
     return states, stats
 
 
@@ -969,12 +990,14 @@ def tune_sampling_schedule(
 
 # Production-window floor for a discovery probe, as a multiple of the minimum
 # traversal length 2*(n-1). A DEO round trip needs >= 2*(n-1) rounds just to
-# complete once; a few more are needed for the observed rate tau_obs to clear
-# the identification floor (see hamon.round_trips.barrier_is_identified).
-# Empirically ~5-6x identifies a high-N pilot on a 2D Ising ferromagnet, so a
-# probe whose rounds_per_probe falls short is topped up to this — which only
-# ever lifts high-N probes (the max keeps rounds_per_probe otherwise), and only
-# the production window (the cheaper tuning phases stay at rounds_per_probe).
+# complete once, so shorter windows cannot observe the conveyor at all (the
+# round-trip rate is a budget-dependent signal — see
+# hamon.round_trips.conveyor_is_alive; barrier resolution itself no longer needs
+# round trips). Empirically ~5-6x gives a high-N pilot on a 2D Ising ferromagnet
+# a measurable rate, so a probe whose rounds_per_probe falls short is topped up
+# to this — which only ever lifts high-N probes (the max keeps rounds_per_probe
+# otherwise), and only the production window (the cheaper tuning phases stay at
+# rounds_per_probe).
 _PROBE_MIN_RT_ROUNDS_FACTOR = 6
 
 
