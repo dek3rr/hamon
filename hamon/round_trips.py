@@ -157,6 +157,18 @@ def empirical_round_trip_rate(
 # underestimate of ~10%, the point where the error stops being absorbable by
 # tune_chains' 5% safety margin plus its ±1-chain convergence tolerance.
 # So "resolved" ⇒ Λ̂ within ~10%.
+#
+# Re-validated in higher dimensions (same protocol; 3-D ferromagnet 8³ Λ≈14.4,
+# 3-D ±J glass 8³ Λ≈17.4 — a different hardness class, with a finite-T
+# spin-glass transition unlike any 2-D family — and 4-D ±J 4⁴ Λ≈12.8): the
+# sharper barrier concentration of higher d does NOT push healthy ladders over
+# the threshold. Working band tops at 0.64; under-provisioned band starts at
+# 0.773-0.775 (−12.6% / −16.7% error) — every rejected row errs >= 12.6%, every
+# admitted row <= 8.4%, bracketing the ~10% claim. Note the upper margin is
+# thin (0.773 vs 0.75 ≈ 1σ of per-pair noise), so a ~12%-error ladder can
+# occasionally read resolved; that direction is safe — tune_chains drives N*
+# off the running MAX of Λ̂ over probes, which a slightly-low probe cannot drag
+# down.
 _MAX_REJ_RESOLVED = 0.75
 
 # Efficiency floor for the *conveyor* check (a different question — see
@@ -169,6 +181,10 @@ _MAX_REJ_RESOLVED = 0.75
 #      false-alarm on a healthy spin glass, which is why it is 0.15)
 # 0.15 splits the crawl band from the design band, sitting ~1.3σ below the
 # weakest healthy reading (Poisson noise on 22 observed trips ≈ 0.044).
+# Higher-d re-validation (3-D ferro/±J 8³, 4-D ±J 4⁴): healthy plateaus
+# 0.181-0.691, stalls/crawls 0.000-0.069 — the floor holds, with the thinnest
+# healthy margin at the 3-D glass near design N (0.181, so ±0.04 Poisson noise
+# can occasionally trip a spurious "slow" warning there; WARNING-level only).
 _MIN_EFFICIENCY = 0.15
 
 # Expected round trips (τ_pred · n_rounds) the window must afford before τ_obs
@@ -184,6 +200,12 @@ _MIN_EFFICIENCY = 0.15
 #    numeric efficiency estimate stays noisy near the minimum window — ~40%
 #    relative at 6 trips — but the None/False boundary only has to protect
 #    against false stall verdicts.)
+# Higher-d re-validation (3-D ±J 8³ at fixed design N=48): a HEALTHY ladder
+# reads efficiency 0.144 — below the 0.15 floor — at 27.8 expected trips, and
+# the 40-trip guard is what suppresses that would-be false "slow" verdict
+# (None); by 55 expected trips the reading clears to 0.217 and the verdict is
+# correct. The 3-D transient ends by ~55 expected trips vs ~46 in 2-D, so at
+# the 40 boundary a healthy ladder reads ~0.18-0.24 in both — above the floor.
 _MIN_EXPECTED_TRIPS = 40.0
 
 

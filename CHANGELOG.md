@@ -38,7 +38,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and 0.75 sits in the measured gap between the ladders the tuner itself
   converges to (≤0.69 at the design point r\*=0.5) and the under-provisioned
   band (≥0.78). "Resolved" therefore means Λ̂ is within ~10% — the error a 5%
-  safety margin plus ±1-chain tolerance can absorb.
+  safety margin plus ±1-chain tolerance can absorb. Re-validated in higher
+  dimensions (3-D ferromagnet and ±J spin glass at 8³ — the latter a hardness
+  class with no 2-D analogue — and 4-D ±J at 4⁴): the sharper barrier
+  concentration of higher d does not move healthy ladders past the threshold
+  (working band ≤0.64, under-provisioned ≥0.773; every rejected row errs
+  ≥12.6%, every admitted row ≤8.4%), and the 40-expected-trips guard correctly
+  suppressed a would-be false "slow" verdict on a healthy 3-D glass reading
+  efficiency 0.144 on a short window.
 
   The dynamical question gets its own answer: `conveyor_is_alive` gates on
   **efficiency** (`tau_obs/tau_pred >= 0.15`, so a hard target is not held to a
