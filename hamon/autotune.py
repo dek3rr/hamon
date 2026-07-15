@@ -155,6 +155,10 @@ class NRPTPlan:
     _warm_state: list
     _clamp_state: list
     _obs_block: Any
+    # When set (= max_chains under chain masking), the tempered draw pads its
+    # ladder to this length and records the cold chain at a traced live index, so
+    # draws at different discovered N share ONE compiled observer round loop.
+    _pad_draw: int | None = None
 
     def sample(
         self,
@@ -198,12 +202,24 @@ class NRPTPlan:
         self, key: jax.Array, n_samples: int, n_warmup: int, steps_per_sample: int
     ) -> jax.Array:
         from hamon.nrpt import nrpt
-        from hamon.observers import NRPTStateObserver
+        from hamon.observers import ColdIndexObserver, NRPTStateObserver
 
         steps = max(1, steps_per_sample)
         n_total = n_warmup + n_samples * steps
         dev = self.device if self.device is not None else "auto"
         ebms, programs = self._source.nrpt_args(self._betas_dev)
+        # Chain-masked draw: pad the ladder to max_chains and record the live cold
+        # chain (absolute index n_chains-1 of the padded ladder) via a traced
+        # index, so draws at different discovered N reuse ONE compiled observer
+        # round loop. Bit-identical to the unpadded draw on the live prefix
+        # (threefry key/uniform streams are prefix-stable). Off (pad=None) ⇒ the
+        # original unpadded static -1 observer.
+        pad = self._pad_draw
+        observer = (
+            ColdIndexObserver(self.n_chains - 1)
+            if pad is not None
+            else NRPTStateObserver(chain_indices=(-1,))
+        )
         _, stats = nrpt(
             key,
             ebms,
@@ -214,8 +230,9 @@ class NRPTPlan:
             self.gibbs_steps_per_round,
             betas=self._betas_dev,
             track_round_trips=False,
-            observer=NRPTStateObserver(chain_indices=(-1,)),
+            observer=observer,
             device=dev,
+            pad_chains_to=pad,
         )
         trace = _cold_trace_from_observations(stats["observations"], self._col_perm)
         # Discard warmup, thin by steps_per_sample, keep exactly n_samples rows.
@@ -633,6 +650,10 @@ def autotune(
         _warm_state=warm_cold,
         _clamp_state=clamp_state,
         _obs_block=obs_block,
+        # Mask the tempered draw exactly when the probes were masked, so the whole
+        # pipeline (probes + polish + production + draw) shares one padded ladder
+        # length and repeated/varying-N draws reuse the observer round loop.
+        _pad_draw=(max_chains if pad_probes else None),
     )
 
 

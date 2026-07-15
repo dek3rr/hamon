@@ -340,6 +340,18 @@ class AbstractNRPTObserver(eqx.Module):
         """Initialize the observer carry.  Defaults to ``None``."""
         return None
 
+    @property
+    def masking_safe(self) -> bool:
+        """Whether this observer is correct under chain masking (``pad_chains_to``).
+
+        ``True`` only for observers that read **exclusively live** ladder
+        positions — not a raw ``-1`` tail index (which under padding records a
+        divergent padding copy of the cold chain) and not an all-chains aggregate
+        (which padding would pollute). Default ``False``; ``nrpt`` refuses to pad
+        when an observer is not masking-safe.
+        """
+        return False
+
 
 class NRPTStateObserver(AbstractNRPTObserver):
     """Collect raw chain states at specified chain indices each round.
@@ -369,6 +381,40 @@ class NRPTStateObserver(AbstractNRPTObserver):
     ) -> tuple[None, list[Array]]:
         idx = jnp.array(self.chain_indices)
         return None, [s[idx] for s in stacked_states]
+
+
+class ColdIndexObserver(AbstractNRPTObserver):
+    """Record one chain at a **traced** ladder index each round.
+
+    Like ``NRPTStateObserver((i,))`` but ``i`` is traced data, not a static
+    attribute, so a chain-masked (padded) draw at different *live* chain counts
+    reuses ONE compiled observer round loop instead of recompiling per N — the
+    live cold chain always sits at absolute index ``n_chains - 1`` of the padded
+    ladder. Observation layout matches ``NRPTStateObserver`` with a single index:
+    one ``(1, ...)`` array per free block, stacked to ``(n_rounds, 1, ...)`` by
+    ``lax.scan``.
+    """
+
+    idx: Array  # traced scalar: absolute live position to record
+
+    def __init__(self, idx):
+        self.idx = jnp.asarray(idx, dtype=jnp.int32)
+
+    @property
+    def masking_safe(self) -> bool:
+        # Reads a single caller-supplied live index (the cold chain at
+        # n_chains-1), never the padding tail — safe under pad_chains_to.
+        return True
+
+    def __call__(
+        self,
+        stacked_states: list[Array],
+        base_energies: Array,
+        round_idx: Int[Array, ""],
+        carry: None,
+    ) -> tuple[None, list[Array]]:
+        i = self.idx
+        return None, [s[i][None] for s in stacked_states]
 
 
 class NRPTEnergyObserver(AbstractNRPTObserver):
