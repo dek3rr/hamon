@@ -226,14 +226,18 @@ _GAUSSIAN_FACTOR_BLOCK_CACHE: dict = {}
 _GAUSSIAN_FACTOR_BLOCK_CACHE_MAX = 64
 
 
-def _gaussian_factor_blocks(nodes, edges) -> tuple[Block, Block, Block]:
+def _gaussian_factor_blocks(
+    nodes, edges
+) -> tuple[Block, "Block | None", "Block | None"]:
     key = (id(nodes), id(edges))
     hit = _GAUSSIAN_FACTOR_BLOCK_CACHE.get(key)
     if hit is not None:
         return hit[2], hit[3], hit[4]
     self_block = Block(list(nodes))
-    head_block = Block([a for a, _ in edges])
-    tail_block = Block([b for _, b in edges])
+    # Edge-less models (e.g. a diagonal-Gaussian reference for AnnealedEBM)
+    # have no pair factor and hence no head/tail blocks.
+    head_block = Block([a for a, _ in edges]) if len(edges) else None
+    tail_block = Block([b for _, b in edges]) if len(edges) else None
     if len(_GAUSSIAN_FACTOR_BLOCK_CACHE) >= _GAUSSIAN_FACTOR_BLOCK_CACHE_MAX:
         _GAUSSIAN_FACTOR_BLOCK_CACHE.pop(next(iter(_GAUSSIAN_FACTOR_BLOCK_CACHE)))
     _GAUSSIAN_FACTOR_BLOCK_CACHE[key] = (
@@ -305,14 +309,18 @@ class GaussianEBM(AbstractFactorizedEBM):
         self_block, head_block, tail_block = _gaussian_factor_blocks(
             self.nodes, self.edges
         )
-        return [
+        fs: list[EBMFactor] = [
             QuadraticSelfEBMFactor(
                 self_block, self.beta * self.diag, self.beta * self.lin
-            ),
-            QuadraticPairEBMFactor(
-                [head_block, tail_block], self.beta * self.couplings
-            ),
+            )
         ]
+        if head_block is not None and tail_block is not None:
+            fs.append(
+                QuadraticPairEBMFactor(
+                    [head_block, tail_block], self.beta * self.couplings
+                )
+            )
+        return fs
 
 
 class GaussianSamplingProgram(FactorSamplingProgram):

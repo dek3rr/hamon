@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The reference-annealing path: `AnnealedEBM` lets β start at exactly 0 for
+  continuous models.** `AnnealedEBM(reference, target)` implements the standard
+  PT path `E_β = (1−β)·E_ref + β·E_target`: β = 0 is the *reference
+  distribution at full weight* (a proper PD Gaussian, say), not the improper
+  flat limit of the target's own tempered family — so an unbounded-state-space
+  target can be tempered over the full ladder, replacing the `β_min > 0`
+  workaround. The combinator is generic: its factors are simply the reference's
+  at β′ = 1−β plus the target's at β′ = β, so any pair of factorized EBMs over
+  the same nodes composes (Gaussian→GMRF runs under `GaussianGibbsConditional`;
+  Gaussian→φ⁴ under `SliceGibbsConditional`, which already consumes the mixed
+  quadratic + polynomial interactions). The reference must itself be
+  normalizable — the caller's responsibility, exactly like positive
+  definiteness.
+
+  NRPT's template mode gains an **affine** path for such EBMs
+  (`beta_affine = True`): interactions are interpolated as `offset + β·slope`
+  (offset = the reference weights, slope = target − reference), and swap
+  energies are computed as **Δ = E₁ − E₀** — the β-independent reference term
+  cancels exactly in every swap ratio, so the DEO math is otherwise unchanged.
+  The linear-path code is untouched (byte-identical HLO for every existing
+  model). The factory route and `energy_delta_fn` are rejected for affine EBMs
+  (their swap math assumes the linear path), and `tune_chains`' energy-variance
+  seed falls back to the pilot (its Theorem-2 estimate assumes `E_β = β·E`).
+
+  Verified with a closed form at **every rung**: a diagonal-Gaussian reference
+  annealed into a lattice GMRF gives `N(P_β⁻¹·βh, P_β⁻¹)` with
+  `P_β = (1−β)R + βP` at each β, and a 4000-round NRPT ladder starting at
+  exactly β = 0 reproduces each rung's mean and variance — wrong swap energies
+  (using E₁, under which the reference fails to cancel) would break joint
+  invariance and drift these marginals. Chain masking stays bit-identical in
+  affine mode (bitwise test), and a φ⁴ target annealed from a Gaussian
+  reference runs from β = 0 under the slice sampler.
+
 - **Continuous *multimodal* models: the double-well (φ⁴) lattice, sampled by
   slice-sampling-within-Gibbs.** The Gaussian MRF covers the conjugate
   continuous case; this covers the case tempering exists for — continuous

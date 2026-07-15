@@ -1321,6 +1321,16 @@ def tune_chains(
     # provisioning only costs chains). On a non-glassy target Λ̂ is N-independent,
     # so the max equals the current value and this is a no-op.
     margin = 1.0 + max(0.0, float(safety_margin))
+    if getattr(ebm, "beta_affine", False) and seed_from_energy:
+        # The energy-variance seed (Theorem 2) estimates λ(β) from Var(E_base)
+        # assuming the linear path E_β = β·E_base; on an affine
+        # (reference-annealing) path the integrand is Var(Δ) instead, so the
+        # seed would be biased. Fall back to the robust max_chains pilot.
+        logger.debug(
+            "tune_chains: beta-affine EBM — skipping the energy-variance seed "
+            "(linear-path assumption); using the max_chains pilot."
+        )
+        seed_from_energy = False
     if initial_n is not None:
         n = _clamp(initial_n)
     elif seed_from_energy:

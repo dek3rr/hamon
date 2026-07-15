@@ -8,6 +8,7 @@ from .discrete_ebm import SquareCategoricalEBMFactor as SquareCategoricalEBMFact
 from .discrete_ebm import SquareDiscreteEBMFactor as SquareDiscreteEBMFactor
 from .ebm import AbstractEBM as AbstractEBM
 from .ebm import AbstractFactorizedEBM as AbstractFactorizedEBM
+from .ebm import AnnealedEBM as AnnealedEBM
 from .ebm import EBMFactor as EBMFactor
 from .ebm import FactorizedEBM as FactorizedEBM
 from .double_well import DoubleWellEBM as DoubleWellEBM

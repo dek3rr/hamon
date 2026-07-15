@@ -250,12 +250,15 @@ def _build_gibbs_runner(
     base_pbi,
     chain_data,
     n_free_blocks: int,
+    base_pbi_offset=None,
 ):
     """Build the vmapped per-chain Gibbs kernel for one round.
 
     Temperature-linear mode (``base_pbi`` set) scales the shared β = 1
-    interaction arrays by each chain's β inside the kernel; the per-chain
-    sequence mode maps over the stacked interaction pytree. Returns the vmapped
+    interaction arrays by each chain's β inside the kernel; affine
+    (reference-annealing) mode (``base_pbi_offset`` also set) interpolates them
+    as ``offset + β·slope``; the per-chain sequence mode maps over the stacked
+    interaction pytree. Returns the vmapped
     ``run_chains(gibbs_keys, states_free, chain_data)``.
     """
     null_ss = [None] * n_free_blocks
@@ -272,7 +275,22 @@ def _build_gibbs_runner(
         )
         return new_state
 
-    if base_pbi is not None:
+    if base_pbi is not None and base_pbi_offset is not None:
+        # Affine (reference-annealing) mode: E_β = E₀ + β·(E₁ − E₀), so each
+        # chain's interactions are offset + β·slope. offset carries the
+        # reference weights (β = 0); slope carries target − reference.
+        _slope_pbi = base_pbi
+        _offset_pbi = base_pbi_offset
+        chain_in_axes: object = 0
+
+        def _chain_step(gibbs_key, state_free, chain_input):
+            pbi_c = jax.tree.map(
+                lambda o, s: o + chain_input * s if isinstance(o, jax.Array) else o,
+                _offset_pbi,
+                _slope_pbi,
+            )
+            return _run_one(gibbs_key, state_free, pbi_c)
+    elif base_pbi is not None:
         # Temperature-linear mode: one shared base program at β = 1; scale
         # every interaction array by the chain's β inside the vmapped kernel.
         # Scalar-times-array commutes with the slicing done at program
@@ -341,11 +359,16 @@ def _build_energy_compute(
     beta_ref: jax.Array,
     base_spec,
     clamp_state: list,
+    ebm_ref0: AbstractEBM | None = None,
 ):
     """Build the per-round base-energy update.
 
     With ``energy_delta_fn`` set, energies are advanced by boundary-only deltas
     off the cached value; otherwise they are recomputed from scratch each round.
+    With ``ebm_ref0`` set (affine/reference-annealing mode) the base energy is
+    ``Δ = E₁ − E₀``: the swap ratio at (β_i, β_j) is
+    ``(β_i − β_j)·(Δ(x_j) − Δ(x_i))`` — the β-independent E₀ cancels exactly,
+    so Δ is the only quantity the DEO swaps may see.
     Signature: ``(new_states, old_states, cached_base_E) -> base_E``.
     """
     if energy_delta_fn is not None:
@@ -357,9 +380,14 @@ def _build_energy_compute(
         return _energy_cached
 
     def _energy_fresh(st_states, old_states, cached_bE):
-        return _compute_base_energies(
+        base = _compute_base_energies(
             ebm_ref, beta_ref, base_spec, st_states, clamp_state
         )
+        if ebm_ref0 is not None:
+            base = base - _compute_base_energies(
+                ebm_ref0, beta_ref, base_spec, st_states, clamp_state
+            )
+        return base
 
     return _energy_fresh
 
@@ -395,6 +423,8 @@ def _nrpt_rounds(
     observer: AbstractNRPTObserver | None,
     track_round_trips: bool,
     live_chains: jax.Array | None = None,
+    base_pbi_offset=None,
+    ebm_ref0: AbstractEBM | None = None,
 ) -> tuple[NRPTCarry, Any]:
     """The jitted NRPT round loop: vmapped Gibbs sweeps + DEO swaps.
 
@@ -435,18 +465,24 @@ def _nrpt_rounds(
         base_pbi,
         chain_data,
         n_free_blocks,
+        base_pbi_offset,
     )
     do_even, do_odd = _build_swap_passes(
         betas, n_chains, n_free_blocks, track_round_trips, live_chains
     )
     energy_compute = _build_energy_compute(
-        energy_delta_fn, ebm_ref, beta_ref, base_spec, clamp_state
+        energy_delta_fn, ebm_ref, beta_ref, base_spec, clamp_state, ebm_ref0
     )
     observer_init, observer_step = _build_observer_hooks(observer)
 
     base_E = _compute_base_energies(
         ebm_ref, beta_ref, base_spec, stacked_states, clamp_state
     )
+    if ebm_ref0 is not None:
+        # Affine mode: swap energies are Δ = E₁ − E₀ (see _build_energy_compute).
+        base_E = base_E - _compute_base_energies(
+            ebm_ref0, beta_ref, base_spec, stacked_states, clamp_state
+        )
 
     # --- Scan body ------------------------------------------------------------
     def one_round(carry: NRPTCarry, round_idx):
@@ -574,10 +610,13 @@ class _RunInputs(NamedTuple):
     n_chains: int
     betas: jax.Array
     chain_data: Any
-    base_pbi: Any  # set only in temperature-linear mode
+    base_pbi: Any  # set only in temperature-linear mode (β-slope when affine)
     ebm_ref: AbstractEBM
     beta_ref: jax.Array
     compute_dtype: Any
+    # Affine (reference-annealing) template mode only — None otherwise:
+    base_pbi_offset: Any = None  # interactions at β = 0 (the reference)
+    ebm_ref0: AbstractEBM | None = None  # β = 0 EBM for Δ = E₁ − E₀ swap energies
 
 
 def _resolve_run_inputs(
@@ -596,6 +635,8 @@ def _resolve_run_inputs(
     (kept off float64 so x64 host apps don't promote a float32 model).
     """
     base_pbi = None  # set in temperature-linear mode only
+    base_pbi_offset = None  # set in affine (reference-annealing) mode only
+    ebm_ref0: AbstractEBM | None = None
     if isinstance(ebms, AbstractEBM) and isinstance(programs, BlockSamplingProgram):
         if betas is None:
             raise ValueError(
@@ -624,6 +665,22 @@ def _resolve_run_inputs(
         betas = betas.astype(compute_dtype)
         chain_data: object = betas
         ebm_ref, beta_ref = base_ebm, jnp.asarray(1.0, dtype=compute_dtype)
+        if getattr(base_ebm, "beta_affine", False):
+            # Affine (reference-annealing) path: E_β = E₀ + β·(E₁ − E₀). The
+            # kernel interpolates interactions as offset + β·slope, where
+            # offset = pbi(β=0) (the reference) and slope = pbi(β=1) − pbi(β=0)
+            # elementwise (same factor structure at every β, only weights
+            # differ). Swap energies must be Δ = E₁ − E₀ — E₀ is β-independent
+            # and cancels exactly in every swap ratio — so the β = 0 EBM is
+            # kept for the base-energy computation.
+            ebm_ref0 = base_ebm.with_beta(jnp.asarray(0.0, dtype=compute_dtype))
+            program0 = run_program.with_ebm(ebm_ref0)
+            base_pbi_offset = program0.per_block_interactions
+            base_pbi = jax.tree.map(
+                lambda one, zero: (one - zero) if isinstance(one, jax.Array) else one,
+                base_pbi,
+                base_pbi_offset,
+            )
     elif isinstance(ebms, AbstractEBM) or isinstance(programs, BlockSamplingProgram):
         raise ValueError(
             "Pass ebms and programs either both as per-chain sequences, or "
@@ -636,6 +693,14 @@ def _resolve_run_inputs(
             )
         if len(ebms) != len(programs):
             raise ValueError("ebms and programs must have the same length.")
+        if any(getattr(e, "beta_affine", False) for e in ebms):
+            # The per-chain-sequence swap math recovers base energies from a
+            # single reference EBM assuming E_β = β·E_base; an affine path
+            # needs Δ = E₁ − E₀ instead, which only template mode computes.
+            raise ValueError(
+                "beta-affine EBMs (e.g. AnnealedEBM) require temperature-linear "
+                "template mode: pass a single ebm/program pair with betas=."
+            )
 
         base_spec = programs[0].gibbs_spec
         n_free_blocks = len(base_spec.free_blocks)
@@ -688,6 +753,8 @@ def _resolve_run_inputs(
         ebm_ref=ebm_ref,
         beta_ref=beta_ref,
         compute_dtype=compute_dtype,
+        base_pbi_offset=base_pbi_offset,
+        ebm_ref0=ebm_ref0,
     )
 
 
@@ -851,8 +918,17 @@ def nrpt(
     ebm_ref = ri.ebm_ref
     beta_ref = ri.beta_ref
     compute_dtype = ri.compute_dtype
+    base_pbi_offset = ri.base_pbi_offset
+    ebm_ref0 = ri.ebm_ref0
 
     _validate_beta_ladder(betas, n_chains)
+
+    if ebm_ref0 is not None and energy_delta_fn is not None:
+        raise ValueError(
+            "energy_delta_fn is incompatible with a beta-affine EBM: the swap "
+            "energies are Δ = E₁ − E₀, and a user delta function advances only "
+            "the target energy."
+        )
 
     # Continuous/unbounded models have no proper β = 0 member (no uniform
     # distribution over ℝⁿ; a Gaussian conditional's variance 1/(β·P) diverges),
@@ -928,9 +1004,18 @@ def nrpt(
             dev,
         )
         if base_pbi is not None:
-            # base_pbi aliases run_program.per_block_interactions; re-derive it
-            # from the moved program so the kernel reads on-device tensors.
-            base_pbi = run_program.per_block_interactions
+            if base_pbi_offset is not None:
+                # Affine mode: slope/offset/β=0-EBM are standalone trees (the
+                # slope was computed as pbi(1) − pbi(0), not aliasing the
+                # program) — move them to the device directly.
+                base_pbi, base_pbi_offset, ebm_ref0 = tree_device_put(
+                    (base_pbi, base_pbi_offset, ebm_ref0), dev
+                )
+            else:
+                # base_pbi aliases run_program.per_block_interactions; re-derive
+                # it from the moved program so the kernel reads on-device
+                # tensors.
+                base_pbi = run_program.per_block_interactions
     device_ctx = (
         jax.default_device(dev) if dev is not None else contextlib.nullcontext()
     )
@@ -988,6 +1073,8 @@ def nrpt(
                 observer,
                 track_round_trips,
                 live_chains,
+                base_pbi_offset,
+                ebm_ref0,
             )
             # Slice every padded carry field back to the live prefix, so the
             # public return is indistinguishable in shape and semantics from an

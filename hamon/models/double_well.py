@@ -303,17 +303,21 @@ class DoubleWellEBM(AbstractFactorizedEBM):
         self_block, head_block, tail_block = _gaussian_factor_blocks(
             self.nodes, self.edges
         )
-        return [
+        fs: list[EBMFactor] = [
             PolynomialSelfEBMFactor(
                 self_block,
                 self.beta * self.barrier,
                 self.beta * (-2.0 * self.barrier),
                 self.beta * self.lin,
-            ),
-            QuadraticPairEBMFactor(
-                [head_block, tail_block], self.beta * self.couplings
-            ),
+            )
         ]
+        if head_block is not None and tail_block is not None:
+            fs.append(
+                QuadraticPairEBMFactor(
+                    [head_block, tail_block], self.beta * self.couplings
+                )
+            )
+        return fs
 
 
 class DoubleWellSamplingProgram(FactorSamplingProgram):

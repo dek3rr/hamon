@@ -27,9 +27,24 @@ class AbstractEBM(eqx.Module):
         there is no uniform distribution over ℝⁿ, and e.g. a Gaussian
         conditional's variance 1/(β·P) diverges as β → 0 — so continuous EBMs
         override this to ``False`` and NRPT refuses a ladder that starts at
-        exactly β = 0 (use β_min > 0 instead).
+        exactly β = 0 (use β_min > 0, or anneal from a proper reference with
+        :class:`AnnealedEBM`).
         """
         return True
+
+    @property
+    def beta_affine(self) -> bool:
+        """Whether this EBM's energy is *affine* rather than *linear* in β:
+        ``E_β = E₀ + β·(E₁ − E₀)`` with ``E₀ ≠ 0``.
+
+        ``False`` (the default) is the pure temperature-linear family
+        ``E_β = β·E_base`` that NRPT's template mode scales by β. ``True``
+        (:class:`AnnealedEBM`) selects the affine template path: the kernel
+        interpolates interactions as ``offset + β·slope`` and swap energies use
+        ``Δ = E₁ − E₀`` (the β-independent ``E₀`` cancels exactly in every swap
+        ratio, so the DEO math is otherwise unchanged).
+        """
+        return False
 
     def with_beta(self, beta: Array) -> "AbstractEBM":
         """Return a copy of this EBM with a different inverse-temperature β.
@@ -148,3 +163,78 @@ class FactorizedEBM(AbstractFactorizedEBM):
     @property
     def factors(self):
         return self._factors
+
+
+class AnnealedEBM(AbstractFactorizedEBM):
+    r"""The reference-annealing path between two EBMs over the same nodes:
+
+    $$\mathcal{E}_\beta(x) = (1-\beta)\,\mathcal{E}_{\text{ref}}(x)
+        + \beta\,\mathcal{E}_{\text{target}}(x)
+        = \mathcal{E}_{\text{ref}} + \beta\,(\mathcal{E}_{\text{target}}
+        - \mathcal{E}_{\text{ref}})$$
+
+    — the standard PT path from a *reference* distribution (β = 0) to the
+    *target* (β = 1), rather than from the flat/uniform member of the target's
+    own tempered family. Its point: an unbounded-state-space target has no
+    proper β = 0 member (``proper_at_beta_zero = False``), but annealing from a
+    proper reference — e.g. a diagonal Gaussian — makes **every** rung of the
+    ladder proper, so β can start at exactly 0 and the ladder covers the full
+    entropic path.
+
+    Both EBMs must be defined over the same nodes and be temperature-linear
+    themselves (``factors`` emit β-scaled coefficients, as all hamon models
+    do): the annealed factors are simply the reference's at β' = 1−β plus the
+    target's at β' = β. The sampling program must use a conditional that
+    understands the union of both factor families (e.g.
+    :class:`~hamon.models.SliceGibbsConditional` handles quartic + quadratic;
+    an annealed pair of Gaussians is handled by
+    :class:`~hamon.models.GaussianGibbsConditional`).
+
+    ``beta_affine`` is ``True``: NRPT's template mode interpolates interactions
+    affinely and computes swap energies as Δ = E_target − E_ref (the shared
+    E_ref cancels in every swap ratio).
+    """
+
+    reference: "AbstractFactorizedEBM"
+    target: "AbstractFactorizedEBM"
+    beta: Array
+
+    def __init__(
+        self,
+        reference: "AbstractFactorizedEBM",
+        target: "AbstractFactorizedEBM",
+        beta,
+    ):
+        ref_sd = getattr(reference, "node_shape_dtypes", {})
+        tgt_sd = getattr(target, "node_shape_dtypes", {})
+        super().__init__({**ref_sd, **tgt_sd})
+        self.reference = reference
+        self.target = target
+        self.beta = jnp.asarray(beta)
+
+    @property
+    def proper_at_beta_zero(self) -> bool:
+        # The β = 0 member of the ANNEALED family is the reference at full
+        # weight — a genuine distribution whenever exp(−E_ref) is normalizable
+        # (e.g. a positive-definite Gaussian), which is the caller's
+        # responsibility exactly like positive-definiteness itself. Note this
+        # is NOT reference.proper_at_beta_zero: that asks about the reference's
+        # own β → 0 limit (all weights → 0, the improper flat density), a rung
+        # the annealed ladder never visits.
+        return True
+
+    @property
+    def beta_affine(self) -> bool:
+        return True
+
+    def with_beta(self, beta: Array) -> "AnnealedEBM":
+        return AnnealedEBM(self.reference, self.target, beta)
+
+    @property
+    def factors(self) -> list[EBMFactor]:
+        one = jnp.asarray(1.0, dtype=self.beta.dtype)
+        ref = self.reference.with_beta(one - self.beta)
+        tgt = self.target.with_beta(self.beta)
+        assert isinstance(ref, AbstractFactorizedEBM)
+        assert isinstance(tgt, AbstractFactorizedEBM)
+        return list(ref.factors) + list(tgt.factors)
