@@ -45,7 +45,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (working band ≤0.64, under-provisioned ≥0.773; every rejected row errs
   ≥12.6%, every admitted row ≤8.4%), and the 40-expected-trips guard correctly
   suppressed a would-be false "slow" verdict on a healthy 3-D glass reading
-  efficiency 0.144 on a short window.
+  efficiency 0.144 on a short window. Also validated at the continuous-state
+  limit hamon can express — a q=16 clock (≡ 2-D XY) model with continuous U(1)
+  symmetry and a Kosterlitz–Thouless transition, its sampler verified exact
+  against enumeration: the mechanism replicates, with one honest refinement —
+  the smooth spin-wave spectrum compresses the max-rejection scale, so the
+  admitted-error bound at the threshold is ~10–12% there rather than ~10%.
 
   The dynamical question gets its own answer: `conveyor_is_alive` gates on
   **efficiency** (`tau_obs/tau_pred >= 0.15`, so a hard target is not held to a

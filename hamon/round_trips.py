@@ -169,6 +169,17 @@ def empirical_round_trip_rate(
 # occasionally read resolved; that direction is safe — tune_chains drives N*
 # off the running MAX of Λ̂ over probes, which a slightly-low probe cannot drag
 # down.
+#
+# Continuous-state limit (q=16 clock ≡ 2-D XY model, 16², J=2, Λ≈15.7 — the
+# continuous limit hamon's uint8 states can express: continuous U(1) symmetry,
+# KT transition, spin waves; sampler verified exact against enumeration): the
+# mechanism replicates (caps exact at N-1, curve monotone, budget-invariant),
+# but the smooth spin-wave spectrum COMPRESSES the max(rej) scale — an
+# under-provisioned ladder shows lower max(rej) for the same fractional error —
+# so the boundary row (0.691 → −11.0%) is the one admitted row past 10% across
+# all six families. The honest guarantee is therefore "resolved ⇒ Λ̂ within
+# ~10-12%". Tightening to 0.70 would instead false-alarm on measured healthy
+# ladders (2-D working band reaches 0.705), a worse trade.
 _MAX_REJ_RESOLVED = 0.75
 
 # Efficiency floor for the *conveyor* check (a different question — see
@@ -185,6 +196,9 @@ _MAX_REJ_RESOLVED = 0.75
 # 0.181-0.691, stalls/crawls 0.000-0.069 — the floor holds, with the thinnest
 # healthy margin at the 3-D glass near design N (0.181, so ±0.04 Poisson noise
 # can occasionally trip a spurious "slow" warning there; WARNING-level only).
+# Continuous limit (q=16 clock/XY): healthy plateaus 0.337-0.719 — the fastest
+# conveyor measured anywhere, as the physics predicts (the KT phase is critical,
+# not broken into discrete basins, so nothing traps the index process).
 _MIN_EFFICIENCY = 0.15
 
 # Expected round trips (τ_pred · n_rounds) the window must afford before τ_obs
