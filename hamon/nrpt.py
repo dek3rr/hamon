@@ -538,21 +538,24 @@ def _phase_diagnostics(
     old_betas: jax.Array,
     new_betas: jax.Array,
     acceptance_rate: jax.Array,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """The per-phase scalar diagnostics of ``tune_schedule``'s tuning loop.
 
-    Returns ``(rej_std, max_beta_shift, Lambda, mean_acceptance)`` in one fused
-    kernel. Computing them as separate eager ``jnp.std`` / ``jnp.max`` /
-    ``jnp.sum`` / ``jnp.mean`` calls makes each its own XLA dispatch (and a
+    Returns ``(rej_std, max_beta_shift, Lambda, mean_acceptance, max_rej)`` in
+    one fused kernel. Computing them as separate eager ``jnp.std`` / ``jnp.max``
+    / ``jnp.sum`` / ``jnp.mean`` calls makes each its own XLA dispatch (and a
     separate compile the first time a shape is seen), which dominates the
     cold-start cost of an otherwise tiny per-phase computation. ``rej_std`` is
     the equalization quality (keep-best + equalize-stop); ``max_beta_shift`` is
-    the ladder movement (settle check)."""
+    the ladder movement (settle check); ``max_rej`` is the worst pair's
+    rejection rate, which flags a ladder still saturating at β_c (see
+    ``tune_schedule``'s keep-best and Λ-plateau stop)."""
     return (
         jnp.std(rej),
         jnp.max(jnp.abs(new_betas - old_betas)),
         jnp.sum(rej),
         jnp.mean(acceptance_rate),
+        jnp.max(rej),
     )
 
 
@@ -863,10 +866,22 @@ def nrpt(
                 "pad_chains_to requires temperature-linear mode (single template "
                 "ebm/program); per-chain sequences are not supported."
             )
-        if observer is not None or energy_delta_fn is not None:
+        if energy_delta_fn is not None:
             raise ValueError(
-                "pad_chains_to is incompatible with observer / energy_delta_fn "
-                "(they would see the padded ladder)."
+                "pad_chains_to is incompatible with energy_delta_fn "
+                "(boundary deltas would span the padded ladder)."
+            )
+        # A masking-safe observer (reads only live positions) IS allowed under
+        # padding: the padded ladder is (pad_to, ...), padding chains evolve
+        # independently, so a raw -1 index records a divergent copy and an
+        # all-chains aggregate is polluted. ColdIndexObserver reads a traced live
+        # index (cold chain = n_chains-1), so draws at different live N share ONE
+        # compiled observer round loop.
+        if observer is not None and not getattr(observer, "masking_safe", False):
+            raise ValueError(
+                "pad_chains_to is incompatible with this observer: it would see "
+                "the padded ladder. Use a masking-safe observer (e.g. "
+                "ColdIndexObserver) that reads only live positions."
             )
 
     # --- Device routing --------------------------------------------------------

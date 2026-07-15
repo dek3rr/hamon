@@ -7,6 +7,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`ColdIndexObserver` — record one chain at a *traced* ladder index.** Like
+  `NRPTStateObserver(chain_indices=(i,))`, but `i` is traced data rather than a
+  static attribute, so runs differing only in chain count reuse one compiled
+  round loop instead of baking the index into a separate executable each time.
+  Observers also gain a `masking_safe` property (default `False`), and
+  `nrpt(pad_chains_to=...)` now accepts an observer only when it reads
+  exclusively **live** ladder positions. Masking pads the ladder with copies of
+  the coldest chain which then evolve under their own RNG, so a raw `-1` index
+  records a divergent copy rather than the cold chain, and an all-chains
+  aggregate (`NRPTEnergyObserver`) is polluted by the padding — both are still
+  refused.
+
+### Fixed
+
+- **Schedule tuning no longer hands back its own input on glassy targets, and
+  the chain search stops paying for it.** `tune_schedule` keeps the best-scoring
+  ladder across phases, ranked by `std(rejection_rates)` — but on a glassy target
+  the *untuned* linear ladder scores a better spread than the partially-retuned
+  ladders of the tuning transient (`optimize_schedule` moves β violently for the
+  first few phases before settling). Within the old 4-phase cap no phase ever
+  beat phase 0, so keep-best returned the initial schedule **bit-for-bit**:
+  tuning burned four rounds of NRPT and changed nothing, leaving a pair pinned at
+  100% rejection. Λ̂ = Σ rej across an unbridged pair is a within-basin artifact
+  — the same saturated ladder read Λ̂ = 8.6 or 52.5 run to run — and
+  `tune_chains` consumed that noise as ground truth, so its running-max fixed
+  point jumped to a tiny N and then climbed back one probe at a time. Three
+  changes fix it: keep-best now ranks an **unsaturated** ladder above any
+  saturated one (`max(rej) >= saturation_tol`, default 0.99) before comparing
+  spread; tuning also stops once **Λ̂ plateaus** (`lambda_plateau_rtol`, default
+  5%, on an unsaturated ladder), which neither existing check could do — on a
+  glassy target `std(rejection_rates)` settles just *above* a useful
+  `equalize_tol` and `max|Δβ|` only touches its noise floor intermittently, so
+  the phase cap was silently deciding; and `n_tune` (4 → 16) is now a backstop
+  rather than the stopping rule. On the planted frustrated-loop suite every
+  target now converges in **2 probes** (was up to 6), no ladder saturates
+  (`max(rej)` 1.000 → 0.54–0.68), and the hardest targets get **~40% faster**
+  (17.1 s → 10.5 s at 32×32, loop density 10). Easy targets are unchanged —
+  their equalization stop already fired first.
+
+  This also corrects Λ and the discovered `N`, in **both** directions: Λ was
+  inflated where the ratchet caught a saturated-ladder spike (36.3 → 21.4, i.e.
+  N 78 → 47, ~40% fewer chains for the same sampling quality) and *deflated*
+  where the untuned ladder read low (18.8 → 21.7, N 41 → 47 — the old run was
+  **under-provisioned**, the dangerous direction). The recovered Λ is now
+  consistent across loop densities at fixed size and scales with the interface
+  length as a 2-D Ising barrier should, where the old estimates did neither.
+  Ground-state hit rate is unaffected (1.000 across the suite).
+
+- **`autotune` / `autosample` now sample multimodal targets correctly.** The
+  tuned plan previously drew final samples with plain single-chain block Gibbs
+  at the cold β from one warm state — which cannot cross energy barriers, so on
+  a multimodal target (the case NRPT exists for) every draw silently collapsed
+  into a single mode. `NRPTPlan.sample` now defaults to a **tempered draw**: it
+  runs the tuned NRPT ladder from the stored warm ladder and records the cold
+  chain each round, so the DEO swaps keep carrying barrier crossings into the
+  samples and all modes are represented. On the 16×16 ferromagnet at β=1 the
+  magnetization is now bimodal (~50/50) where it used to sit in one mode.
+
+- **Chain-count discovery no longer cries wolf on the high-N pilot.** With the
+  default `rounds_per_probe=200` and `max_chains=128`, `tune_chains`' fallback
+  pilot could never round-trip — a DEO round trip needs `≥ 2·(N−1) = 254` rounds
+  — so it always tripped the round-trip trust gate with a "barrier NOT identified
+  / within-basin artifact (biased low); add chains" WARNING, on exactly the
+  multimodal targets NRPT is for. Each discovery probe's **production window** is
+  now topped up to `6·(N−1)` rounds when that exceeds `rounds_per_probe` (production
+  only — the tuning phases, which estimate Λ from `Σ rej` and need no round trips,
+  stay at `rounds_per_probe`; low-N probes are untouched). The pilot now round-trips
+  and the barrier is genuinely identified at discovery (`barrier_identified=True`),
+  at the same discovered `N`.
+
 ### Changed
 
 - **The barrier trust gate now asks a structural question, and conveyor health is
@@ -63,33 +135,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "not measured" rather than "stalled". `tune_schedule` now exposes
   `stats["conveyor_alive"]` alongside `stats["barrier_identified"]`, and the
   diagnostics report flags a slow conveyor without claiming Λ is wrong.
-
-### Fixed
-
-- **`autotune` / `autosample` now sample multimodal targets correctly.** The
-  tuned plan previously drew final samples with plain single-chain block Gibbs
-  at the cold β from one warm state — which cannot cross energy barriers, so on
-  a multimodal target (the case NRPT exists for) every draw silently collapsed
-  into a single mode. `NRPTPlan.sample` now defaults to a **tempered draw**: it
-  runs the tuned NRPT ladder from the stored warm ladder and records the cold
-  chain each round, so the DEO swaps keep carrying barrier crossings into the
-  samples and all modes are represented. On the 16×16 ferromagnet at β=1 the
-  magnetization is now bimodal (~50/50) where it used to sit in one mode.
-
-- **Chain-count discovery no longer cries wolf on the high-N pilot.** With the
-  default `rounds_per_probe=200` and `max_chains=128`, `tune_chains`' fallback
-  pilot could never round-trip — a DEO round trip needs `≥ 2·(N−1) = 254` rounds
-  — so it always tripped the round-trip trust gate with a "barrier NOT identified
-  / within-basin artifact (biased low); add chains" WARNING, on exactly the
-  multimodal targets NRPT is for. Each discovery probe's **production window** is
-  now topped up to `6·(N−1)` rounds when that exceeds `rounds_per_probe` (production
-  only — the tuning phases, which estimate Λ from `Σ rej` and need no round trips,
-  stay at `rounds_per_probe`; low-N probes are untouched). The pilot now round-trips
-  and the barrier is genuinely identified at discovery (`barrier_identified=True`),
-  at the same discovered `N`.
-
-### Changed
-
+  
 - **`NRPTPlan.sample` and `autosample` gain a `tempered` flag (default `True`).**
   `tempered=False` selects the old single-chain cold-β draw for targets whose
   cold chain mixes on its own (unimodal / low-barrier). It now warns (once per
@@ -106,6 +152,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   budget-limited (Σrej used as-is) instead of the misleading "within-basin
   artifact / add chains" WARNING, which is reserved for a genuine stall on an
   adequate budget.
+
+- **The tempered draw is chain-masked, so draws at different `N` share one
+  compiled round loop.** `autotune` now masks the draw exactly when it masked
+  the probes (`pad_probes`): the ladder is padded to `max_chains` and the live
+  cold chain is recorded at the traced index `n_chains − 1`. Previously the draw
+  compiled its own `_nrpt_rounds` at the *unpadded* discovered `N`, so any
+  workload whose `N` drifts — PCD/training as the weights update, parameter
+  sweeps, or a second cold process hoping to hit the persistent compile cache —
+  paid a fresh ~0.9 s draw compile for every distinct `N`. Samples are
+  unchanged: the live prefix of a padded run is bit-identical to an unpadded one
+  (threefry key/uniform streams are prefix-stable and masked pairs keep the
+  identity permutation), verified bitwise and by the planted frustrated-loop
+  suite, which still reaches the certified ground state in all 40 configurations
+  swept across 64→1024 spins and a 20× range of loop density. A single cold run
+  is unaffected — the draw still compiles once, now at the padded shape.
 
 ## [0.9.0] — 2026-07-12
 
