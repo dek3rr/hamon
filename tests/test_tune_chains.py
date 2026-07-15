@@ -415,6 +415,113 @@ class TestChainMasking:
         assert masked["Lambda"] == plain["Lambda"]
         assert [h["n"] for h in masked["history"]] == [h["n"] for h in plain["history"]]
 
+    def test_cold_index_observer_padded_bit_identical(self):
+        """A masked draw's cold trace matches the unpadded draw's exactly.
+
+        The padded run records the live cold chain at absolute index n-1; the
+        unpadded run records it at -1. Same physical chain, so the collected
+        per-round observations must be bitwise equal.
+        """
+        from hamon.nrpt import nrpt
+        from hamon.observers import ColdIndexObserver, NRPTStateObserver
+
+        ebm, program = self._template()
+        nc = 5
+        betas = jnp.linspace(0.0, 1.0, nc)
+        inits = _init_factory(nc, [ebm] * nc, [program] * nc)
+        key = jax.random.key(5)
+        kw = dict(betas=betas, track_round_trips=False, device=None)
+        _, st_a = nrpt(
+            key, ebm, program, inits, [], 12, 1, observer=NRPTStateObserver((-1,)), **kw
+        )
+        for pad in (nc, 12):  # pad == n (structural no-op) and pad > n
+            _, st_b = nrpt(
+                key,
+                ebm,
+                program,
+                inits,
+                [],
+                12,
+                1,
+                observer=ColdIndexObserver(nc - 1),
+                pad_chains_to=pad,
+                **kw,
+            )
+            obs_a, obs_b = st_a["observations"], st_b["observations"]
+            assert len(obs_a) == len(obs_b)
+            for b in range(len(obs_a)):
+                assert np.array_equal(np.asarray(obs_a[b]), np.asarray(obs_b[b])), (
+                    pad,
+                    b,
+                )
+
+    def test_pad_rejects_only_non_masking_safe_observers(self):
+        """Padding admits live-index observers and rejects the rest.
+
+        A raw -1 index records a divergent padding copy and an all-chains
+        aggregate is polluted by padding, so both must be refused; a
+        ColdIndexObserver reads a live position and is allowed.
+        """
+        from hamon.nrpt import nrpt
+        from hamon.observers import (
+            ColdIndexObserver,
+            NRPTEnergyObserver,
+            NRPTStateObserver,
+        )
+
+        ebm, program = self._template()
+        nc = 4
+        betas = jnp.linspace(0.0, 1.0, nc)
+        inits = _init_factory(nc, [ebm] * nc, [program] * nc)
+        kw = dict(betas=betas, track_round_trips=False, device=None, pad_chains_to=8)
+        for obs in (NRPTEnergyObserver(nc), NRPTStateObserver((-1,))):
+            assert not obs.masking_safe
+            with pytest.raises(ValueError, match="observer"):
+                nrpt(
+                    jax.random.key(0), ebm, program, inits, [], 6, 1, observer=obs, **kw
+                )
+        live = ColdIndexObserver(nc - 1)
+        assert live.masking_safe
+        _, st = nrpt(
+            jax.random.key(0), ebm, program, inits, [], 6, 1, observer=live, **kw
+        )
+        assert st["observations"] is not None
+
+    def test_padded_draw_shares_compile_across_chain_counts(self):
+        """Padded observer draws at different live N reuse ONE compiled loop.
+
+        This is the point of the traced cold index: an unpadded draw (or a
+        static chain_indices) specializes per chain count, so a workload whose
+        discovered N drifts recompiles the draw every time.
+        """
+        from hamon.nrpt import _nrpt_rounds_trace_count, nrpt
+        from hamon.observers import ColdIndexObserver
+
+        ebm, program = self._template()
+
+        def draw(nc):
+            betas = jnp.linspace(0.0, 1.0, nc)
+            inits = _init_factory(nc, [ebm] * nc, [program] * nc)
+            nrpt(
+                jax.random.key(1),
+                ebm,
+                program,
+                inits,
+                [],
+                8,
+                1,
+                betas=betas,
+                observer=ColdIndexObserver(nc - 1),
+                pad_chains_to=12,
+                track_round_trips=False,
+                device=None,
+            )
+
+        draw(6)  # compiles the padded observer loop
+        before = _nrpt_rounds_trace_count[0]
+        draw(9)  # different live N, same padded ladder -> no retrace
+        assert _nrpt_rounds_trace_count[0] == before
+
     def test_pad_rejects_factory_route_and_observer(self):
         from hamon.nrpt import nrpt
         from hamon.observers import NRPTEnergyObserver

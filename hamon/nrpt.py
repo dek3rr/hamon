@@ -863,10 +863,22 @@ def nrpt(
                 "pad_chains_to requires temperature-linear mode (single template "
                 "ebm/program); per-chain sequences are not supported."
             )
-        if observer is not None or energy_delta_fn is not None:
+        if energy_delta_fn is not None:
             raise ValueError(
-                "pad_chains_to is incompatible with observer / energy_delta_fn "
-                "(they would see the padded ladder)."
+                "pad_chains_to is incompatible with energy_delta_fn "
+                "(boundary deltas would span the padded ladder)."
+            )
+        # A masking-safe observer (reads only live positions) IS allowed under
+        # padding: the padded ladder is (pad_to, ...), padding chains evolve
+        # independently, so a raw -1 index records a divergent copy and an
+        # all-chains aggregate is polluted. ColdIndexObserver reads a traced live
+        # index (cold chain = n_chains-1), so draws at different live N share ONE
+        # compiled observer round loop.
+        if observer is not None and not getattr(observer, "masking_safe", False):
+            raise ValueError(
+                "pad_chains_to is incompatible with this observer: it would see "
+                "the padded ladder. Use a masking-safe observer (e.g. "
+                "ColdIndexObserver) that reads only live positions."
             )
 
     # --- Device routing --------------------------------------------------------

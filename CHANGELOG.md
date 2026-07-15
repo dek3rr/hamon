@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`ColdIndexObserver` — record one chain at a *traced* ladder index.** Like
+  `NRPTStateObserver(chain_indices=(i,))`, but `i` is traced data rather than a
+  static attribute, so runs differing only in chain count reuse one compiled
+  round loop instead of baking the index into a separate executable each time.
+  Observers also gain a `masking_safe` property (default `False`), and
+  `nrpt(pad_chains_to=...)` now accepts an observer only when it reads
+  exclusively **live** ladder positions. Masking pads the ladder with copies of
+  the coldest chain which then evolve under their own RNG, so a raw `-1` index
+  records a divergent copy rather than the cold chain, and an all-chains
+  aggregate (`NRPTEnergyObserver`) is polluted by the padding — both are still
+  refused.
+
 ### Fixed
 
 - **`autotune` / `autosample` now sample multimodal targets correctly.** The
@@ -49,6 +63,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   budget-limited (Σrej used as-is) instead of the misleading "within-basin
   artifact / add chains" WARNING, which is reserved for a genuine stall on an
   adequate budget.
+
+- **The tempered draw is chain-masked, so draws at different `N` share one
+  compiled round loop.** `autotune` now masks the draw exactly when it masked
+  the probes (`pad_probes`): the ladder is padded to `max_chains` and the live
+  cold chain is recorded at the traced index `n_chains − 1`. Previously the draw
+  compiled its own `_nrpt_rounds` at the *unpadded* discovered `N`, so any
+  workload whose `N` drifts — PCD/training as the weights update, parameter
+  sweeps, or a second cold process hoping to hit the persistent compile cache —
+  paid a fresh ~0.9 s draw compile for every distinct `N`. Samples are
+  unchanged: the live prefix of a padded run is bit-identical to an unpadded one
+  (threefry key/uniform streams are prefix-stable and masked pairs keep the
+  identity permutation), verified bitwise and by the planted frustrated-loop
+  suite, which still reaches the certified ground state in all 40 configurations
+  swept across 64→1024 spins and a 20× range of loop density. A single cold run
+  is unaffected — the draw still compiles once, now at the padded shape.
 
 ## [0.9.0] — 2026-07-12
 
