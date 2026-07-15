@@ -21,7 +21,12 @@ from hamon.block_sampling import BlockSamplingProgram
 from hamon.device import DeviceLike, resolve_entry_device
 from hamon.models.ebm import AbstractEBM
 from hamon.nrpt import _ChainSource
-from hamon.tuning import tune_chains, tune_exploration, tune_schedule
+from hamon.tuning import (
+    _require_proper_beta_start,
+    tune_chains,
+    tune_exploration,
+    tune_schedule,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -443,6 +448,7 @@ def autotune(
 
     if init_factory is None:
         raise ValueError("init_factory is required.")
+    _require_proper_beta_start(beta_range[0], ebm)
     if compile_cache:
         enable_persistent_compile_cache(
             compile_cache if isinstance(compile_cache, str) else None

@@ -9,6 +9,98 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The reference-annealing path: `AnnealedEBM` lets β start at exactly 0 for
+  continuous models.** `AnnealedEBM(reference, target)` implements the standard
+  PT path `E_β = (1−β)·E_ref + β·E_target`: β = 0 is the *reference
+  distribution at full weight* (a proper PD Gaussian, say), not the improper
+  flat limit of the target's own tempered family — so an unbounded-state-space
+  target can be tempered over the full ladder, replacing the `β_min > 0`
+  workaround. The combinator is generic: its factors are simply the reference's
+  at β′ = 1−β plus the target's at β′ = β, so any pair of factorized EBMs over
+  the same nodes composes (Gaussian→GMRF runs under `GaussianGibbsConditional`;
+  Gaussian→φ⁴ under `SliceGibbsConditional`, which already consumes the mixed
+  quadratic + polynomial interactions). The reference must itself be
+  normalizable — the caller's responsibility, exactly like positive
+  definiteness.
+
+  NRPT's template mode gains an **affine** path for such EBMs
+  (`beta_affine = True`): interactions are interpolated as `offset + β·slope`
+  (offset = the reference weights, slope = target − reference), and swap
+  energies are computed as **Δ = E₁ − E₀** — the β-independent reference term
+  cancels exactly in every swap ratio, so the DEO math is otherwise unchanged.
+  The linear-path code is untouched (byte-identical HLO for every existing
+  model). The factory route and `energy_delta_fn` are rejected for affine EBMs
+  (their swap math assumes the linear path), and `tune_chains`' energy-variance
+  seed falls back to the pilot (its Theorem-2 estimate assumes `E_β = β·E`).
+
+  Verified with a closed form at **every rung**: a diagonal-Gaussian reference
+  annealed into a lattice GMRF gives `N(P_β⁻¹·βh, P_β⁻¹)` with
+  `P_β = (1−β)R + βP` at each β, and a 4000-round NRPT ladder starting at
+  exactly β = 0 reproduces each rung's mean and variance — wrong swap energies
+  (using E₁, under which the reference fails to cancel) would break joint
+  invariance and drift these marginals. Chain masking stays bit-identical in
+  affine mode (bitwise test), and a φ⁴ target annealed from a Gaussian
+  reference runs from β = 0 under the slice sampler.
+
+- **Continuous *multimodal* models: the double-well (φ⁴) lattice, sampled by
+  slice-sampling-within-Gibbs.** The Gaussian MRF covers the conjugate
+  continuous case; this covers the case tempering exists for — continuous
+  targets with basins. `DoubleWellEBM` is the lattice φ⁴ field theory
+  (`E = β(Σ a(x²−1)² − hx + Σ c·x_i x_j)`, constant dropped): at cold β with
+  ferromagnetic couplings the target is bimodal (±1 ordered wells), a single
+  chain mode-collapses, and NRPT round trips are what carry ± flips —
+  demonstrated in-tree (the tempered cold chain visits both signs of the
+  magnetization; a plain cold chain started in one well never leaves it).
+
+  The single-site conditional (`∝ exp(−β[ax⁴ − 2ax² + (Σc·x_j − h)x])`) has no
+  closed form, so `SliceGibbsConditional` performs one **slice-sampling**
+  transition per site (Neal 2003) — stepping-out with Neal's *bounded* budget
+  (the m-limited variant, exactly reversible by construction) and shrinkage —
+  vectorised over each colour class. This is hamon's first sampler that is a
+  Markov *transition* rather than an independent conditional draw (invariance
+  is all block Gibbs needs, and the sampler contract explicitly allows it).
+  The current value x₀ a transition kernel needs is delivered by a
+  **self-anchored interaction**: `PolynomialSelfEBMFactor` lists its own node
+  group as the tail block, so each site receives its pre-sweep value as a tail
+  state. Verified against quadrature (the ground truth when no closed form
+  exists): single-site and coupled-pair marginals match to histogram TV < 0.05
+  and the cross moment to ±0.05.
+
+  Two engineering points worth knowing: draws inside the shrinkage loop are
+  keyed by `fold_in(key, iteration)` — a site's stream depends only on its own
+  key, position, and iteration — so **chain masking stays bit-identical** even
+  though the slice kernel's `while_loop` trip counts are data-dependent
+  (covered by a bitwise test); and sampler state stays `None`, so the kernel
+  works under NRPT's round loop unchanged.
+
+- **Continuous-state models: Gaussian Markov random fields with exact block
+  Gibbs.** New `GaussianNode` (float32 states in ℝ) and a Gaussian model stack
+  in `hamon.models.gaussian` — `GaussianEBM` (energy
+  `β(½xᵀPx − hᵀx)`, i.e. `N(P⁻¹h, (βP)⁻¹)`), `QuadraticSelfEBMFactor` /
+  `QuadraticPairEBMFactor` with their interactions, `GaussianGibbsConditional`
+  (the single-site conditionals of a GMRF are themselves Gaussian, so block
+  Gibbs over a graph colouring stays *exact* — within a colour class they are
+  independent scalar Gaussians, no linear solve anywhere),
+  `GaussianSamplingProgram`, and `gaussian_init`. The sampling engine needed no
+  changes — states flow dtype-generically end to end — and all interaction
+  arrays are linear in β, so NRPT's temperature-linear template mode applies
+  bit-exactly. Verified against the closed form: 200k-sample block-Gibbs mean
+  and full covariance match `N(P⁻¹h, (βP)⁻¹)` to Monte-Carlo precision
+  (covariance rel-Frobenius error 0.010, below the ~0.038 MC floor), and the
+  cold chain of a tempered NRPT ladder continues to match the closed form —
+  the full stack is exact on continuous states, not just the local kernel.
+
+  One structural difference from the discrete models: an unbounded state space
+  has no proper β = 0 member (no uniform distribution over ℝⁿ; the conditional
+  variance `1/(β·d)` diverges), so `AbstractEBM` gains a
+  `proper_at_beta_zero` property (default `True`; `GaussianEBM` reports
+  `False`) and `nrpt` / `tune_chains` / `autotune` now **reject a ladder that
+  starts at exactly β = 0** for such models instead of silently producing
+  non-finite states — use `beta_range=(β_min > 0, β_max)`. The
+  binary-only sections of `report_nrpt_diagnostics` (marginal entropy,
+  convergence) are skipped with a note for non-boolean samples; ESS is
+  numeric-generic and stays.
+
 - **`ColdIndexObserver` — record one chain at a *traced* ladder index.** Like
   `NRPTStateObserver(chain_indices=(i,))`, but `i` is traced data rather than a
   static attribute, so runs differing only in chain count reuse one compiled

@@ -47,6 +47,23 @@ logger = logging.getLogger(__name__)
 _DEFAULT_TUNE_TOL = 0.02
 
 
+def _require_proper_beta_start(beta0: float, ebm) -> None:
+    """Fail fast when a ladder would start at β = 0 for a model with no proper
+    β = 0 member (continuous/unbounded state spaces — see
+    ``AbstractEBM.proper_at_beta_zero``). Only checkable on the template route
+    (``ebm`` given); the factory route is caught at run time by ``nrpt``."""
+    if (
+        ebm is not None
+        and float(beta0) == 0.0
+        and not getattr(ebm, "proper_at_beta_zero", True)
+    ):
+        raise ValueError(
+            f"{type(ebm).__name__} is not proper at beta=0 (unbounded state "
+            "space), but beta_range starts at exactly 0. Pass "
+            "beta_range=(beta_min > 0, beta_max)."
+        )
+
+
 def _tune_phase_adaptive_rounds(
     run_phase,
     key,
@@ -1173,6 +1190,7 @@ def tune_chains(
         raise ValueError("init_factory is required.")
     if clamp_state is None:
         clamp_state = []
+    _require_proper_beta_start(beta_range[0], ebm)
 
     r_target = max(1.0 - target_acceptance, 1e-3)
     min_chains = int(min_chains)
@@ -1303,6 +1321,16 @@ def tune_chains(
     # provisioning only costs chains). On a non-glassy target Λ̂ is N-independent,
     # so the max equals the current value and this is a no-op.
     margin = 1.0 + max(0.0, float(safety_margin))
+    if getattr(ebm, "beta_affine", False) and seed_from_energy:
+        # The energy-variance seed (Theorem 2) estimates λ(β) from Var(E_base)
+        # assuming the linear path E_β = β·E_base; on an affine
+        # (reference-annealing) path the integrand is Var(Δ) instead, so the
+        # seed would be biased. Fall back to the robust max_chains pilot.
+        logger.debug(
+            "tune_chains: beta-affine EBM — skipping the energy-variance seed "
+            "(linear-path assumption); using the max_chains pilot."
+        )
+        seed_from_energy = False
     if initial_n is not None:
         n = _clamp(initial_n)
     elif seed_from_energy:
