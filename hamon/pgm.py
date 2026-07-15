@@ -160,7 +160,21 @@ class CategoricalNode(AbstractNode):
     pass
 
 
+class GaussianNode(AbstractNode):
+    """A node that represents a continuous random variable with state in ℝ.
+
+    The default state dtype is ``float32`` (see ``DEFAULT_NODE_SHAPE_DTYPES``).
+    Continuous state spaces are unbounded, so — unlike the discrete nodes —
+    there is no proper uniform distribution over them: models built on these
+    nodes cannot be tempered to β = 0 (see
+    ``AbstractEBM.proper_at_beta_zero``); use a β ladder with β_min > 0.
+    """
+
+    pass
+
+
 DEFAULT_NODE_SHAPE_DTYPES = {
     SpinNode: jax.ShapeDtypeStruct(tuple(), dtype=jnp.bool_),
     CategoricalNode: jax.ShapeDtypeStruct(tuple(), dtype=jnp.uint8),
+    GaussianNode: jax.ShapeDtypeStruct(tuple(), dtype=jnp.float32),
 }

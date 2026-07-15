@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Continuous-state models: Gaussian Markov random fields with exact block
+  Gibbs.** New `GaussianNode` (float32 states in ℝ) and a Gaussian model stack
+  in `hamon.models.gaussian` — `GaussianEBM` (energy
+  `β(½xᵀPx − hᵀx)`, i.e. `N(P⁻¹h, (βP)⁻¹)`), `QuadraticSelfEBMFactor` /
+  `QuadraticPairEBMFactor` with their interactions, `GaussianGibbsConditional`
+  (the single-site conditionals of a GMRF are themselves Gaussian, so block
+  Gibbs over a graph colouring stays *exact* — within a colour class they are
+  independent scalar Gaussians, no linear solve anywhere),
+  `GaussianSamplingProgram`, and `gaussian_init`. The sampling engine needed no
+  changes — states flow dtype-generically end to end — and all interaction
+  arrays are linear in β, so NRPT's temperature-linear template mode applies
+  bit-exactly. Verified against the closed form: 200k-sample block-Gibbs mean
+  and full covariance match `N(P⁻¹h, (βP)⁻¹)` to Monte-Carlo precision
+  (covariance rel-Frobenius error 0.010, below the ~0.038 MC floor), and the
+  cold chain of a tempered NRPT ladder continues to match the closed form —
+  the full stack is exact on continuous states, not just the local kernel.
+
+  One structural difference from the discrete models: an unbounded state space
+  has no proper β = 0 member (no uniform distribution over ℝⁿ; the conditional
+  variance `1/(β·d)` diverges), so `AbstractEBM` gains a
+  `proper_at_beta_zero` property (default `True`; `GaussianEBM` reports
+  `False`) and `nrpt` / `tune_chains` / `autotune` now **reject a ladder that
+  starts at exactly β = 0** for such models instead of silently producing
+  non-finite states — use `beta_range=(β_min > 0, β_max)`. The
+  binary-only sections of `report_nrpt_diagnostics` (marginal entropy,
+  convergence) are skipped with a note for non-boolean samples; ESS is
+  numeric-generic and stays.
+
 - **`ColdIndexObserver` — record one chain at a *traced* ladder index.** Like
   `NRPTStateObserver(chain_indices=(i,))`, but `i` is traced data rather than a
   static attribute, so runs differing only in chain count reuse one compiled

@@ -49,6 +49,7 @@ from .diagnostics import effective_sample_size as effective_sample_size
 from .diagnostics import report_nrpt_diagnostics as report_nrpt_diagnostics
 from .pgm import AbstractNode as AbstractNode
 from .pgm import CategoricalNode as CategoricalNode
+from .pgm import GaussianNode as GaussianNode
 from .pgm import SpinNode as SpinNode
 from .nrpt import nrpt as nrpt
 from .nrpt import optimize_schedule as optimize_schedule

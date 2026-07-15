@@ -854,6 +854,17 @@ def nrpt(
 
     _validate_beta_ladder(betas, n_chains)
 
+    # Continuous/unbounded models have no proper β = 0 member (no uniform
+    # distribution over ℝⁿ; a Gaussian conditional's variance 1/(β·P) diverges),
+    # so a ladder starting at exactly β = 0 would silently produce non-finite
+    # states on the hottest chain. Fail loudly instead.
+    if float(np.asarray(betas)[0]) == 0.0 and not ebm_ref.proper_at_beta_zero:
+        raise ValueError(
+            f"{type(ebm_ref).__name__} is not proper at beta=0 (unbounded state "
+            "space), but the ladder starts at exactly 0. Use a beta ladder with "
+            "beta_min > 0."
+        )
+
     # --- Chain-masking validation ----------------------------------------------
     pad_to = int(pad_chains_to) if pad_chains_to is not None else None
     if pad_to is not None:

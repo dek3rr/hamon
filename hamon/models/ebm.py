@@ -17,6 +17,20 @@ class AbstractEBM(eqx.Module):
     Something that has a well-defined energy function (map from a state to a scalar).
     """
 
+    @property
+    def proper_at_beta_zero(self) -> bool:
+        """Whether the β = 0 member of this EBM's tempered family is a proper
+        distribution.
+
+        Finite state spaces always are (β = 0 is the uniform distribution), so
+        the default is ``True``. Continuous/unbounded state spaces are not —
+        there is no uniform distribution over ℝⁿ, and e.g. a Gaussian
+        conditional's variance 1/(β·P) diverges as β → 0 — so continuous EBMs
+        override this to ``False`` and NRPT refuses a ladder that starts at
+        exactly β = 0 (use β_min > 0 instead).
+        """
+        return True
+
     def with_beta(self, beta: Array) -> "AbstractEBM":
         """Return a copy of this EBM with a different inverse-temperature β.
 

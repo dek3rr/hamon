@@ -10,6 +10,14 @@ from .ebm import AbstractEBM as AbstractEBM
 from .ebm import AbstractFactorizedEBM as AbstractFactorizedEBM
 from .ebm import EBMFactor as EBMFactor
 from .ebm import FactorizedEBM as FactorizedEBM
+from .gaussian import GaussianEBM as GaussianEBM
+from .gaussian import GaussianGibbsConditional as GaussianGibbsConditional
+from .gaussian import GaussianSamplingProgram as GaussianSamplingProgram
+from .gaussian import QuadraticPairEBMFactor as QuadraticPairEBMFactor
+from .gaussian import QuadraticPairInteraction as QuadraticPairInteraction
+from .gaussian import QuadraticSelfEBMFactor as QuadraticSelfEBMFactor
+from .gaussian import QuadraticSelfInteraction as QuadraticSelfInteraction
+from .gaussian import gaussian_init as gaussian_init
 from .ising import IsingEBM as IsingEBM
 from .ising import IsingSamplingProgram as IsingSamplingProgram
 from .ising import IsingTrainingSpec as IsingTrainingSpec

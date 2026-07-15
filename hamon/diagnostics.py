@@ -638,16 +638,28 @@ def report_nrpt_diagnostics(
         )
 
     if samples is not None:
-        conv = sample_convergence(samples)
-        report.convergence_status = conv.status
-        report.rank_stability = conv.rank_stability
+        # The marginal-entropy and convergence sections interpret samples as
+        # binary 0/1 (per-variable Bernoulli entropy of a mean, top-k marginal
+        # overlap) — on continuous (float) samples they would return
+        # garbage/NaN, not diagnostics. Skip them for non-boolean samples; the
+        # ESS section below is numeric-generic and stays.
+        samples_binary = np.asarray(samples).dtype == np.bool_
+        if samples_binary:
+            conv = sample_convergence(samples)
+            report.convergence_status = conv.status
+            report.rank_stability = conv.rank_stability
 
-        report.marginal_entropy = marginal_entropy(samples)
-        if report.marginal_entropy < entropy_frozen:
-            _flag(f"frozen marginals (entropy={report.marginal_entropy:.3f})")
-        elif report.marginal_entropy > entropy_uniform:
+            report.marginal_entropy = marginal_entropy(samples)
+            if report.marginal_entropy < entropy_frozen:
+                _flag(f"frozen marginals (entropy={report.marginal_entropy:.3f})")
+            elif report.marginal_entropy > entropy_uniform:
+                warnings.append(
+                    f"near-uniform marginals (entropy={report.marginal_entropy:.3f}) — beta may be too low"
+                )
+        else:
             warnings.append(
-                f"near-uniform marginals (entropy={report.marginal_entropy:.3f}) — beta may be too low"
+                "samples are non-boolean (continuous model): entropy/convergence "
+                "sections skipped; ESS still reported"
             )
 
         ess = effective_sample_size(samples)
