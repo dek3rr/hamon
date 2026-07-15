@@ -138,6 +138,8 @@ def tune_schedule(
     min_rounds_per_tune: int = 50,
     round_stable_k: int = 2,
     lambda_rtol: float = 0.05,
+    lambda_plateau_rtol: float = 0.05,
+    saturation_tol: float = 0.99,
     device: DeviceLike = "auto",
     pad_chains_to: int | None = None,
 ) -> tuple[list, dict]:
@@ -163,17 +165,28 @@ def tune_schedule(
     ``min_rounds_per_tune`` and the ``rounds_per_tune`` ceiling, in
     ``round_batch`` increments — see ``_tune_phase_adaptive_rounds``), giving a
     low-variance rejection-rate estimate. The schedule with the **best**
-    (lowest-spread) rejection rates seen across phases is kept for production —
-    not the last, which can be noisier. Tuning stops once the schedule is
-    well-equalized (``std(rejection_rates) < equalize_tol``) OR has settled
-    (``max|Δβ|`` below the effective ``tune_tol`` — its Monte-Carlo floor) for
+    rejection rates seen across phases is kept for production — not the last,
+    which can be noisier. "Best" ranks an **unsaturated** ladder (no pair at
+    ``max(rej) >= saturation_tol``, i.e. none pinned at ~100% rejection) above
+    any saturated one, then by lowest spread: a saturated pair means an
+    unbridged gap at β_c, so Λ̂ across it is a within-basin artifact, and its
+    spread can score *better* than the partially-retuned ladders of the tuning
+    transient — ranking on spread alone reverts to the initial schedule and
+    makes tuning a no-op on glassy targets.
+
+    Tuning stops once the schedule is well-equalized
+    (``std(rejection_rates) < equalize_tol``) OR has settled (``max|Δβ|`` below
+    the effective ``tune_tol`` — its Monte-Carlo floor) OR Λ̂ has **plateaued**
+    (relative change ``<= lambda_plateau_rtol`` on an unsaturated ladder), for
     ``phase_patience`` consecutive phases, after at least ``min_tune_phases``,
-    capped at ``n_tune``. (``max|Δβ|`` alone is not a reliable convergence
-    signal: it plateaus at a problem-dependent noise floor rather than going to
-    zero, so the equalization check is what stops already-good schedules.) When
-    ``tune_tol`` is left ``None`` it defaults to ``_DEFAULT_TUNE_TOL`` here.
-    Counts are deterministic for a given seed but problem-dependent — do not
-    assume a fixed round/phase count.
+    capped at ``n_tune``. Neither of the first two alone is reliable: ``max|Δβ|``
+    plateaus at a problem-dependent noise floor rather than going to zero, and on
+    a glassy target ``std(rejection_rates)`` settles just *above* a useful
+    ``equalize_tol`` — so without the Λ-plateau check the cap silently decides,
+    which is the failure the plateau stop exists to prevent. ``n_tune`` is a
+    backstop, not the intended stopping rule. When ``tune_tol`` is left ``None``
+    it defaults to ``_DEFAULT_TUNE_TOL`` here. Counts are deterministic for a
+    given seed but problem-dependent — do not assume a fixed round/phase count.
 
     **Legacy mode (``adaptive_tuning=False``):** runs exactly ``n_tune`` phases
     of exactly ``rounds_per_tune`` rounds and uses the last schedule.
@@ -260,9 +273,13 @@ def tune_schedule(
     )
 
     # Keep the best-equalized schedule actually evaluated (adaptive mode), so a
-    # noisy late phase can't hand a worse ladder to production.
+    # noisy late phase can't hand a worse ladder to production. ``best_saturated``
+    # starts True so the first ladder without a saturated pair always displaces
+    # the initial one, whose rej_std can otherwise look deceptively good.
     best_betas = betas
     best_quality = float("inf")
+    best_saturated = True
+    prev_lambda: float | None = None
     stop_streak = 0
 
     phase = 0
@@ -294,12 +311,27 @@ def tune_schedule(
         # Λ, and mean acceptance — all in one fused kernel instead of separate
         # eager reductions. rej_std depends only on the pre-update rates, so
         # keep-best still records old_betas.
-        rej_std_a, shift_a, lambda_a, mean_acc_a = _phase_diagnostics(
+        rej_std_a, shift_a, lambda_a, mean_acc_a, max_rej_a = _phase_diagnostics(
             rej, old_betas, new_betas, stats["acceptance_rate"]
         )
         quality = float(rej_std_a)
-        if adaptive_tuning and quality < best_quality:
+        max_rej = float(max_rej_a)
+        # A pair pinned at ~100% rejection means the ladder still has an
+        # unbridged gap at β_c: no state crosses it, so Λ̂ = Σ rej across it is a
+        # within-basin artifact (and wildly unstable — the same saturated ladder
+        # can read Λ̂ = 8 or 52). Such a ladder must never win keep-best, and
+        # rej_std alone does not rule it out: on a glassy target the untuned
+        # linear ladder scores a *better* rej_std than the partially-retuned
+        # ladders of the tuning transient, so plain rej_std ranking reverts all
+        # the way to the initial schedule and tuning becomes a no-op. Rank
+        # unsaturated over saturated first, then by rej_std.
+        saturated = max_rej >= saturation_tol
+        if adaptive_tuning and (
+            (best_saturated and not saturated)
+            or (saturated == best_saturated and quality < best_quality)
+        ):
             best_quality = quality
+            best_saturated = saturated
             best_betas = old_betas
         betas = new_betas
 
@@ -331,10 +363,25 @@ def tune_schedule(
 
         if adaptive_tuning:
             # Combined stop: well-equalized OR schedule movement at its noise
-            # floor, sustained for phase_patience consecutive phases.
+            # floor OR Λ̂ plateaued, sustained for phase_patience consecutive
+            # phases.
             equalized = quality < equalize_tol
             settled = effective_tol is not None and max_beta_shift < effective_tol
-            stop_streak = stop_streak + 1 if (equalized or settled) else 0
+            # Λ-plateau: the estimate we actually care about has stopped moving.
+            # Needed because on a glassy target rej_std settles just *above*
+            # equalize_tol (~0.05-0.07) so `equalized` never fires, and max|Δβ|
+            # only touches its noise floor intermittently — leaving the phase cap
+            # to decide, which is what mis-tuned these ladders in the first place.
+            # Gated on an unsaturated ladder: Λ̂ across a pair pinned at ~100%
+            # rejection is a within-basin artifact whose stability means nothing.
+            plateaued = (
+                prev_lambda is not None
+                and not saturated
+                and abs(phase_lambda - prev_lambda)
+                <= lambda_plateau_rtol * max(abs(phase_lambda), 1e-9)
+            )
+            prev_lambda = phase_lambda
+            stop_streak = stop_streak + 1 if (equalized or settled or plateaued) else 0
             if phase >= min_tune_phases and stop_streak >= phase_patience:
                 logger.info(
                     "tune_schedule: schedule converged after %d phase(s) "
@@ -990,7 +1037,7 @@ def tune_chains(
     seed_from_energy: bool = True,
     target_acceptance: float = 0.5,
     rounds_per_probe: int = 200,
-    n_tune_per_probe: int = 4,
+    n_tune_per_probe: int = 16,
     max_iters: int = 6,
     min_chains: int = 3,
     max_chains: int = 128,

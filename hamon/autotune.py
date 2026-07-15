@@ -313,7 +313,7 @@ def autotune(
     select_by: str = "cost",
     target_efficiency: float = 0.9,
     rounds_per_probe: int = 400,
-    n_tune: int = 4,
+    n_tune: int = 16,
     n_polish: int = 2,
     n_rounds: int = 1000,
     compile_cache: bool | str = True,

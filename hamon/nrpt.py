@@ -538,21 +538,24 @@ def _phase_diagnostics(
     old_betas: jax.Array,
     new_betas: jax.Array,
     acceptance_rate: jax.Array,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """The per-phase scalar diagnostics of ``tune_schedule``'s tuning loop.
 
-    Returns ``(rej_std, max_beta_shift, Lambda, mean_acceptance)`` in one fused
-    kernel. Computing them as separate eager ``jnp.std`` / ``jnp.max`` /
-    ``jnp.sum`` / ``jnp.mean`` calls makes each its own XLA dispatch (and a
+    Returns ``(rej_std, max_beta_shift, Lambda, mean_acceptance, max_rej)`` in
+    one fused kernel. Computing them as separate eager ``jnp.std`` / ``jnp.max``
+    / ``jnp.sum`` / ``jnp.mean`` calls makes each its own XLA dispatch (and a
     separate compile the first time a shape is seen), which dominates the
     cold-start cost of an otherwise tiny per-phase computation. ``rej_std`` is
     the equalization quality (keep-best + equalize-stop); ``max_beta_shift`` is
-    the ladder movement (settle check)."""
+    the ladder movement (settle check); ``max_rej`` is the worst pair's
+    rejection rate, which flags a ladder still saturating at β_c (see
+    ``tune_schedule``'s keep-best and Λ-plateau stop)."""
     return (
         jnp.std(rej),
         jnp.max(jnp.abs(new_betas - old_betas)),
         jnp.sum(rej),
         jnp.mean(acceptance_rate),
+        jnp.max(rej),
     )
 
 

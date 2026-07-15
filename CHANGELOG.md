@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Schedule tuning no longer hands back its own input on glassy targets, and
+  the chain search stops paying for it.** `tune_schedule` keeps the best-scoring
+  ladder across phases, ranked by `std(rejection_rates)` — but on a glassy target
+  the *untuned* linear ladder scores a better spread than the partially-retuned
+  ladders of the tuning transient (`optimize_schedule` moves β violently for the
+  first few phases before settling). Within the old 4-phase cap no phase ever
+  beat phase 0, so keep-best returned the initial schedule **bit-for-bit**:
+  tuning burned four rounds of NRPT and changed nothing, leaving a pair pinned at
+  100% rejection. Λ̂ = Σ rej across an unbridged pair is a within-basin artifact
+  — the same saturated ladder read Λ̂ = 8.6 or 52.5 run to run — and
+  `tune_chains` consumed that noise as ground truth, so its running-max fixed
+  point jumped to a tiny N and then climbed back one probe at a time. Three
+  changes fix it: keep-best now ranks an **unsaturated** ladder above any
+  saturated one (`max(rej) >= saturation_tol`, default 0.99) before comparing
+  spread; tuning also stops once **Λ̂ plateaus** (`lambda_plateau_rtol`, default
+  5%, on an unsaturated ladder), which neither existing check could do — on a
+  glassy target `std(rejection_rates)` settles just *above* a useful
+  `equalize_tol` and `max|Δβ|` only touches its noise floor intermittently, so
+  the phase cap was silently deciding; and `n_tune` (4 → 16) is now a backstop
+  rather than the stopping rule. On the planted frustrated-loop suite every
+  target now converges in **2 probes** (was up to 6), no ladder saturates
+  (`max(rej)` 1.000 → 0.54–0.68), and the hardest targets get **~40% faster**
+  (17.1 s → 10.5 s at 32×32, loop density 10). Easy targets are unchanged —
+  their equalization stop already fired first.
+
+  This also corrects Λ and the discovered `N`, in **both** directions: Λ was
+  inflated where the ratchet caught a saturated-ladder spike (36.3 → 21.4, i.e.
+  N 78 → 47, ~40% fewer chains for the same sampling quality) and *deflated*
+  where the untuned ladder read low (18.8 → 21.7, N 41 → 47 — the old run was
+  **under-provisioned**, the dangerous direction). The recovered Λ is now
+  consistent across loop densities at fixed size and scales with the interface
+  length as a 2-D Ising barrier should, where the old estimates did neither.
+  Ground-state hit rate is unaffected (1.000 across the suite).
+
 - **`autotune` / `autosample` now sample multimodal targets correctly.** The
   tuned plan previously drew final samples with plain single-chain block Gibbs
   at the cold β from one warm state — which cannot cross energy barriers, so on
