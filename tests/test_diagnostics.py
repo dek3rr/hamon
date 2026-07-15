@@ -215,16 +215,30 @@ class TestNRPTHealthReport(unittest.TestCase):
         self.assertTrue(any("round trip" in i for i in report.issues))
 
     def test_barrier_identified_on_healthy_run(self):
-        """Round trips flowing ⇒ the barrier estimate is identified."""
+        """An unsaturated ladder ⇒ the barrier estimate is resolved."""
         report = report_nrpt_diagnostics(self._stats())
         self.assertTrue(report.barrier_identified)
 
-    def test_barrier_not_identified_when_conveyor_stalled(self):
-        """Zero round trips ⇒ Λ̂ is a within-basin artifact, flagged not identified."""
-        report = report_nrpt_diagnostics(self._stats(tau_obs=0.0))
+    def test_barrier_not_identified_when_ladder_saturates(self):
+        """Pairs pinned at r=1 ⇒ Λ̂ reports its own N-1 cap, not the barrier."""
+        report = report_nrpt_diagnostics(self._stats(rej=(1.0, 1.0, 1.0)))
         self.assertFalse(report.barrier_identified)
-        self.assertTrue(any("not identified" in i for i in report.issues))
+        self.assertTrue(any("saturates" in i for i in report.issues))
         self.assertIn("BARRIER NOT IDENTIFIED", report.summary())
+
+    def test_resolution_is_independent_of_round_trip_rate(self):
+        """Zero round trips must NOT read as an unresolved barrier.
+
+        Resolution is structural (Λ̂ <= N-1); the round-trip rate is
+        budget-dependent. The same well-resolved ladder reads zero trips on a
+        short window, so gating resolution on it reports "add chains" for a
+        ladder that is already correct. The short window is still flagged — as a
+        conveyor complaint, not a barrier one.
+        """
+        report = report_nrpt_diagnostics(self._stats(tau_obs=0.0))
+        self.assertTrue(report.barrier_identified)
+        self.assertTrue(any("round trip" in i for i in report.issues))
+        self.assertFalse(any("saturates" in i for i in report.issues))
 
     def test_barrier_identified_none_without_round_trips(self):
         """No round-trip diagnostics ⇒ identifiability is unknown (None)."""
@@ -232,12 +246,30 @@ class TestNRPTHealthReport(unittest.TestCase):
         self.assertIsNone(report.barrier_identified)
 
     def test_barrier_is_identified_helper(self):
+        import jax.numpy as jnp
+
         from hamon.round_trips import barrier_is_identified
 
-        self.assertTrue(barrier_is_identified(0.05, 10))
-        self.assertFalse(barrier_is_identified(0.0, 0))  # no round trips
-        self.assertFalse(barrier_is_identified(0.05, 0))  # rate>0 but 0 completed
-        self.assertFalse(barrier_is_identified(0.005, 5))  # rate below floor
+        self.assertTrue(barrier_is_identified(jnp.array([0.4, 0.5, 0.6])))
+        # A single pinned pair blocks the conveyor and caps Λ̂, even if the rest
+        # of the ladder is well equalized.
+        self.assertFalse(barrier_is_identified(jnp.array([0.4, 1.0, 0.4])))
+        self.assertFalse(barrier_is_identified(jnp.array([1.0, 1.0, 1.0])))
+
+    def test_conveyor_is_alive_helper(self):
+        from hamon.round_trips import conveyor_is_alive
+
+        # tau_pred=0.02 over 4000 rounds affords 80 expected trips: measurable.
+        self.assertTrue(conveyor_is_alive(0.010, 0.02, 4000))  # eff 0.50
+        self.assertFalse(conveyor_is_alive(0.000, 0.02, 4000))  # genuinely stalled
+        # Same ladder, short window: not measurable ⇒ None, not "stalled".
+        self.assertIsNone(conveyor_is_alive(0.0, 0.02, 100))
+        # 32 expected trips is still inside the measured transient (efficiency
+        # reads 0.000-0.043 there even for a healthy conveyor) ⇒ None.
+        self.assertIsNone(conveyor_is_alive(0.0040, 0.008, 4000))
+        # The floor is relative, so a hard target (small tau_pred) is not held to
+        # a stricter efficiency than an easy one.
+        self.assertTrue(conveyor_is_alive(0.0040, 0.008, 12000))  # eff 0.50, Λ≈61
 
     def test_low_efficiency_fails_with_recommendation(self):
         report = report_nrpt_diagnostics(self._stats(efficiency=0.1))

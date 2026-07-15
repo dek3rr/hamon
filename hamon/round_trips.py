@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 
 # ---------------------------------------------------------------------------
@@ -133,40 +134,156 @@ def empirical_round_trip_rate(
     return total_rts / jnp.maximum(n_rounds, 1)
 
 
-# Round-trip floor below which the barrier estimate is not identified. A single
-# completed traversal is the bare minimum for Σrej to reflect anything the cold
-# chain saw beyond its own basin; below it the estimate is a within-basin
-# artifact (see :func:`barrier_is_identified`).
-_MIN_ROUND_TRIPS = 1
-_TAU_MIN = 0.01
+# Saturation floor for the barrier estimate. Every rejection rate is <= 1, so
+# Λ̂ = Σ rej <= n_pairs = N-1 *arithmetically*: when pairs pin at r = 1 the
+# estimate reports its own cap, not the barrier.
+#
+# Calibrated (2026-07-15, RTX 5080, tune_schedule with the plateau stop,
+# n_rounds=4000, N swept 3..96) against a converged large-N reference Λ̂ on
+# three families — planted frustrated-loop 32x32 (Λ≈21.6), random ±J glass
+# 24x24 (Λ≈18.5), ferromagnet 16x16 (Λ≈10.3). The max(rej) → Λ̂-error relation
+# is monotone and consistent across all three:
+#   1.000-0.992 → capped: −36% .. −86% (Λ̂ = N-1 exactly at N = 4, 8)
+#   0.903 / 0.870 / 0.837 → −29% / −19% / −14%
+#   0.782 → −11%
+#   0.689 / 0.638 / 0.569 → −9% / −8% / −4%
+#   <= 0.465 → <= 4%
+# The two populations are separated by a measured gap: ladders the tuner itself
+# converges to (design point r* = 0.5, N* ≈ 2Λ) top out at max(rej) ≈ 0.69,
+# while the under-provisioned band starts at 0.78. 0.75 sits in that gap —
+# >= 0.06 above every observed working ladder (also clearing per-pair estimator
+# noise: σ(r̂) ≈ 0.02 at 500 attempts, max over <= 127 pairs adds ~ +0.05) and
+# below the first under-provisioned reading — and corresponds to a Λ̂
+# underestimate of ~10%, the point where the error stops being absorbable by
+# tune_chains' 5% safety margin plus its ±1-chain convergence tolerance.
+# So "resolved" ⇒ Λ̂ within ~10%.
+#
+# Re-validated in higher dimensions (same protocol; 3-D ferromagnet 8³ Λ≈14.4,
+# 3-D ±J glass 8³ Λ≈17.4 — a different hardness class, with a finite-T
+# spin-glass transition unlike any 2-D family — and 4-D ±J 4⁴ Λ≈12.8): the
+# sharper barrier concentration of higher d does NOT push healthy ladders over
+# the threshold. Working band tops at 0.64; under-provisioned band starts at
+# 0.773-0.775 (−12.6% / −16.7% error) — every rejected row errs >= 12.6%, every
+# admitted row <= 8.4%, bracketing the ~10% claim. Note the upper margin is
+# thin (0.773 vs 0.75 ≈ 1σ of per-pair noise), so a ~12%-error ladder can
+# occasionally read resolved; that direction is safe — tune_chains drives N*
+# off the running MAX of Λ̂ over probes, which a slightly-low probe cannot drag
+# down.
+#
+# Continuous-state limit (q=16 clock ≡ 2-D XY model, 16², J=2, Λ≈15.7 — the
+# continuous limit hamon's uint8 states can express: continuous U(1) symmetry,
+# KT transition, spin waves; sampler verified exact against enumeration): the
+# mechanism replicates (caps exact at N-1, curve monotone, budget-invariant),
+# but the smooth spin-wave spectrum COMPRESSES the max(rej) scale — an
+# under-provisioned ladder shows lower max(rej) for the same fractional error —
+# so the boundary row (0.691 → −11.0%) is the one admitted row past 10% across
+# all six families. The honest guarantee is therefore "resolved ⇒ Λ̂ within
+# ~10-12%". Tightening to 0.70 would instead false-alarm on measured healthy
+# ladders (2-D working band reaches 0.705), a worse trade.
+_MAX_REJ_RESOLVED = 0.75
+
+# Efficiency floor for the *conveyor* check (a different question — see
+# :func:`conveyor_is_alive`). Same calibration sweeps, efficiency = τ_obs/τ_pred
+# measured at n_rounds=4000 (past the transient, see below):
+#   genuinely stalled (no trips, saturated ladder):     exactly 0.000
+#   saturation-driven crawl (max rej 0.84-0.99):        0.034 - 0.135
+#   every ladder at its design N*, all three families:  0.206 - 0.558
+#     (the ±J glass family plateaus lowest, 0.21-0.30 — a floor of 0.25 would
+#      false-alarm on a healthy spin glass, which is why it is 0.15)
+# 0.15 splits the crawl band from the design band, sitting ~1.3σ below the
+# weakest healthy reading (Poisson noise on 22 observed trips ≈ 0.044).
+# Higher-d re-validation (3-D ferro/±J 8³, 4-D ±J 4⁴): healthy plateaus
+# 0.181-0.691, stalls/crawls 0.000-0.069 — the floor holds, with the thinnest
+# healthy margin at the 3-D glass near design N (0.181, so ±0.04 Poisson noise
+# can occasionally trip a spurious "slow" warning there; WARNING-level only).
+# Continuous limit (q=16 clock/XY): healthy plateaus 0.337-0.719 — the fastest
+# conveyor measured anywhere, as the physics predicts (the KT phase is critical,
+# not broken into discrete basins, so nothing traps the index process).
+_MIN_EFFICIENCY = 0.15
+
+# Expected round trips (τ_pred · n_rounds) the window must afford before τ_obs
+# is a verdict rather than noise. Two grounds, both measured at fixed N=47 on
+# the planted 32x32 (τ_pred ≈ 0.023):
+#  - transient: the index process starts from a fresh permutation, so the first
+#    completed trips only arrive after a full traversal; measured efficiency vs
+#    expected-trips: 11.6 → 0.000, 23 → 0.043, 46 → 0.240, 92 → 0.272,
+#    276 → 0.348 — readings below ~40 expected trips are transient-suppressed.
+#  - statistics: at the 0.15 floor, 40 expected trips mean a barely-alive
+#    conveyor shows ~6 on average, so observing *zero* is a P ≈ e⁻⁶ ≈ 0.25%
+#    event — a stall verdict is then conclusive, not an unlucky window. (The
+#    numeric efficiency estimate stays noisy near the minimum window — ~40%
+#    relative at 6 trips — but the None/False boundary only has to protect
+#    against false stall verdicts.)
+# Higher-d re-validation (3-D ±J 8³ at fixed design N=48): a HEALTHY ladder
+# reads efficiency 0.144 — below the 0.15 floor — at 27.8 expected trips, and
+# the 40-trip guard is what suppresses that would-be false "slow" verdict
+# (None); by 55 expected trips the reading clears to 0.217 and the verdict is
+# correct. The 3-D transient ends by ~55 expected trips vs ~46 in 2-D, so at
+# the 40 boundary a healthy ladder reads ~0.18-0.24 in both — above the floor.
+_MIN_EXPECTED_TRIPS = 40.0
 
 
 def barrier_is_identified(
-    tau_observed: float,
-    total_round_trips: int,
+    rejection_rates: jax.Array | np.ndarray,
     *,
-    tau_min: float = _TAU_MIN,
-    min_round_trips: int = _MIN_ROUND_TRIPS,
+    max_rej_resolved: float = _MAX_REJ_RESOLVED,
 ) -> bool:
     """Whether ``Λ̂ = Σ rejection_rates`` is a trustworthy barrier estimate.
 
-    The estimate is only meaningful once the DEO index process **round-trips**:
-    a stalled conveyor (too few chains, or an unequalized ladder saturating at
-    β_c) freezes every chain in a single metastable basin, so ``Σ rejection``
-    measures within-basin energy fluctuations, not the equilibrium barrier —
-    biased *low*, and biased the same way for every independent replica, so
-    replicas *agree* on the artifact (low cross-replica spread is then a false
-    consistency signal, not identification). Identification therefore cannot be
-    read off the rejection rates alone; it needs the index process. We require
-    both a non-negligible round-trip **rate** (``tau_observed ≥ tau_min``) and at
-    least ``min_round_trips`` completed traversals, so a lucky single swap does
-    not read as identified.
+    Λ̂ is **cap-limited**, not merely noisy, when the ladder saturates: each
+    rejection rate is at most 1, so ``Λ̂ <= N-1`` by construction and a ladder
+    whose pairs pin at ``r = 1`` reports that cap rather than the barrier (an
+    unbridged pair also blocks the DEO conveyor outright, freezing every chain —
+    and every replica — in one basin, which is why replicas *agree* on the
+    artifact and low cross-replica spread is a false consistency signal). So the
+    question "is Λ̂ resolved?" is **structural**: it is answered by the ladder's
+    own rejection rates, and needs no round-trip observation.
 
-    Returns ``True`` when the barrier is identified. When ``False``, ``Λ̂`` should
-    not be trusted downward — add chains / equalize the ladder to un-stall the
-    conveyor rather than believing a low estimate.
+    This deliberately does **not** gate on the round-trip rate. That signal is
+    *budget-dependent* and answers a different question (:func:`conveyor_is_alive`):
+    measured at fixed N = 47 on a planted 32x32, the same well-resolved ladder
+    (Λ̂ ≈ 20.7, max rej ≈ 0.6) reports 0 round trips at 500 rounds and 96 at
+    12000 — the zero-trip reading is indistinguishable from a genuine stall, so
+    using it here reports "add chains" for a ladder that is already correct.
+
+    Returns ``True`` when Λ̂ is resolved. ``False`` means the ladder is
+    saturating and Λ̂ is a cap-limited underestimate — add chains / equalize
+    rather than believing it.
     """
-    return bool(tau_observed >= tau_min and total_round_trips >= min_round_trips)
+    # np.max accepts both host numpy (the diagnostics path) and jax arrays (the
+    # tuning path — a tiny 1-D host read, once per run).
+    return bool(float(np.max(np.asarray(rejection_rates))) < max_rej_resolved)
+
+
+def conveyor_is_alive(
+    tau_observed: float,
+    tau_predicted: float,
+    n_rounds: int,
+    *,
+    min_efficiency: float = _MIN_EFFICIENCY,
+    min_expected_trips: float = _MIN_EXPECTED_TRIPS,
+) -> bool | None:
+    """Whether the DEO index process is observed traversing the ladder.
+
+    A *dynamical* question, distinct from :func:`barrier_is_identified`: a ladder
+    can be perfectly resolved yet not (yet) observed round-tripping, and the two
+    dissociate cleanly under budget — Λ̂ and max(rej) are flat across a 24x round
+    sweep while efficiency swings 0.000 → 0.348.
+
+    Gates on **efficiency** ``τ_obs / τ_pred``, not on ``τ_obs`` itself: with
+    ``τ_pred = 1/(2+2Λ)`` an absolute floor demands an efficiency that grows with
+    Λ (0.01 asks 19% of optimal at Λ = 8.5, 43% at Λ = 21, and is unsatisfiable
+    at Λ >= 49 — strictest exactly where a trustworthy answer matters most).
+
+    Returns ``None`` when the window is too short to tell (fewer than
+    ``min_expected_trips`` round trips expected even at the optimal rate), so
+    callers can say "not measured" instead of "stalled".
+    """
+    if tau_predicted * max(n_rounds, 0) < min_expected_trips:
+        return None
+    if tau_predicted <= 0.0:
+        return None
+    return bool(tau_observed / tau_predicted >= min_efficiency)
 
 
 # ---------------------------------------------------------------------------
