@@ -10,6 +10,12 @@ from .ebm import AbstractEBM as AbstractEBM
 from .ebm import AbstractFactorizedEBM as AbstractFactorizedEBM
 from .ebm import EBMFactor as EBMFactor
 from .ebm import FactorizedEBM as FactorizedEBM
+from .double_well import DoubleWellEBM as DoubleWellEBM
+from .double_well import DoubleWellSamplingProgram as DoubleWellSamplingProgram
+from .double_well import PolynomialSelfEBMFactor as PolynomialSelfEBMFactor
+from .double_well import PolynomialSelfInteraction as PolynomialSelfInteraction
+from .double_well import SliceGibbsConditional as SliceGibbsConditional
+from .double_well import double_well_init as double_well_init
 from .gaussian import GaussianEBM as GaussianEBM
 from .gaussian import GaussianGibbsConditional as GaussianGibbsConditional
 from .gaussian import GaussianSamplingProgram as GaussianSamplingProgram

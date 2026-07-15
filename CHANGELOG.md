@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Continuous *multimodal* models: the double-well (φ⁴) lattice, sampled by
+  slice-sampling-within-Gibbs.** The Gaussian MRF covers the conjugate
+  continuous case; this covers the case tempering exists for — continuous
+  targets with basins. `DoubleWellEBM` is the lattice φ⁴ field theory
+  (`E = β(Σ a(x²−1)² − hx + Σ c·x_i x_j)`, constant dropped): at cold β with
+  ferromagnetic couplings the target is bimodal (±1 ordered wells), a single
+  chain mode-collapses, and NRPT round trips are what carry ± flips —
+  demonstrated in-tree (the tempered cold chain visits both signs of the
+  magnetization; a plain cold chain started in one well never leaves it).
+
+  The single-site conditional (`∝ exp(−β[ax⁴ − 2ax² + (Σc·x_j − h)x])`) has no
+  closed form, so `SliceGibbsConditional` performs one **slice-sampling**
+  transition per site (Neal 2003) — stepping-out with Neal's *bounded* budget
+  (the m-limited variant, exactly reversible by construction) and shrinkage —
+  vectorised over each colour class. This is hamon's first sampler that is a
+  Markov *transition* rather than an independent conditional draw (invariance
+  is all block Gibbs needs, and the sampler contract explicitly allows it).
+  The current value x₀ a transition kernel needs is delivered by a
+  **self-anchored interaction**: `PolynomialSelfEBMFactor` lists its own node
+  group as the tail block, so each site receives its pre-sweep value as a tail
+  state. Verified against quadrature (the ground truth when no closed form
+  exists): single-site and coupled-pair marginals match to histogram TV < 0.05
+  and the cross moment to ±0.05.
+
+  Two engineering points worth knowing: draws inside the shrinkage loop are
+  keyed by `fold_in(key, iteration)` — a site's stream depends only on its own
+  key, position, and iteration — so **chain masking stays bit-identical** even
+  though the slice kernel's `while_loop` trip counts are data-dependent
+  (covered by a bitwise test); and sampler state stays `None`, so the kernel
+  works under NRPT's round loop unchanged.
+
 - **Continuous-state models: Gaussian Markov random fields with exact block
   Gibbs.** New `GaussianNode` (float32 states in ℝ) and a Gaussian model stack
   in `hamon.models.gaussian` — `GaussianEBM` (energy
