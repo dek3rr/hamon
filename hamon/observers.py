@@ -209,10 +209,9 @@ class MomentAccumulatorObserver(AbstractObserver):
 
             flat_to_full_moment_slices.append(moment_slice)
 
-        # --- Pass 2: build blocks_to_sample and type slices from the
-        #     deduplicated flat_nodes_list. Each node appears exactly once,
-        #     so blocks_to_sample is correctly sized and _flat_scatter_index
-        #     is a true permutation (no duplicate target indices). ----------
+        # Pass 2: build blocks_to_sample and type slices from the
+        # deduplicated flat_nodes_list, making _flat_scatter_index a true
+        # permutation (no duplicate targets).
         nodes_by_type: dict[type, list[AbstractNode]] = defaultdict(list)
         flat_to_type_slices: dict[type, list[int]] = defaultdict(list)
 
@@ -246,9 +245,8 @@ class MomentAccumulatorObserver(AbstractObserver):
         self._flat_scatter_sizes = [len(s) for s in flat_to_type_slices_list]
         self._flat_state_size = len(flat_nodes_list)
 
-        # _flat_value_order[i] gives the position in the concatenated sampled
-        # values that should land at flat position i. This turns __call__ into
-        # a pure gather (no zeros + scatter).
+        # _flat_value_order[i] = source position for flat position i, turning
+        # __call__ into a pure gather (no zeros + scatter).
         if self._flat_scatter_index.size > 0:
             self._flat_value_order = jnp.argsort(self._flat_scatter_index)
         else:
@@ -546,13 +544,9 @@ def nrpt_node_samples(
                 "different state arrays."
             )
 
-    # Concatenate the observations of free blocks matching the node type, in
-    # free-block order, then index by each node's column in that concatenation.
-    # The column is derived straight from free_blocks (cumulative same-type
-    # offset + position within the block), so it is correct regardless of the
-    # program's global-state layout (concatenated or per-block) — it does not
-    # rely on node_global_location_map positions, whose meaning depends on the
-    # layout.
+    # Concatenate matching free-block observations in free-block order and
+    # index by each node's column, derived straight from free_blocks — correct
+    # under any global-state layout, unlike node_global_location_map.
     same_type = [
         obs
         for obs, block in zip(observations, free_blocks)

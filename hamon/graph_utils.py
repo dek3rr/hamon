@@ -83,20 +83,18 @@ def rlf_coloring(n_nodes: int, edges: Iterable[tuple[int, int]]) -> list[int]:
     np.cumsum(degrees, out=indptr[1:])
 
     NEG = np.iinfo(np.int64).min
-    # Lexicographic keys are packed into one int64 score: primary * BASE ±
-    # secondary, with BASE > any secondary value so the primary always
-    # dominates; np.argmax takes the first maximum, which is exactly the
-    # smallest-index tie-break of the reference implementation.
+    # Lexicographic keys packed into one int64 score (primary * BASE ±
+    # secondary, BASE > any secondary); np.argmax's first-maximum is exactly
+    # the reference implementation's smallest-index tie-break.
     BASE = np.int64(n_nodes + 1)
 
     colors = np.full(n_nodes, -1, dtype=np.int64)
     uncolored = np.ones(n_nodes, dtype=bool)
     n_uncolored = n_nodes
 
-    # gU[x] = |adj(x) ∩ uncolored|, maintained across classes (decremented once
-    # per colored neighbor) so each class starts with cU = gU.copy() instead
-    # of an O(|E|) recount — that recount is what made dense graphs (χ ≈ |V|
-    # classes) quadratic in |E|.
+    # gU[x] = |adj(x) ∩ uncolored| is maintained across classes so each class
+    # starts with cU = gU.copy() instead of the O(|E|) recount that made dense
+    # graphs quadratic in |E|.
     gU = degrees.astype(np.int64)
     cW = np.zeros(n_nodes, dtype=np.int64)  # |adj(x) ∩ W| (excluded nbrs)
     key = np.empty(n_nodes, dtype=np.int64)
@@ -203,13 +201,9 @@ def auto_color_blocks(
         even   = Block(nodes[::2])   # {0, 2, 4}
         odd    = Block(nodes[1::2])  # {1, 3}
 
-        # Each of even/odd is internally an independent set, but every chain
-        # edge links an even node to an odd one, so the two blocks conflict and
-        # cannot share a sampling group — they must be updated sequentially. By
-        # hand you would have to reason this out and write:
-        #   free_super_blocks = [even, odd]   # two separate groups
-        #
-        # auto_color_blocks derives the same order from the interaction groups:
+        # Every chain edge links an even node to an odd one, so the two
+        # blocks conflict and must be sequential sampling groups;
+        # auto_color_blocks derives that order from the interaction groups:
         igs    = [f.to_interaction_groups() for f in model.factors]
         igs    = [g for sublist in igs for g in sublist]
         super_blocks = auto_color_blocks([even, odd], igs)

@@ -36,11 +36,9 @@ logger = logging.getLogger(__name__)
 Edge = tuple[AbstractNode, AbstractNode]
 
 
-# ``IsingEBM.factors`` runs once per chain per ``nrpt`` call (via
-# ``with_beta``/``with_ebm``), and its node-group Blocks depend only on the
-# ``nodes``/``edges`` lists — which ``with_beta`` passes through by reference —
-# never on β or the weights. Rebuilding them cost two O(|edges|) list
-# comprehensions plus three O(|nodes|) Block type scans per rebuild.
+# ``IsingEBM.factors`` runs once per chain per ``nrpt`` call, but its
+# node-group Blocks depend only on the ``nodes``/``edges`` lists (passed
+# through by reference), never on β or the weights — so cache them.
 _FACTOR_BLOCK_CACHE: dict = {}
 
 
@@ -108,10 +106,8 @@ class IsingEBM(AbstractFactorizedEBM):
         super().__init__(sd_map)
         self.nodes = _as_identity_seq(nodes)
         self.edges = _as_identity_seq(edges)
-        # β must match the float dtype of the parameters it scales: a strong
-        # float64 β (e.g. jnp.array(1.0) with x64 enabled in the host
-        # application) would otherwise promote every β·W interaction tensor —
-        # and with it the whole device sampling loop — to float64.
+        # Cast β to the weights' dtype: a strong float64 β (x64 host app)
+        # would otherwise promote the whole device sampling loop to float64.
         param_dtype = jnp.result_type(biases, weights)
         if jnp.issubdtype(param_dtype, jnp.floating):
             beta = jnp.asarray(beta, dtype=param_dtype)
@@ -538,10 +534,9 @@ def estimate_kl_grad(
         return grad_w, grad_b, (moms_b_pos, moms_w_pos), (moms_b_neg, moms_w_neg)
 
 
-# ising_sample builds fresh SpinNodes per call, and node identity keys every
-# downstream cache — so without this content-keyed memo a repeat call with the
-# same graph retraces and recompiles every jitted kernel (~3.5 s of XLA at 128²
-# without the persistent compile cache, and a full re-trace even with it).
+# Node identity keys every downstream cache, so without this content-keyed
+# memo a repeat ising_sample call with the same graph retraces and recompiles
+# every jitted kernel (~3.5 s of XLA at 128²).
 _GRAPH_CACHE: dict = {}
 
 
@@ -560,10 +555,9 @@ def _ising_graph(n: int, edges_np: np.ndarray):
         # of 2·|edges| per-element int(...) casts on numpy scalars.
         node_edges: list[Edge] = [(nodes[u], nodes[v]) for u, v in edges_np.tolist()]
 
-        # Recursive-Largest-First coloring: each color class is an independent
-        # set and becomes one block-Gibbs group. The color count is the number
-        # of sequential sample groups in the NRPT round loop, which sets its
-        # XLA compile cost, so minimizing colors directly cuts compile.
+        # Recursive-Largest-First coloring: each color class becomes one
+        # block-Gibbs group, and the color count sets the round loop's XLA
+        # compile cost — minimizing colors directly cuts compile.
         coloring = rlf_coloring(n, edges_np)
         n_colors = (max(coloring) + 1) if n else 1
         color_groups: list[list[AbstractNode]] = [[] for _ in range(n_colors)]
@@ -638,10 +632,8 @@ def ising_sample(
     biases = jnp.asarray(biases)
     weights = jnp.asarray(weights)
     n = biases.shape[0]
-    # Host (numpy) array: the graph is built on the host by indexing every edge
-    # endpoint (``int(e[0])``). Keeping this on-device would make each of those
-    # ~2·n_edges indexing ops a blocking device→host transfer (and an eager
-    # slice dispatch); np.asarray pulls it to the host once instead.
+    # Graph construction indexes every edge endpoint on the host; np.asarray
+    # pulls the array over once instead of ~2·n_edges blocking transfers.
     edges_np = np.asarray(edges)
 
     # --- degenerate model checks ---
@@ -661,10 +653,9 @@ def ising_sample(
             "per-variable preference; sampling results may be uninformative."
         )
 
-    # --- build (or reuse) the colored graph for block Gibbs ---
-    # Node identity keys every downstream cache (block structure, jit statics),
-    # so a repeat call with the same graph must reuse the same node objects —
-    # otherwise every kernel retraces and recompiles per call.
+    # Build (or reuse) the colored graph: node identity keys every downstream
+    # cache, so a repeat call must reuse the same node objects or every kernel
+    # recompiles.
     nodes, node_edges, free_blocks = _ising_graph(n, edges_np)
 
     # --- template EBM & program ---

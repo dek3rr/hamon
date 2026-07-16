@@ -10,16 +10,10 @@ from jaxtyping import Array, Bool, Shaped
 
 logger = logging.getLogger(__name__)
 
-# These diagnostics are one-shot host-side summaries over small arrays (a few
-# hundred samples × a few hundred variables, plus length-n_chains stat vectors).
-# Running them in numpy on the host — rather than jax.numpy on an accelerator —
-# avoids the dominant cost, which is per-op XLA compilation: each first-seen
-# shape triggers a separate kernel compile (~40 ms each), so the jax path spent
-# ~1 s compiling ~25 ms of arithmetic. numpy has no compile step and needs a
-# single device→host transfer of `samples` instead of one sync per reduction.
-# Inputs may be jax arrays; ``np.asarray`` pulls them to the host once.
-# (If these were ever run on very large inputs, the host transfer + host compute
-# could flip this trade-off and a jitted jax implementation would win.)
+# These one-shot summaries over small arrays run in host numpy, not jax: the
+# jax path spent ~1 s compiling ~25 ms of arithmetic (one kernel compile per
+# first-seen shape), while numpy needs a single device→host transfer.
+# The trade-off would flip on very large inputs.
 
 
 # ---------------------------------------------------------------------------
@@ -125,10 +119,9 @@ def marginal_entropy(
         Scalar in [0, 1].
     """
     p = np.mean(np.asarray(samples).astype(np.float32), axis=0)
-    # In float32 the upper clip 1.0 - 1e-10 rounds to exactly 1.0, so a frozen
-    # variable gives 1 - safe_p == 0 -> log2(0) == -inf -> 0 * -inf == NaN. The
-    # np.where below masks those entries to 0; errstate just silences the
-    # transient warnings (jax produced the same NaN-then-mask silently).
+    # In float32 the upper clip rounds to exactly 1.0, so frozen variables
+    # produce 0·log2(0) = NaN; np.where masks them to 0 and errstate silences
+    # the transient warnings.
     safe_p = np.clip(p, 1e-10, 1.0 - 1e-10)
     with np.errstate(divide="ignore", invalid="ignore"):
         h = -(safe_p * np.log2(safe_p) + (1 - safe_p) * np.log2(1 - safe_p))
@@ -573,10 +566,9 @@ def report_nrpt_diagnostics(
                 f"is an underestimate; add chains / equalize the ladder"
             )
         if report.tau_observed < tau_min:
-            # A separate, DYNAMICAL complaint: the conveyor was not observed
-            # traversing. Deliberately does not claim Lambda is wrong — a
-            # well-resolved ladder reads zero round trips on a short window (the
-            # rate is budget-dependent where resolution is not).
+            # A separate, DYNAMICAL complaint — deliberately does not claim
+            # Lambda is wrong, since a well-resolved ladder can read zero
+            # round trips on a short window.
             _flag(
                 f"few round trips observed (tau_obs={report.tau_observed:.4f}) — "
                 f"the conveyor is slow or the window is short, so samples "
@@ -587,12 +579,10 @@ def report_nrpt_diagnostics(
             from hamon.round_trips import recommend_n_chains
 
             report.recommended_n_chains = recommend_n_chains(report.Lambda)
-            # Attribute the inefficiency to the right knob. An equalized ladder
-            # means the communication phase is already tuned, so the gap to the
-            # ELE-optimal rate τ̄ is the local exploration kernel failing to
-            # decorrelate the energy between swaps (an ELE violation) — raise
-            # gibbs_steps_per_round, with more chains as the alternative lever.
-            # An unequalized ladder means the schedule itself is the limiter.
+            # Attribute the inefficiency to the right knob: with an equalized
+            # ladder the gap to the ELE-optimal rate is the exploration kernel
+            # under-decorrelating energy (raise gibbs_steps_per_round);
+            # unequalized means the schedule itself is the limiter.
             if rejection_std <= rej_std_max:
                 report.efficiency_limiter = "local_exploration"
                 msg = (
@@ -637,10 +627,8 @@ def report_nrpt_diagnostics(
 
     if samples is not None:
         # The marginal-entropy and convergence sections interpret samples as
-        # binary 0/1 (per-variable Bernoulli entropy of a mean, top-k marginal
-        # overlap) — on continuous (float) samples they would return
-        # garbage/NaN, not diagnostics. Skip them for non-boolean samples; the
-        # ESS section below is numeric-generic and stays.
+        # binary 0/1 and return garbage on floats — skip them for non-boolean
+        # samples; ESS below is numeric-generic and stays.
         samples_binary = np.asarray(samples).dtype == np.bool_
         if samples_binary:
             conv = sample_convergence(samples)
@@ -656,8 +644,7 @@ def report_nrpt_diagnostics(
                 )
         else:
             warnings.append(
-                "samples are non-boolean (continuous model): entropy/convergence "
-                "sections skipped; ESS still reported"
+                "samples are non-boolean (continuous model): entropy/convergence sections skipped; ESS still reported"
             )
 
         ess = effective_sample_size(samples)

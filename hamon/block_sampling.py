@@ -156,10 +156,9 @@ class _BlockStructure:
     block_owns_slot: list
 
 
-# Keyed on the spec's node-identity structure (same scheme as BlockSpec._
-# structure_key) plus the interaction groups' node structure; the weight values
-# are deliberately excluded. The cached value holds the spec, which keeps its
-# nodes alive, so the id()-based key cannot suffer reuse-after-GC false hits.
+# Keyed on node-identity structure only (weight values deliberately
+# excluded); the cached spec keeps its nodes alive, so the id()-based key
+# cannot suffer reuse-after-GC false hits.
 _STRUCTURE_CACHE: dict = {}
 
 
@@ -394,10 +393,9 @@ class BlockSamplingProgram(eqx.Module):
                 f"Expected {n_free_blocks} samplers, received {len(self.samplers)}"
             )
 
-        # The block structure (layout, gather/slice indices, scatter positions)
-        # is fixed by the graph, not the interaction weight values, so cache it
-        # and reuse across program.with_ebm(...) rebuilds (same graph, β-scaled
-        # weights) — only the weight tensors below are re-bound per construction.
+        # Block structure is fixed by the graph, not the weight values, so
+        # cache it across with_ebm rebuilds — only the weight tensors below
+        # are re-bound per construction.
         key = _structure_cache_key(gibbs_spec, interaction_groups)
         struct = _STRUCTURE_CACHE.get(key)
         if struct is None:
@@ -406,9 +404,8 @@ class BlockSamplingProgram(eqx.Module):
 
         self.gibbs_spec = struct.gibbs_spec
 
-        # Bind the weights: slice each interaction group's weight tensor by the
-        # cached per-node indices and pre-zero padded entries with the cached
-        # active mask. This reproduces the original inline computation exactly.
+        # Bind the weights: slice each group's tensor by the cached indices
+        # and pre-zero padded entries with the cached active mask.
         per_block_interactions = []
         per_block_interaction_active = []
         per_block_interaction_global_inds = []
@@ -671,10 +668,9 @@ def _run_blocks(
                 sd_ind = block_sd_inds[i]
                 new_global = list(global_state)
                 if block_owns_slot[i]:
-                    # The block is the sole occupant of its slot (per-block
-                    # layout), so the whole slot is replaced — no slice/scatter
-                    # and no device copy of an unchanged neighbor. This is the
-                    # main lever against dispatch-bound Gibbs sweeps.
+                    # Sole occupant of its slot (per-block layout): replace
+                    # the whole slot with no slice/scatter — the main lever
+                    # against dispatch-bound Gibbs sweeps.
                     new_global[sd_ind] = new_states[i]
                 elif block_slice_starts[i] is not None:
                     # Contiguous block: a static-offset dynamic_update_slice,
@@ -793,13 +789,10 @@ def sample_with_observation(
         jax.default_device(dev) if dev is not None else contextlib.nullcontext()
     )
 
-    # Device placement is a host-only routing decision and stays out here (it is
-    # a no-op under jit/vmap). The compute core below is jitted so the warmup and
-    # sampling scans compile ONCE and are reused across calls; the previous eager
-    # path re-compiled both scans on every invocation (~0.9 s of XLA per call at
-    # 484 nodes), which dominated the draw — the device sampling itself is only
-    # single-digit ms. `schedule` is a static (hashable) argument, so distinct
-    # warmup/sample/step counts specialize into their own cached executables.
+    # Device placement stays out here (a no-op under jit/vmap); the jitted
+    # core compiles its scans once and reuses them across calls — the old
+    # eager path recompiled ~0.9 s of XLA per call to run single-digit ms of
+    # sampling. Static `schedule` specializes per warmup/sample/step counts.
     with device_ctx:
         return _sample_with_observation_core(
             key,

@@ -56,12 +56,9 @@ def _batch_gather(x, *idx):
     return x_flat[(batch_idx,) + idx_flat].reshape(batch_shape)
 
 
-# Head/tail Block construction for the spin branch of ``to_interaction_groups``
-# depends only on the node-group Blocks, never on the weight values, yet it was
-# rebuilt — O(sum of group sizes) Python list concatenation plus Block type
-# scans — on every factor compilation. ``program.with_ebm(...)`` recompiles the
-# factors once per chain per ``nrpt`` call, so this is a hot path for large
-# graphs.
+# Head/tail Block construction depends only on the node-group Blocks, never
+# on weight values, yet ``with_ebm`` rebuilds factors once per chain per
+# ``nrpt`` call — cache the Blocks to keep that hot path O(1).
 _SPIN_IG_BLOCK_CACHE: dict = {}
 
 

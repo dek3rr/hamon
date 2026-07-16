@@ -46,11 +46,9 @@ class _IdentitySeq(Sequence[_T]):
     def __hash__(self) -> int:
         h = self._hash
         if h is None:
-            # id()-based: mirrors the unique-by-construction node semantics
-            # without calling each element's Python-level __hash__. Edge
-            # entries are (node, node) tuples, whose own ids are not stable
-            # across rebuilds — canonicalize one level so freshly built
-            # tuples over the same nodes hash (and compare) equal.
+            # id()-based to mirror unique-by-construction node semantics;
+            # edge tuples' own ids are not rebuild-stable, so canonicalize one
+            # level so fresh tuples over the same nodes hash equal.
             h = self._hash = hash(
                 tuple(
                     tuple(map(id, x)) if isinstance(x, tuple) else id(x)
@@ -118,11 +116,8 @@ class _CounterMeta(abc.ABCMeta):
         return instance
 
     def __lt__(cls, other):
-        # Order node *types* by (module, qualname): a deterministic,
-        # process-stable key (unlike id()), so any sort of node types is
-        # reproducible across runs. It is unique for normally-defined classes;
-        # two distinct classes sharing a module+qualname (e.g. dynamically
-        # generated) would order ambiguously, but hamon never produces such.
+        # Order node *types* by (module, qualname) — process-stable unlike
+        # id(), and unique for normally-defined classes.
         if not isinstance(other, type):
             raise NotImplementedError
         return (cls.__module__, cls.__qualname__) < (

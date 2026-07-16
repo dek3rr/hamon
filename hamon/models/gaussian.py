@@ -206,11 +206,9 @@ class GaussianGibbsConditional(AbstractParametricConditionalSampler):
         return (mean + std * noise).astype(output_sd.dtype), sampler_state
 
 
-# Head/tail Block construction depends only on node/edge identities, never on
-# parameter values, but ``factors`` is recomputed per ``with_beta`` copy (the
-# β·params products must stay inside the tracer flow for AD). Cache the Blocks
-# so repeated factor builds — one per chain per nrpt call — skip the O(|graph|)
-# Python work. Same pattern as the Ising factor blocks.
+# Same pattern as the Ising factor blocks: Block construction depends only on
+# node/edge identities, but ``factors`` reruns per ``with_beta`` copy (β·params
+# must stay inside the tracer flow for AD) — cache the Blocks.
 _GAUSSIAN_FACTOR_BLOCK_CACHE: dict = {}
 
 

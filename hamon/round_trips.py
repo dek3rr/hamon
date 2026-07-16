@@ -134,45 +134,19 @@ def empirical_round_trip_rate(
     return total_rts / jnp.maximum(n_rounds, 1)
 
 
-# Saturation floor for the barrier estimate. Λ̂ = Σ rej <= n_pairs = N-1
-# *arithmetically* (every rate is <= 1), so a ladder whose pairs pin at r = 1
-# reports that cap, not the barrier — measured exactly at low N (Λ̂ = N-1 at
-# N = 4, 8).
-#
-# Calibrated by sweeping N against a converged large-N reference Λ̂ across
-# model families spanning 2-4 dimensions and discrete/continuous/multimodal
-# state spaces (see CHANGELOG.md for the full per-family max(rej)-vs-error
-# tables). The max(rej) -> Λ̂-error relation is consistently monotone, and the
-# two populations are separated by a measured gap: ladders the tuner itself
-# converges to (design point r* = 0.5) top out at max(rej) ~ 0.69-0.705, while
-# under-provisioned ladders start at >= 0.75-0.78. 0.75 sits in that gap,
-# corresponding to a Λ̂ error of ~10-12% — the point past which tune_chains'
-# safety margin plus its ±1-chain tolerance stops absorbing it. So "resolved"
-# means Λ̂ is within ~10-12% of its converged value. (The rare ladder that
-# slips through at the high end of that error band is the safe direction:
-# tune_chains drives N* off the running MAX of Λ̂ over probes.)
+# Saturation floor: 0.75 sits in the measured gap between tuner-converged
+# ladders (max rej <= ~0.70) and under-provisioned ones (>= ~0.75), bounding
+# Λ̂'s underestimate to ~10-12% — see CHANGELOG.md for the calibration tables.
 _MAX_REJ_RESOLVED = 0.75
 
-# Efficiency floor for the *conveyor* check (a different question — see
-# :func:`conveyor_is_alive`): efficiency = τ_obs/τ_pred, measured past the
-# startup transient (see _MIN_EXPECTED_TRIPS). Calibrated on the same family
-# sweep: genuine stalls read exactly 0.000, saturation-driven crawls 0.03-0.14,
-# every ladder at its design N* >= 0.18. The ±J spin-glass family plateaus
-# lowest (0.18-0.30), which is why the floor is 0.15 and not the naive 0.25 —
-# that would false-alarm on a healthy glass. See CHANGELOG.md for the full
-# per-family numbers.
+# Efficiency floor for conveyor_is_alive: healthy at-design-N ladders measure
+# >= 0.18 (the ±J glass family is lowest) while stalls/crawls read <= 0.14, so
+# a naive 0.25 would false-alarm on a healthy glass — see CHANGELOG.md.
 _MIN_EFFICIENCY = 0.15
 
-# Expected round trips (τ_pred · n_rounds) the window must afford before τ_obs
-# is a verdict rather than noise, on two grounds (measured at fixed N on the
-# planted-Ising family, 2-D and 3-D):
-#  - transient: the index process starts from a fresh permutation, so even a
-#    healthy ladder reads efficiency ~0.000 below ~40-55 expected trips and
-#    only clears to its plateau value beyond that.
-#  - statistics: at the 0.15 floor, 40 expected trips means a barely-alive
-#    conveyor shows ~6 round trips on average, so observing zero is a
-#    P ~ e^-6 event — a stall verdict there is conclusive, not an unlucky
-#    window.
+# τ_obs is only a verdict once the window affords ~40 expected trips: below
+# that the reading is startup-transient-dominated, and at the 0.15 floor 40
+# expected trips make an observed zero a ~e⁻⁶ event rather than bad luck.
 _MIN_EXPECTED_TRIPS = 40.0
 
 

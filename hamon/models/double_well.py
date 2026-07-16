@@ -217,11 +217,10 @@ class SliceGibbsConditional(AbstractConditionalSampler):
             0, self.max_stepout, expand, (left, right, j_budget, k_budget_r)
         )
 
-        # Shrinkage: propose uniformly on [left, right]; on rejection shrink the
-        # side of x0 the proposal fell on. Terminates a.s. (the interval shrinks
-        # toward x0, where log p >= y by construction). Draws are keyed by
-        # (k_shrink, iteration): no site's stream depends on how many
-        # iterations other sites — or other vmap lanes — need.
+        # Shrinkage: propose uniformly on [left, right], shrinking the side
+        # the rejected proposal fell on (terminates a.s. toward x0). Keying
+        # draws by (k_shrink, iteration) keeps every site's stream independent
+        # of other sites' — and other vmap lanes' — iteration counts.
         def cond(carry):
             return jnp.any(~carry[3])
 

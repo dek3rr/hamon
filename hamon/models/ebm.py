@@ -214,13 +214,10 @@ class AnnealedEBM(AbstractFactorizedEBM):
 
     @property
     def proper_at_beta_zero(self) -> bool:
-        # The β = 0 member of the ANNEALED family is the reference at full
-        # weight — a genuine distribution whenever exp(−E_ref) is normalizable
-        # (e.g. a positive-definite Gaussian), which is the caller's
-        # responsibility exactly like positive-definiteness itself. Note this
-        # is NOT reference.proper_at_beta_zero: that asks about the reference's
-        # own β → 0 limit (all weights → 0, the improper flat density), a rung
-        # the annealed ladder never visits.
+        # The annealed family's β=0 member is the reference at FULL weight —
+        # proper whenever exp(−E_ref) is normalizable. Deliberately NOT
+        # inherited from reference.proper_at_beta_zero, which asks about the
+        # reference's own β→0 limit, a rung this ladder never visits.
         return True
 
     @property
