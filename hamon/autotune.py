@@ -35,13 +35,10 @@ logger = logging.getLogger(__name__)
 # Full autotuning: orchestrate N, exploration, and schedule
 # ---------------------------------------------------------------------------
 
-# Deterministic local-exploration count used when the exploration search is off.
-# The ESS-per-wall-second objective is flat across n_expl 2-8 on a dispatch-bound
-# accelerator (extra Gibbs sweeps per round are nearly free there), so a fixed
-# mid-range value captures ~all the benefit AND is reproducible across runs —
-# unlike a wall-timed search, whose argmax wanders the flat region with the GPU's
-# clock/thermal state. CPU is compute-bound (cost grows ~linearly with n_expl),
-# so 1 is optimal there.
+# Deterministic n_expl defaults when the exploration search is off: the
+# ESS/wall-second objective is flat over 2-8 on a dispatch-bound accelerator
+# (a wall-timed argmax just wanders that flat region with GPU clock state),
+# while compute-bound CPU cost grows ~linearly so 1 is optimal there.
 _ACCELERATOR_DEFAULT_GIBBS_STEPS = 4
 
 
@@ -160,9 +157,9 @@ class NRPTPlan:
     _warm_state: list
     _clamp_state: list
     _obs_block: Any
-    # When set (= max_chains under chain masking), the tempered draw pads its
-    # ladder to this length and records the cold chain at a traced live index, so
-    # draws at different discovered N share ONE compiled observer round loop.
+    # When set (= max_chains under chain masking), the tempered draw pads to
+    # this length and reads the cold chain at a traced live index, so draws at
+    # different discovered N share one compiled observer round loop.
     _pad_draw: int | None = None
 
     def sample(
@@ -213,12 +210,9 @@ class NRPTPlan:
         n_total = n_warmup + n_samples * steps
         dev = self.device if self.device is not None else "auto"
         ebms, programs = self._source.nrpt_args(self._betas_dev)
-        # Chain-masked draw: pad the ladder to max_chains and record the live cold
-        # chain (absolute index n_chains-1 of the padded ladder) via a traced
-        # index, so draws at different discovered N reuse ONE compiled observer
-        # round loop. Bit-identical to the unpadded draw on the live prefix
-        # (threefry key/uniform streams are prefix-stable). Off (pad=None) ⇒ the
-        # original unpadded static -1 observer.
+        # Chain-masked draw: read the live cold chain (index n_chains-1) via
+        # a traced index — bit-identical to the unpadded draw since threefry
+        # streams are prefix-stable. pad=None keeps the static -1 observer.
         pad = self._pad_draw
         observer = (
             ColdIndexObserver(self.n_chains - 1)
@@ -252,10 +246,9 @@ class NRPTPlan:
     ) -> jax.Array:
         from hamon.block_sampling import SamplingSchedule, sample_states
 
-        # Flag the silent-collapse risk of a decoupled cold chain, keyed on the
-        # tuning run's round-trip evidence. warnings.warn (not logging) so it is
-        # visible by default and, under the default filter, fires once per
-        # call-site rather than once per draw.
+        # Flag the silent-collapse risk of a decoupled cold chain via
+        # warnings.warn: visible by default and fires once per call-site, not
+        # once per draw.
         rt = self.report.total_round_trips if self.report is not None else None
         if rt:
             warnings.warn(
@@ -289,27 +282,21 @@ class NRPTPlan:
         return raw[0]
 
 
-# The production draw's StateObserver carries this Block as a jit static, and
-# Blocks compare by identity — a fresh Block over the same nodes per autotune
-# call would retrace and recompile the draw kernel every call. Keyed on node
-# identities; entries pin their nodes (no id reuse while live), bounded FIFO —
-# the same pattern as the factor-block caches in hamon.models.
+# Blocks compare by identity and the draw's StateObserver carries this Block
+# as a jit static, so a fresh Block per call would recompile the draw kernel.
 _OBS_BLOCK_CACHE: dict = {}
-_OBS_BLOCK_CACHE_MAX = 32
 
 
 def _obs_block(out_nodes: list):
     from hamon.block_management import Block
+    from hamon.pgm import _fifo_cache
+
+    def build():
+        # pin the id()-keyed nodes (see _fifo_cache)
+        return tuple(out_nodes), Block(out_nodes)
 
     key = tuple(map(id, out_nodes))
-    hit = _OBS_BLOCK_CACHE.get(key)
-    if hit is not None:
-        return hit[1]
-    blk = Block(out_nodes)
-    if len(_OBS_BLOCK_CACHE) >= _OBS_BLOCK_CACHE_MAX:
-        _OBS_BLOCK_CACHE.pop(next(iter(_OBS_BLOCK_CACHE)))
-    _OBS_BLOCK_CACHE[key] = (tuple(out_nodes), blk)
-    return blk
+    return _fifo_cache(_OBS_BLOCK_CACHE, 32, key, build)[1]
 
 
 def autotune(
@@ -456,9 +443,8 @@ def autotune(
     clamp_state = clamp_state or []
     source = _ChainSource(ebm_factory, program_factory, ebm, program)
 
-    # Resolve the device once for every stage. Match tune_chains' pilot (the
-    # max_chains ceiling) so the CPU/GPU sizing heuristic scores the same chain
-    # count the first probe runs.
+    # Resolve the device once, sized at the max_chains ceiling so the CPU/GPU
+    # heuristic scores the same chain count the first probe runs.
     _pilot_n = initial_n if initial_n is not None else max_chains
     _meta_betas = jnp.linspace(beta_range[0], beta_range[1], 1)
     dev = resolve_entry_device(
@@ -472,13 +458,10 @@ def autotune(
     k_chains, k_expl, k_polish = jax.random.split(key, 3)
 
     # --- Stage 1: chain count ---
-    # Probe at the final n_expl whenever it is already known (pinned, or the
-    # deterministic device default because the search is off). The scan length
-    # doesn't change compile time and extra sweeps are ~free on a
-    # dispatch-bound accelerator, while stage 3 then reuses stage 1's compiled
-    # round loop instead of recompiling it at a new n_expl — the single
-    # biggest cold-run compile. The wall-timed search still probes at
-    # n_expl=1 (cheapest; Λ — hence N* — is invariant to n_expl).
+    # Probe at the final n_expl whenever it is already known so stage 3 reuses
+    # stage 1's compiled round loop — the single biggest cold-run compile. The
+    # wall-timed search still probes at n_expl=1 (Λ, hence N*, is
+    # n_expl-invariant).
     if gibbs_steps_per_round is not None:
         if int(gibbs_steps_per_round) < 1:
             raise ValueError("gibbs_steps_per_round must be >= 1.")
@@ -526,10 +509,8 @@ def autotune(
     init_states = init_factory(n_chains, ebms_init, programs_init)
 
     # --- Stage 2: exploration count at fixed N, reusing the schedule ---
-    # Precedence: an explicit gibbs_steps_per_round pins n_expl (skip stage 2);
-    # else a wall-timed search if opted in; else a deterministic device-calibrated
-    # default (reproducible and ~free, since the ESS/sec objective is flat in
-    # n_expl on a dispatch-bound accelerator).
+    # Precedence: explicit gibbs_steps_per_round pins n_expl; else a wall-timed
+    # search if opted in; else the deterministic device default.
     exploration: dict | None = None
     if gibbs_steps_per_round is not None or not (
         search_exploration and max_exploration_steps > 1
@@ -557,13 +538,10 @@ def autotune(
         n_expl = int(exploration["gibbs_steps_per_round"])
 
     # --- Stage 3: schedule polish at (N, n_expl) + warm cold state ---
-    # The production run uses n_rounds (not the short probe budget): it both
-    # equilibrates the warm cold state and measures a representative round-trip
-    # rate. A round trip needs >= ~2N rounds, so a short window badly
-    # underestimates tau_obs / efficiency for large N.
-    # When probes were masked, the polish + production run masked too: the same
-    # padded round loop then serves every stage (one big compile total), instead
-    # of stage 3 re-compiling an exact-shape loop the probes no longer built.
+    # The production run uses n_rounds, not the short probe budget: a round
+    # trip needs >= ~2N rounds, so a short window badly underestimates tau_obs.
+    # When probes were masked, mask here too so one padded round loop serves
+    # every stage instead of stage 3 recompiling an exact-shape loop.
     warm_states, polish_stats = tune_schedule(
         k_polish,
         ebm_factory,
@@ -594,7 +572,7 @@ def autotune(
         cold_program = program_factory([cold_ebm])[0]
 
     # Output column order: caller-supplied (e.g. the model's original node
-    # order) or, by default, all free nodes in free-block (colour) order.
+    # order) or, by default, all free nodes in free-block (color) order.
     if sample_nodes is not None:
         out_nodes = list(sample_nodes)
     else:
@@ -606,10 +584,8 @@ def autotune(
         )
     obs_block = _obs_block(out_nodes)
 
-    # Column permutation mapping the tempered draw's free-block-order cold-chain
-    # observations to ``out_nodes`` order (identity when out_nodes is the default
-    # free-block order). Keyed by node identity — the free nodes are shared
-    # across every chain's program, so this is stable across the ladder.
+    # Column permutation from the draw's free-block order to ``out_nodes``
+    # order; keyed by node identity, which the whole ladder shares.
     flat_nodes = [n for b in cold_program.gibbs_spec.free_blocks for n in b.nodes]
     _flat_pos = {id(n): j for j, n in enumerate(flat_nodes)}
     try:
@@ -656,9 +632,9 @@ def autotune(
         _warm_state=warm_cold,
         _clamp_state=clamp_state,
         _obs_block=obs_block,
-        # Mask the tempered draw exactly when the probes were masked, so the whole
-        # pipeline (probes + polish + production + draw) shares one padded ladder
-        # length and repeated/varying-N draws reuse the observer round loop.
+        # Mask the draw exactly when the probes were masked so the whole
+        # pipeline shares one padded ladder length and varying-N draws reuse
+        # the observer round loop.
         _pad_draw=(max_chains if pad_probes else None),
     )
 

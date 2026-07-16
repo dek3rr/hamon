@@ -45,14 +45,14 @@ class PlantedInstance:
     edges: np.ndarray  # (m, 2) int node indices
     weights: np.ndarray  # (m,) gauged couplings J
     biases: np.ndarray  # (n,) zeros
-    free_blocks: list  # checkerboard Blocks (2 colours)
+    free_blocks: list  # checkerboard Blocks (2 colors)
     planted_state: np.ndarray  # (n,) in {-1, +1}
     planted_energy: float
     n_loops: int
 
 
 def _lattice(L):
-    """Periodic L x L nearest-neighbour edges; returns (edges, emap, idx)."""
+    """Periodic L x L nearest-neighbor edges; returns (edges, emap, idx)."""
 
     def idx(r, c):
         return (r % L) * L + (c % L)
@@ -82,7 +82,7 @@ def _rect_perimeter(r0, c0, h, w, idx):
 
 
 def make_planted_loops(L, loops_per_spin=2.0, seed=0, max_loop=None, gauge=True):
-    assert L % 2 == 0, "use even L for a 2-colourable (bipartite) periodic lattice"
+    assert L % 2 == 0, "use even L for a 2-colorable (bipartite) periodic lattice"
     rng = np.random.default_rng(seed)
     n = L * L
     edges, emap, idx = _lattice(L)
@@ -235,7 +235,7 @@ def main() -> int:
     gap = float(E.min()) - inst.planted_energy
     print(
         f"autotune: N={diag['n_chains']} n_expl={diag['gibbs_steps_per_round']} "
-        f"Lambda={float(diag['Lambda']):.2f} colours={diag.get('n_colors', '?')}\n"
+        f"Lambda={float(diag['Lambda']):.2f} colors={diag.get('n_colors', '?')}\n"
         f"E_min={E.min():.1f}  planted E*={inst.planted_energy:.1f}  "
         f"gap={gap:.1f} ({'GROUND STATE FOUND' if gap < 1e-6 else f'{gap / n:.3f}/spin above'})\n"
         f"GS hit-rate={np.mean(np.abs(E - inst.planted_energy) < 1e-6):.4f}  "

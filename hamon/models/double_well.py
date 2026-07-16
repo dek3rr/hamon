@@ -24,7 +24,7 @@ explicitly allows, and the first hamon sampler that is a Markov *transition*
 rather than an independent conditional draw. The current value x₀ it needs is
 delivered through a **self-anchored interaction**: the polynomial factor lists
 its own node group as the tail block, so each site receives its own pre-sweep
-value as a tail state (pairing is positional; the graph colouring adds no
+value as a tail state (pairing is positional; the graph coloring adds no
 self-conflict for it).
 
 Randomness inside the shrinkage loop is keyed by ``fold_in(key, iteration)``,
@@ -47,15 +47,17 @@ from jaxtyping import Array, Key, PyTree
 from hamon.block_management import Block, BlockSpec, from_global_state
 from hamon.block_sampling import BlockGibbsSpec, _State
 from hamon.conditional_samplers import AbstractConditionalSampler
-from hamon.factor import FactorSamplingProgram
-from hamon.interaction import InteractionGroup
+from hamon.factor import ModelSamplingProgram
+from hamon.interaction import InteractionGroup, interaction_float_dtype
 from hamon.models.ebm import AbstractFactorizedEBM, EBMFactor
 from hamon.models.gaussian import (
     QuadraticPairEBMFactor,
     QuadraticPairInteraction,
     QuadraticSelfInteraction,
+    _gaussian_factor_blocks,
+    _per_block_init,
 )
-from hamon.pgm import AbstractNode, GaussianNode, _IdentitySeq
+from hamon.pgm import AbstractNode, GaussianNode, _as_identity_seq
 
 __all__ = [
     "PolynomialSelfInteraction",
@@ -72,8 +74,8 @@ class PolynomialSelfInteraction(eqx.Module):
 
     All coefficients are energy coefficients with β already folded in (the
     factor convention shared with the Gaussian stack). Its interaction group is
-    **self-anchored** — the head block reappears as the tail — so the sampler
-    receives each site's current value x₀, which a slice sampler requires.
+    self-anchored (see the module docstring), delivering each site's own
+    pre-sweep value alongside its coefficients.
     """
 
     quart: Array
@@ -127,7 +129,7 @@ class SliceGibbsConditional(AbstractConditionalSampler):
     under log p(x₀), bounded stepping-out (budget ``max_stepout`` split
     uniformly between the two directions — the m-limited variant, exact by
     construction), then shrinkage until acceptance. The transition leaves the
-    conditional invariant; sites in a colour class update independently.
+    conditional invariant; sites in a color class update independently.
 
     **Attributes:**
 
@@ -151,15 +153,7 @@ class SliceGibbsConditional(AbstractConditionalSampler):
         sampler_state: None,
         output_sd: PyTree[jax.ShapeDtypeStruct],
     ) -> tuple[_State, None]:
-        dtype = jnp.result_type(
-            *(
-                leaf.dtype
-                for interaction in interactions
-                for leaf in jax.tree.leaves(interaction)
-                if isinstance(leaf, jax.Array)
-                and jnp.issubdtype(leaf.dtype, jnp.floating)
-            )
-        )
+        dtype = interaction_float_dtype(interactions)
         shape = output_sd.shape
         coef_a = jnp.zeros(shape, dtype=dtype)
         coef_b = jnp.zeros(shape, dtype=dtype)
@@ -223,11 +217,10 @@ class SliceGibbsConditional(AbstractConditionalSampler):
             0, self.max_stepout, expand, (left, right, j_budget, k_budget_r)
         )
 
-        # Shrinkage: propose uniformly on [left, right]; on rejection shrink the
-        # side of x0 the proposal fell on. Terminates a.s. (the interval shrinks
-        # toward x0, where log p >= y by construction). Draws are keyed by
-        # (k_shrink, iteration): no site's stream depends on how many
-        # iterations other sites — or other vmap lanes — need.
+        # Shrinkage: propose uniformly on [left, right], shrinking the side
+        # the rejected proposal fell on (terminates a.s. toward x0). Keying
+        # draws by (k_shrink, iteration) keeps every site's stream independent
+        # of other sites' — and other vmap lanes' — iteration counts.
         def cond(carry):
             return jnp.any(~carry[3])
 
@@ -266,7 +259,7 @@ class DoubleWellEBM(AbstractFactorizedEBM):
     - `couplings`: per-edge coefficient ``c``.
     - `beta`: scalar inverse temperature.
 
-    Unbounded state space ⇒ ``proper_at_beta_zero`` is ``False``.
+    See the module docstring for why ``proper_at_beta_zero`` is ``False``.
     """
 
     nodes: Sequence[AbstractNode]
@@ -278,8 +271,8 @@ class DoubleWellEBM(AbstractFactorizedEBM):
 
     def __init__(self, nodes, edges, barrier: Array, lin: Array, couplings, beta):
         super().__init__({GaussianNode: jax.ShapeDtypeStruct((), jnp.float32)})
-        self.nodes = nodes if isinstance(nodes, _IdentitySeq) else _IdentitySeq(nodes)
-        self.edges = edges if isinstance(edges, _IdentitySeq) else _IdentitySeq(edges)
+        self.nodes = _as_identity_seq(nodes)
+        self.edges = _as_identity_seq(edges)
         param_dtype = jnp.result_type(barrier, lin, couplings)
         self.barrier = barrier
         self.lin = lin
@@ -298,8 +291,6 @@ class DoubleWellEBM(AbstractFactorizedEBM):
     @property
     def factors(self) -> list[EBMFactor]:
         # β·params recomputed on every call — caching breaks AD tracer flow.
-        from hamon.models.gaussian import _gaussian_factor_blocks
-
         self_block, head_block, tail_block = _gaussian_factor_blocks(
             self.nodes, self.edges
         )
@@ -320,8 +311,8 @@ class DoubleWellEBM(AbstractFactorizedEBM):
         return fs
 
 
-class DoubleWellSamplingProgram(FactorSamplingProgram):
-    """Thin wrapper specializing :class:`FactorSamplingProgram` to the φ⁴ model."""
+class DoubleWellSamplingProgram(ModelSamplingProgram):
+    """Thin wrapper specializing :class:`ModelSamplingProgram` to the φ⁴ model."""
 
     def __init__(
         self,
@@ -333,25 +324,18 @@ class DoubleWellSamplingProgram(FactorSamplingProgram):
         max_stepout: int = 8,
         _gibbs_spec: BlockGibbsSpec | None = None,
     ):
-        samp = SliceGibbsConditional(width=width, max_stepout=max_stepout)
-        spec = (
-            _gibbs_spec
-            if _gibbs_spec is not None
-            else BlockGibbsSpec(free_blocks, clamped_blocks, ebm.node_shape_dtypes)
+        super().__init__(
+            ebm,
+            free_blocks,
+            clamped_blocks,
+            SliceGibbsConditional(width=width, max_stepout=max_stepout),
+            _gibbs_spec=_gibbs_spec,
         )
-        super().__init__(spec, [samp for _ in spec.free_blocks], ebm.factors, [])
 
-    def with_ebm(self, ebm: DoubleWellEBM) -> "DoubleWellSamplingProgram":
+    def _with_ebm_kwargs(self) -> dict:
         samp = self.samplers[0]
         assert isinstance(samp, SliceGibbsConditional)
-        return DoubleWellSamplingProgram(
-            ebm,
-            list(self.gibbs_spec.superblocks),
-            self.gibbs_spec.clamped_blocks,
-            width=samp.width,
-            max_stepout=samp.max_stepout,
-            _gibbs_spec=self.gibbs_spec,
-        )
+        return {"width": samp.width, "max_stepout": samp.max_stepout}
 
 
 def double_well_init(
@@ -367,20 +351,15 @@ def double_well_init(
     Not the target distribution — a sensibly-scaled start, like
     ``gaussian_init`` / ``hinton_init``. Requires β > 0.
     """
-    pos = {id(n): i for i, n in enumerate(model.nodes)}
-    keys = jax.random.split(key, max(len(blocks), 1))
-    out = []
-    for k, block in zip(keys, blocks):
-        idx = jnp.asarray([pos[id(n)] for n in block.nodes], dtype=jnp.int32)
+
+    def site_draw(k, idx, shape):
         k_sign, k_noise = jax.random.split(k)
         sign = jnp.where(
-            jax.random.bernoulli(k_sign, 0.5, (*batch_shape, len(block.nodes))),
+            jax.random.bernoulli(k_sign, 0.5, shape),
             jnp.float32(1.0),
             jnp.float32(-1.0),
         )
         std = jax.lax.rsqrt(model.beta * 8.0 * model.barrier[idx])
-        noise = jax.random.normal(
-            k_noise, (*batch_shape, len(block.nodes)), dtype=jnp.float32
-        )
-        out.append((sign + std * noise).astype(jnp.float32))
-    return out
+        return sign + std * jax.random.normal(k_noise, shape, dtype=jnp.float32)
+
+    return _per_block_init(key, model, blocks, batch_shape, site_draw)

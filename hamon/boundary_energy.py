@@ -202,7 +202,7 @@ def make_ising_delta_fn(
     edge_src = jnp.array([node_map[id(e[0])] for e in edges], dtype=jnp.int32)
     edge_dst = jnp.array([node_map[id(e[1])] for e in edges], dtype=jnp.int32)
 
-    # Full-graph masks (all nodes updated). For single-colour-class updates, pass custom masks.
+    # Full-graph masks (all nodes updated). For single-color-class updates, pass custom masks.
     incident_mask = jnp.ones(len(edges), dtype=jnp.float32)
     changed_mask = jnp.ones(n_nodes, dtype=jnp.float32)
 

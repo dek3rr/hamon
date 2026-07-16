@@ -30,7 +30,7 @@ def _vectorized_swap(
     With ``live_chains`` set (a traced chain count ≤ the padded ladder length),
     pairs at index ≥ live_chains − 1 are forced-rejected: the permutation stays
     identity there, so padding chains can never exchange with (or influence)
-    the live ladder — DEO coupling is nearest-neighbour, so masking the
+    the live ladder — DEO coupling is nearest-neighbor, so masking the
     boundary pair fully decouples the padding.
 
     Returns (new_states, accept_counts, permutation).

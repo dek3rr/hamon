@@ -46,11 +46,9 @@ class _IdentitySeq(Sequence[_T]):
     def __hash__(self) -> int:
         h = self._hash
         if h is None:
-            # id()-based: mirrors the unique-by-construction node semantics
-            # without calling each element's Python-level __hash__. Edge
-            # entries are (node, node) tuples, whose own ids are not stable
-            # across rebuilds — canonicalise one level so freshly built
-            # tuples over the same nodes hash (and compare) equal.
+            # id()-based to mirror unique-by-construction node semantics;
+            # edge tuples' own ids are not rebuild-stable, so canonicalize one
+            # level so fresh tuples over the same nodes hash equal.
             h = self._hash = hash(
                 tuple(
                     tuple(map(id, x)) if isinstance(x, tuple) else id(x)
@@ -72,6 +70,37 @@ class _IdentitySeq(Sequence[_T]):
         return f"{self.__class__.__name__}({list(self._items)!r})"
 
 
+def _as_identity_seq(items) -> _IdentitySeq:
+    """Wrap ``items`` as an :class:`_IdentitySeq` unless it already is one.
+
+    The common ``self.nodes = ...`` / ``self.edges = ...`` idiom in EBM
+    ``__init__`` methods: reusing an existing wrapper (e.g. one passed through
+    by ``with_beta``) keeps the jit cache hitting on the shared identity.
+    """
+    return items if isinstance(items, _IdentitySeq) else _IdentitySeq(items)
+
+
+def _fifo_cache(cache: dict, max_size: int, key, build):
+    """Bounded memo: return ``cache[key]``, building and storing it on a miss
+    (evicting the oldest entry at ``max_size``).
+
+    The shared skeleton of hamon's identity-keyed caches (factor blocks,
+    memoized graphs, observer blocks). When the key is ``id()``-based, ``build``
+    must include the keyed objects in the stored value: a live entry then pins
+    them, so an id can never be reused while its cache entry exists, and an
+    evicted entry takes its key with it — no reuse-after-GC false hits either
+    way.
+    """
+    hit = cache.get(key)
+    if hit is not None:
+        return hit
+    value = build()
+    if len(cache) >= max_size:
+        cache.pop(next(iter(cache)))
+    cache[key] = value
+    return value
+
+
 class _CounterMeta(abc.ABCMeta):
     """Metaclass that automatically calls __post_init__ and provides unique ordering.
 
@@ -87,11 +116,8 @@ class _CounterMeta(abc.ABCMeta):
         return instance
 
     def __lt__(cls, other):
-        # Order node *types* by (module, qualname): a deterministic,
-        # process-stable key (unlike id()), so any sort of node types is
-        # reproducible across runs. It is unique for normally-defined classes;
-        # two distinct classes sharing a module+qualname (e.g. dynamically
-        # generated) would order ambiguously, but hamon never produces such.
+        # Order node *types* by (module, qualname) — process-stable unlike
+        # id(), and unique for normally-defined classes.
         if not isinstance(other, type):
             raise NotImplementedError
         return (cls.__module__, cls.__qualname__) < (

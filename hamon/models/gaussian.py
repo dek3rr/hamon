@@ -12,8 +12,8 @@ mean P⁻¹h, and the single-site conditionals are themselves Gaussian —
 $$x_i \\mid x_{\\setminus i} \\sim \\mathcal{N}\\!\\left(
     \\frac{h_i - \\sum_j c_{ij} x_j}{d_i},\\; \\frac{1}{\\beta d_i} \\right)$$
 
-— so block Gibbs over a graph colouring is *exact*, just as for the discrete
-models: within a colour class the conditionals are independent scalar
+— so block Gibbs over a graph coloring is *exact*, just as for the discrete
+models: within a color class the conditionals are independent scalar
 Gaussians (no linear solve anywhere).
 
 Positive definiteness of P is the caller's responsibility; strict diagonal
@@ -36,10 +36,10 @@ from jaxtyping import Array, Key, PyTree
 from hamon.block_management import Block, BlockSpec, from_global_state
 from hamon.block_sampling import BlockGibbsSpec, _State
 from hamon.conditional_samplers import AbstractParametricConditionalSampler
-from hamon.factor import FactorSamplingProgram
-from hamon.interaction import InteractionGroup
+from hamon.factor import ModelSamplingProgram
+from hamon.interaction import InteractionGroup, interaction_float_dtype
 from hamon.models.ebm import AbstractFactorizedEBM, EBMFactor
-from hamon.pgm import AbstractNode, GaussianNode, _IdentitySeq
+from hamon.pgm import AbstractNode, GaussianNode, _as_identity_seq, _fifo_cache
 
 __all__ = [
     "QuadraticSelfInteraction",
@@ -151,16 +151,6 @@ class QuadraticPairEBMFactor(EBMFactor):
         return jnp.sum(self.coupling * x_h * x_t)
 
 
-def _interaction_dtype(interactions: list[PyTree]) -> jnp.dtype:
-    dtypes = [
-        leaf.dtype
-        for interaction in interactions
-        for leaf in jax.tree.leaves(interaction)
-        if isinstance(leaf, jax.Array) and jnp.issubdtype(leaf.dtype, jnp.floating)
-    ]
-    return jnp.result_type(*dtypes) if dtypes else jnp.dtype(jnp.float32)
-
-
 class GaussianGibbsConditional(AbstractParametricConditionalSampler):
     r"""Exact Gaussian Gibbs update for continuous nodes.
 
@@ -188,7 +178,7 @@ class GaussianGibbsConditional(AbstractParametricConditionalSampler):
         sampler_state: None,
         output_sd: PyTree[jax.ShapeDtypeStruct],
     ) -> PyTree:
-        dtype = _interaction_dtype(interactions)
+        dtype = interaction_float_dtype(interactions)
         prec = jnp.zeros(output_sd.shape, dtype=dtype)
         eta = jnp.zeros(output_sd.shape, dtype=dtype)
         for interaction, active, state in zip(interactions, active_flags, states):
@@ -216,38 +206,28 @@ class GaussianGibbsConditional(AbstractParametricConditionalSampler):
         return (mean + std * noise).astype(output_sd.dtype), sampler_state
 
 
-# Head/tail Block construction depends only on node/edge identities, never on
-# parameter values, but ``factors`` is recomputed per ``with_beta`` copy (the
-# β·params products must stay inside the tracer flow for AD). Cache the Blocks
-# on sequence identity so repeated factor builds — one per chain per nrpt call —
-# skip the O(|graph|) Python work; entries pin their keys (no id reuse while
-# live) and the cache is bounded FIFO. Same pattern as the Ising factor blocks.
+# Same pattern as the Ising factor blocks: Block construction depends only on
+# node/edge identities, but ``factors`` reruns per ``with_beta`` copy (β·params
+# must stay inside the tracer flow for AD) — cache the Blocks.
 _GAUSSIAN_FACTOR_BLOCK_CACHE: dict = {}
-_GAUSSIAN_FACTOR_BLOCK_CACHE_MAX = 64
 
 
 def _gaussian_factor_blocks(
     nodes, edges
 ) -> tuple[Block, "Block | None", "Block | None"]:
-    key = (id(nodes), id(edges))
-    hit = _GAUSSIAN_FACTOR_BLOCK_CACHE.get(key)
-    if hit is not None:
-        return hit[2], hit[3], hit[4]
-    self_block = Block(list(nodes))
-    # Edge-less models (e.g. a diagonal-Gaussian reference for AnnealedEBM)
-    # have no pair factor and hence no head/tail blocks.
-    head_block = Block([a for a, _ in edges]) if len(edges) else None
-    tail_block = Block([b for _, b in edges]) if len(edges) else None
-    if len(_GAUSSIAN_FACTOR_BLOCK_CACHE) >= _GAUSSIAN_FACTOR_BLOCK_CACHE_MAX:
-        _GAUSSIAN_FACTOR_BLOCK_CACHE.pop(next(iter(_GAUSSIAN_FACTOR_BLOCK_CACHE)))
-    _GAUSSIAN_FACTOR_BLOCK_CACHE[key] = (
-        nodes,
-        edges,
-        self_block,
-        head_block,
-        tail_block,
-    )
-    return self_block, head_block, tail_block
+    def build():
+        return (
+            nodes,  # pin the id()-keyed objects (see _fifo_cache)
+            edges,
+            Block(list(nodes)),
+            # Edge-less models (e.g. a diagonal-Gaussian reference for
+            # AnnealedEBM) have no pair factor and hence no head/tail blocks.
+            Block([a for a, _ in edges]) if len(edges) else None,
+            Block([b for _, b in edges]) if len(edges) else None,
+        )
+
+    hit = _fifo_cache(_GAUSSIAN_FACTOR_BLOCK_CACHE, 64, (id(nodes), id(edges)), build)
+    return hit[2], hit[3], hit[4]
 
 
 class GaussianEBM(AbstractFactorizedEBM):
@@ -271,8 +251,8 @@ class GaussianEBM(AbstractFactorizedEBM):
 
     ``nodes`` and ``edges`` are identity-hashed sequences shared across
     ``with_beta`` copies, keeping the jit caches hitting (same convention as
-    :class:`~hamon.models.IsingEBM`). The β = 0 member of the family is an
-    improper flat density over ℝⁿ, so ``proper_at_beta_zero`` is ``False``.
+    :class:`~hamon.models.IsingEBM`). See the module docstring for why
+    ``proper_at_beta_zero`` is ``False``.
     """
 
     nodes: Sequence[AbstractNode]
@@ -284,8 +264,8 @@ class GaussianEBM(AbstractFactorizedEBM):
 
     def __init__(self, nodes, edges, diag: Array, lin: Array, couplings: Array, beta):
         super().__init__({GaussianNode: jax.ShapeDtypeStruct((), jnp.float32)})
-        self.nodes = nodes if isinstance(nodes, _IdentitySeq) else _IdentitySeq(nodes)
-        self.edges = edges if isinstance(edges, _IdentitySeq) else _IdentitySeq(edges)
+        self.nodes = _as_identity_seq(nodes)
+        self.edges = _as_identity_seq(edges)
         param_dtype = jnp.result_type(diag, lin, couplings)
         self.diag = diag
         self.lin = lin
@@ -323,8 +303,8 @@ class GaussianEBM(AbstractFactorizedEBM):
         return fs
 
 
-class GaussianSamplingProgram(FactorSamplingProgram):
-    """Thin wrapper specializing :class:`FactorSamplingProgram` to a GMRF."""
+class GaussianSamplingProgram(ModelSamplingProgram):
+    """Thin wrapper specializing :class:`ModelSamplingProgram` to a GMRF."""
 
     def __init__(
         self,
@@ -334,21 +314,29 @@ class GaussianSamplingProgram(FactorSamplingProgram):
         *,
         _gibbs_spec: BlockGibbsSpec | None = None,
     ):
-        samp = GaussianGibbsConditional()
-        spec = (
-            _gibbs_spec
-            if _gibbs_spec is not None
-            else BlockGibbsSpec(free_blocks, clamped_blocks, ebm.node_shape_dtypes)
-        )
-        super().__init__(spec, [samp for _ in spec.free_blocks], ebm.factors, [])
-
-    def with_ebm(self, ebm: GaussianEBM) -> "GaussianSamplingProgram":
-        return GaussianSamplingProgram(
+        super().__init__(
             ebm,
-            list(self.gibbs_spec.superblocks),
-            self.gibbs_spec.clamped_blocks,
-            _gibbs_spec=self.gibbs_spec,
+            free_blocks,
+            clamped_blocks,
+            GaussianGibbsConditional(),
+            _gibbs_spec=_gibbs_spec,
         )
+
+
+def _per_block_init(key, model, blocks, batch_shape, site_draw) -> list[Array]:
+    """Shared skeleton of the continuous per-site init functions: map each
+    block's nodes to model indices and draw each block independently via
+    ``site_draw(key, idx, shape) -> float array``."""
+    pos = {id(n): i for i, n in enumerate(model.nodes)}
+    keys = jax.random.split(key, max(len(blocks), 1))
+    return [
+        site_draw(
+            k,
+            jnp.asarray([pos[id(n)] for n in block.nodes], dtype=jnp.int32),
+            (*batch_shape, len(block.nodes)),
+        ).astype(jnp.float32)
+        for k, block in zip(keys, blocks)
+    ]
 
 
 def gaussian_init(
@@ -365,16 +353,11 @@ def gaussian_init(
     Requires ``β > 0`` (the β = 0 member is improper; see
     ``GaussianEBM.proper_at_beta_zero``).
     """
-    pos = {id(n): i for i, n in enumerate(model.nodes)}
-    keys = jax.random.split(key, max(len(blocks), 1))
     dtype = model.diag.dtype
-    out = []
-    for k, block in zip(keys, blocks):
-        idx = jnp.asarray([pos[id(n)] for n in block.nodes], dtype=jnp.int32)
+
+    def site_draw(k, idx, shape):
         mean = (model.lin[idx] / model.diag[idx]).astype(dtype)
         std = jax.lax.rsqrt(model.beta * model.diag[idx]).astype(dtype)
-        noise = jax.random.normal(
-            k, (*batch_shape, len(block.nodes)), dtype=jnp.float32
-        )
-        out.append((mean + std * noise).astype(jnp.float32))
-    return out
+        return mean + std * jax.random.normal(k, shape, dtype=jnp.float32)
+
+    return _per_block_init(key, model, blocks, batch_shape, site_draw)

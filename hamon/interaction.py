@@ -1,8 +1,27 @@
 import equinox as eqx
 import jax
+from jax import numpy as jnp
 from jaxtyping import PyTree
 
 from hamon.block_management import Block
+
+
+def interaction_float_dtype(tree) -> jnp.dtype:
+    """Result dtype of every floating-point jax array in ``tree`` (a single
+    interaction pytree or any nesting of them); ``float32`` when there are
+    none.
+
+    The dtype conditional samplers accumulate parameters in, and the compute
+    dtype β values are cast to: float64 weights are not silently seeded with a
+    float32 zero, and an x64-enabled host application cannot promote a float32
+    model to float64 on device.
+    """
+    dtypes = [
+        x.dtype
+        for x in jax.tree.leaves(tree)
+        if isinstance(x, jax.Array) and jnp.issubdtype(x.dtype, jnp.floating)
+    ]
+    return jnp.result_type(*dtypes) if dtypes else jnp.dtype(jnp.float32)
 
 
 class InteractionGroup(eqx.Module):

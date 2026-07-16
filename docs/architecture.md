@@ -13,7 +13,7 @@ pre-zeroes padded interaction entries using the active mask, and precomputes
 each block's contiguous slice into the global state.
 
 The `BlockSpec` manages the mapping between block-local and global state arrays.
-Per-node *interaction* data is padded to the maximum neighbour count so it is
+Per-node *interaction* data is padded to the maximum neighbor count so it is
 rectangular (with an `active` mask marking real entries), which costs some
 wasted FLOPs but avoids Python-level loops that would make XLA compile times
 scale with node count.

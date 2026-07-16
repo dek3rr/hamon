@@ -13,9 +13,9 @@ from hamon.conditional_samplers import (
     SoftmaxConditional,
 )
 from hamon.factor import WeightedFactor
-from hamon.interaction import InteractionGroup
+from hamon.interaction import InteractionGroup, interaction_float_dtype
 from hamon.models.ebm import EBMFactor
-from hamon.pgm import AbstractNode
+from hamon.pgm import AbstractNode, _fifo_cache
 
 
 class DiscreteEBMInteraction(eqx.Module):
@@ -56,16 +56,10 @@ def _batch_gather(x, *idx):
     return x_flat[(batch_idx,) + idx_flat].reshape(batch_shape)
 
 
-# Head/tail Block construction for the spin branch of ``to_interaction_groups``
-# depends only on the node-group Blocks, never on the weight values, yet it was
-# rebuilt — O(sum of group sizes) Python list concatenation plus Block type
-# scans — on every factor compilation. ``program.with_ebm(...)`` recompiles the
-# factors once per chain per ``nrpt`` call, so this is a hot path for large
-# graphs. Keyed on the node-group Blocks' identities; entries pin their key
-# Blocks (so ids cannot be reused while an entry is live) and the cache is a
-# bounded LRU, mirroring the _STRUCTURE_CACHE pattern in block_sampling.
+# Head/tail Block construction depends only on the node-group Blocks, never
+# on weight values, yet ``with_ebm`` rebuilds factors once per chain per
+# ``nrpt`` call — cache the Blocks to keep that hot path O(1).
 _SPIN_IG_BLOCK_CACHE: dict = {}
-_SPIN_IG_BLOCK_CACHE_MAX = 64
 
 
 def _spin_ig_blocks(
@@ -74,44 +68,37 @@ def _spin_ig_blocks(
     """Build (cached) the merged head Block and tail Blocks for the spin
     interaction group: head = all spin groups concatenated, and for each spin
     combo the remaining spin groups plus the categorical groups as tails."""
+
+    def build():
+        n_spin = len(spin_node_groups)
+        n_total = n_spin + len(categorical_node_groups)
+        spin_inds = list(range(n_spin))
+        spin_combos = [
+            (x, spin_inds[:i] + spin_inds[i + 1 :]) for i, x in enumerate(spin_inds)
+        ]
+
+        all_head_nodes = []
+        all_tail_nodes = [[] for _ in range(n_total - 1)]
+        for combo in spin_combos:
+            all_head_nodes += spin_node_groups[combo[0]].nodes
+            for i, tail_ind in enumerate(combo[1]):
+                all_tail_nodes[i] += spin_node_groups[tail_ind].nodes
+            for j, cat_group in enumerate(categorical_node_groups):
+                all_tail_nodes[n_spin - 1 + j] += cat_group.nodes
+
+        return (
+            tuple(spin_node_groups),  # pin the id()-keyed Blocks (_fifo_cache)
+            tuple(categorical_node_groups),
+            Block(all_head_nodes),
+            tuple(Block(x) for x in all_tail_nodes),
+        )
+
     key = (
         tuple(map(id, spin_node_groups)),
         tuple(map(id, categorical_node_groups)),
     )
-    hit = _SPIN_IG_BLOCK_CACHE.get(key)
-    if hit is not None:
-        return hit[2], hit[3]
-
-    n_spin = len(spin_node_groups)
-    n_total = n_spin + len(categorical_node_groups)
-    spin_inds = list(range(n_spin))
-    spin_combos = [
-        (x, spin_inds[:i] + spin_inds[i + 1 :]) for i, x in enumerate(spin_inds)
-    ]
-
-    all_head_nodes = []
-    all_tail_nodes = [[] for _ in range(n_total - 1)]
-    for combo in spin_combos:
-        all_head_nodes += spin_node_groups[combo[0]].nodes
-        for i, tail_ind in enumerate(combo[1]):
-            all_tail_nodes[i] += spin_node_groups[tail_ind].nodes
-        for j, cat_group in enumerate(categorical_node_groups):
-            all_tail_nodes[n_spin - 1 + j] += cat_group.nodes
-
-    head_block = Block(all_head_nodes)
-    tail_blocks = tuple(Block(x) for x in all_tail_nodes)
-
-    if len(_SPIN_IG_BLOCK_CACHE) >= _SPIN_IG_BLOCK_CACHE_MAX:
-        _SPIN_IG_BLOCK_CACHE.pop(next(iter(_SPIN_IG_BLOCK_CACHE)))
-    # Pin the key blocks in the value: a live entry keeps its keyed objects
-    # alive, so an id() collision with a garbage-collected Block is impossible.
-    _SPIN_IG_BLOCK_CACHE[key] = (
-        tuple(spin_node_groups),
-        tuple(categorical_node_groups),
-        head_block,
-        tail_blocks,
-    )
-    return head_block, tail_blocks
+    hit = _fifo_cache(_SPIN_IG_BLOCK_CACHE, 64, key, build)
+    return hit[2], hit[3]
 
 
 class DiscreteEBMFactor(EBMFactor, WeightedFactor):
@@ -345,15 +332,9 @@ def _batch_gather_with_k(x, *idx):
     ).reshape(batch_shape)
 
 
-def _accumulator_dtype(interactions) -> jnp.dtype:
-    """Accumulator dtype for conditional parameters: the result type of all
-    interaction weight dtypes, so float64 weights accumulate in float64
-    instead of being silently seeded with a float32 zero. Falls back to
-    float32 when no DiscreteEBMInteractions are present."""
-    w_dtypes = [
-        i.weights.dtype for i in interactions if isinstance(i, DiscreteEBMInteraction)
-    ]
-    return jnp.result_type(*w_dtypes) if w_dtypes else jnp.dtype(jnp.float32)
+# Accumulator dtype for conditional parameters (shared logic — see
+# hamon.interaction.interaction_float_dtype).
+_accumulator_dtype = interaction_float_dtype
 
 
 def _split_states(states, n_spin):

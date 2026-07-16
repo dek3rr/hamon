@@ -57,7 +57,7 @@ def _init_states(key, n_chains, ebms, free_blocks):
 
 
 def _exact_boltzmann(nodes, ebm, obs_block):
-    """Enumerate all 2^n states and return unnormalised Boltzmann weights."""
+    """Enumerate all 2^n states and return unnormalized Boltzmann weights."""
     n = len(nodes)
     n_states = 2**n
     weights = np.zeros(n_states)
@@ -634,7 +634,7 @@ class TestAdaptiveSchedule:
 
     def test_optimize_schedule_reduces_lambda(self):
         """After one pass of optimize_schedule, Λ on the new schedule must not exceed old."""
-        # Create rejection rates that are highly unequal (the easy case to optimise)
+        # Create rejection rates that are highly unequal (the easy case to optimize)
         rej = jnp.array([0.5, 0.05, 0.5, 0.05])
         betas = jnp.linspace(0.5, 2.0, 5)
         new_betas = optimize_schedule(rej, betas)

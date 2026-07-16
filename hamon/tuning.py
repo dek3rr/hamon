@@ -38,12 +38,8 @@ logger = logging.getLogger(__name__)
 # Convenience: NRPT with iterative schedule tuning
 # ---------------------------------------------------------------------------
 
-# Default schedule-movement floor used by adaptive tuning when the caller leaves
-# tune_tol unset. In β units: a schedule update that moves every β by less than
-# this is treated as "settled" (at the Monte-Carlo noise floor — the ladder
-# keeps jittering by ~this much even when well tuned, so a much tighter value is
-# never reached). Pair with the equalization check, which catches already-good
-# schedules whose β jitter alone never crosses this floor.
+# Default "settled" floor for max|Δβ| (β units): a well-tuned ladder keeps
+# jittering by about this much, so a tighter value would never be reached.
 _DEFAULT_TUNE_TOL = 0.02
 
 
@@ -226,9 +222,7 @@ def tune_schedule(
     if not init_states:
         raise ValueError("init_states is required (one initial state per chain).")
 
-    # The template route hands nrpt the same β = 1 base pair every phase
-    # (temperature-linear mode, jit cache reuse); the factory route builds
-    # per-chain sequences per phase. _ChainSource hides the difference.
+    # _ChainSource hides the template-vs-factory difference from every phase.
     source = _ChainSource(ebm_factory, program_factory, ebm, program)
 
     # Resolve the device once for all phases — a flip between phases would
@@ -250,11 +244,8 @@ def tune_schedule(
         emit_diag=False,
         return_stacked=False,
     ):
-        # Tuning batches default to emit_diag=False (they only read swap rates,
-        # so the eager round-trip summary is skipped) and return_stacked=True
-        # (states are threaded in stacked form, skipping the per-call unstack).
-        # The production run passes emit_diag=True and keeps the public
-        # per-chain return.
+        # Tuning batches skip the eager round-trip summary and per-call unstack
+        # they never read; only the production run pays for the public return.
         chain_ebms, chain_programs = source.nrpt_args(phase_betas)
         return nrpt(
             phase_key,
@@ -273,10 +264,8 @@ def tune_schedule(
             _return_stacked=return_stacked,
         )
 
-    # Pin the working schedule to the resolved device so optimize_schedule (and
-    # the other per-phase reductions) see a committed array every phase. Phase 0
-    # would otherwise pass the caller's uncommitted initial_betas, and jit would
-    # build a second, single-use executable keyed on the uncommitted input.
+    # Commit betas to the device up front: jit keys on commitment, so phase 0's
+    # uncommitted initial_betas would build a second single-use executable.
     betas = jax.device_put(initial_betas, dev) if dev is not None else initial_betas
     current_states = init_states
     tuning_history = []
@@ -289,10 +278,8 @@ def tune_schedule(
         else tune_tol
     )
 
-    # Keep the best-equalized schedule actually evaluated (adaptive mode), so a
-    # noisy late phase can't hand a worse ladder to production. ``best_saturated``
-    # starts True so the first ladder without a saturated pair always displaces
-    # the initial one, whose rej_std can otherwise look deceptively good.
+    # best_saturated starts True so the first unsaturated ladder displaces the
+    # initial one, whose rej_std can look deceptively good (see the docstring).
     best_betas = betas
     best_quality = float("inf")
     best_saturated = True
@@ -323,25 +310,15 @@ def tune_schedule(
         rej = stats["rejection_rates"]
         old_betas = betas
         new_betas = optimize_schedule(rej, betas)
-        # Equalization quality (lower spread of per-pair rejection rates = better
-        # tuned; drives keep-best and the equalization stop), ladder movement,
-        # Λ, and mean acceptance — all in one fused kernel instead of separate
-        # eager reductions. rej_std depends only on the pre-update rates, so
-        # keep-best still records old_betas.
+        # rej_std depends only on the pre-update rates, so keep-best records
+        # old_betas.
         rej_std_a, shift_a, lambda_a, mean_acc_a, max_rej_a = _phase_diagnostics(
             rej, old_betas, new_betas, stats["acceptance_rate"]
         )
         quality = float(rej_std_a)
         max_rej = float(max_rej_a)
-        # A pair pinned at ~100% rejection means the ladder still has an
-        # unbridged gap at β_c: no state crosses it, so Λ̂ = Σ rej across it is a
-        # within-basin artifact (and wildly unstable — the same saturated ladder
-        # can read Λ̂ = 8 or 52). Such a ladder must never win keep-best, and
-        # rej_std alone does not rule it out: on a glassy target the untuned
-        # linear ladder scores a *better* rej_std than the partially-retuned
-        # ladders of the tuning transient, so plain rej_std ranking reverts all
-        # the way to the initial schedule and tuning becomes a no-op. Rank
-        # unsaturated over saturated first, then by rej_std.
+        # Unsaturated outranks saturated before spread is compared (docstring,
+        # "Best") — otherwise keep-best reverts to the untuned input on glass.
         saturated = max_rej >= saturation_tol
         if adaptive_tuning and (
             (best_saturated and not saturated)
@@ -379,18 +356,10 @@ def tune_schedule(
         )
 
         if adaptive_tuning:
-            # Combined stop: well-equalized OR schedule movement at its noise
-            # floor OR Λ̂ plateaued, sustained for phase_patience consecutive
-            # phases.
+            # Stop rules per the docstring ("Tuning stops"); the Λ̂ plateau is
+            # what keeps the phase cap from silently deciding on glassy targets.
             equalized = quality < equalize_tol
             settled = effective_tol is not None and max_beta_shift < effective_tol
-            # Λ-plateau: the estimate we actually care about has stopped moving.
-            # Needed because on a glassy target rej_std settles just *above*
-            # equalize_tol (~0.05-0.07) so `equalized` never fires, and max|Δβ|
-            # only touches its noise floor intermittently — leaving the phase cap
-            # to decide, which is what mis-tuned these ladders in the first place.
-            # Gated on an unsaturated ladder: Λ̂ across a pair pinned at ~100%
-            # rejection is a within-basin artifact whose stability means nothing.
             plateaued = (
                 prev_lambda is not None
                 and not saturated
@@ -430,16 +399,8 @@ def tune_schedule(
     )
     stats["tuning_history"] = tuning_history
 
-    # Trust gate: is Λ̂ resolved? This is a *structural* question — Λ̂ = Σrej <=
-    # N-1 arithmetically, so a saturating ladder reports its own cap — and it is
-    # answered by the rejection rates alone, with no round-trip observation. It is
-    # deliberately NOT gated on the round-trip rate: that signal is
-    # budget-dependent and answers the separate "is the conveyor moving?"
-    # question, so using it here reports "add chains" for ladders that are
-    # already correct but merely under-observed (see barrier_is_identified).
-    # Judge the PRODUCTION run's rates — they belong to the kept (best) ladder
-    # and are what Lambda is computed from; the loop-local `rej` is the last
-    # tuning phase's rates for a schedule that may not have been kept.
+    # Gate on the PRODUCTION run's rates (the kept ladder Lambda comes from) —
+    # the loop-local `rej` belongs to a schedule that may not have been kept.
     prod_rej = stats["rejection_rates"]
     resolved = barrier_is_identified(prod_rej)
     stats["barrier_identified"] = resolved
@@ -524,24 +485,16 @@ _ENERGY_SAMPLES = 500
 _ENERGY_RESTARTS = 8  # independent chains per β (coverage + the R̂ trap detector)
 _ENERGY_RHAT_MAX = 1.1  # Gelman–Rubin cutoff: above this, trust the PT pilot
 
-# Adaptive warmup: run in fixed-size batches and stop on a running
-# cross-restart R̂ of the batch-end energies. Easy targets equilibrate in a
-# couple hundred sweeps (the old fixed 500 was pure margin); hard-but-mixing
-# targets may extend up to _ENERGY_WARMUP_MAX; trapped (glassy) targets show
-# an R̂ plateau — more local sweeps cannot merge basins — and exit early, since
-# the downstream R̂ trust gate will route them to the max_chains pilot anyway.
+# Adaptive-warmup knobs — see _adaptive_warmup for the stable/plateau/cap
+# stopping rules these feed.
 _ENERGY_WARMUP_BATCH = 50  # sweeps per warmup batch (one compiled kernel)
 _ENERGY_WARMUP_MIN = 200  # earliest sweep count at which stopping is checked
-_ENERGY_WARMUP_MAX = 2000  # hard ceiling (was a fixed 500 — hard targets get 4x)
+_ENERGY_WARMUP_MAX = 2000  # hard ceiling
 _ENERGY_WARMUP_WINDOW = 4  # batch-end snapshots per restart in the running R̂
 _ENERGY_WARMUP_PASSES = 2  # consecutive R̂ passes required (guards noisy R̂)
-# Stopping threshold for the *window* R̂ — deliberately looser than the final
-# trust gate's _ENERGY_RHAT_MAX: with only W=4 snapshots per restart the R̂
-# estimator is noisy even for perfectly converged chains. Calibrated as the
-# ~p95 of the null distribution of max-over-grid R̂ at (R=8 restarts, W=4,
-# 10 informative β) — simulated: p50≈1.22, p90≈1.38, p95≈1.44 — so converged
-# chains pass ~95% of checks while split basins (R̂ ≳ 2) never do. Recalibrate
-# if _ENERGY_WARMUP_WINDOW, _ENERGY_RESTARTS, or _ENERGY_GRID change.
+# ~p95 of the null window-R̂ at (R=8, W=4, 10 informative β) — looser than
+# _ENERGY_RHAT_MAX because a 4-snapshot R̂ is noisy even for converged chains;
+# recalibrate if the window/restart/grid counts change.
 _ENERGY_WARMUP_RHAT = 1.45
 _ENERGY_PLATEAU_K = 3  # consecutive no-improvement checks ⇒ trapped, stop
 _ENERGY_PLATEAU_TOL = 0.02  # relative R̂ improvement that resets the plateau
@@ -617,6 +570,49 @@ def _energy_mad_halved(v: np.ndarray) -> float:
     return float((1.0 / M**2) * np.sum((2 * np.arange(1, M + 1) - M - 1) * v))
 
 
+def _adaptive_warmup(
+    states, run_batch, batch_energies, *, cap, rhat_threshold, rhat_betas, log_label
+):
+    """Batched warmup with the windowed cross-replica R̂ stop.
+
+    Runs ``run_batch(states, batch_index) -> states`` in
+    ``_ENERGY_WARMUP_BATCH``-sweep increments, tracking the windowed R̂ of
+    ``batch_energies(states)`` snapshots, and stops on the earliest of
+    **stable** (R̂ < threshold for ``_ENERGY_WARMUP_PASSES`` checks),
+    **plateau** (R̂ stopped improving while failing — trapped replicas), or the
+    ``cap``. Shared by the energy-grid barrier seed and
+    :func:`tune_sampling_schedule`.
+
+    Returns ``(states, total_sweeps, exit_reason, last_rhat)``.
+    """
+    cap = max(int(cap), _ENERGY_WARMUP_BATCH)
+    check_from = min(_ENERGY_WARMUP_MIN, cap)
+    e_hist: list[np.ndarray] = []
+    rh = float("nan")
+    rh_best, rh_passes, rh_stalls = float("inf"), 0, 0
+    total, exit_reason = 0, "cap"
+    while total < cap:
+        states = run_batch(states, total // _ENERGY_WARMUP_BATCH)
+        total += _ENERGY_WARMUP_BATCH
+        e_hist.append(batch_energies(states))
+        if total < check_from or len(e_hist) < _ENERGY_WARMUP_WINDOW:
+            continue
+        rh = _window_rhat_max(np.stack(e_hist[-_ENERGY_WARMUP_WINDOW:]), rhat_betas)
+        logger.debug("%s warmup: %d sweeps, window rhat=%.3f", log_label, total, rh)
+        rh_passes = rh_passes + 1 if rh < rhat_threshold else 0
+        if rh_passes >= _ENERGY_WARMUP_PASSES:
+            exit_reason = "stable"
+            break
+        if rh < rh_best * (1.0 - _ENERGY_PLATEAU_TOL):
+            rh_best, rh_stalls = rh, 0
+        else:
+            rh_stalls += 1
+            if rh_stalls >= _ENERGY_PLATEAU_K:
+                exit_reason = "plateau"
+                break
+    return states, total, exit_reason, rh
+
+
 def _estimate_barrier_energy(
     key: jax.Array,
     source: _ChainSource,
@@ -641,37 +637,21 @@ def _estimate_barrier_energy(
     loop. ``V`` is recovered exactly via the same ``_compute_base_energies`` path
     the swap step uses, so the estimate is on the same scale as ``Σ rejection``.
 
-    Theorem 2 is exact *given equilibrium samples*; the bias on a glassy target is
-    a sampling artifact — local Gibbs traps in a basin and misses the inter-mode
-    energy spread. The independent restarts expose this directly: we return the
-    **Gelman–Rubin R̂** of the per-chain energies (max over β). R̂≈1 ⇒ the chains
-    agree ⇒ local Gibbs mixes ⇒ Λ̂ (and the seed it implies) is trustworthy; R̂≫1
-    ⇒ the chains trap in different basins ⇒ the target is glassy and the caller
-    should fall back to the robust ``max_chains`` pilot. R̂ needs no ground truth
-    and (unlike importance-weight ESS) cannot be fooled by a confidently-sampled
-    but truncated support — it measures whether independent starts converge to the
-    same distribution, which is exactly the property that fails.
+    Theorem 2 is exact *given equilibrium samples*; the bias on a glassy target
+    is a sampling artifact — local Gibbs traps in a basin and misses the
+    inter-mode energy spread. The independent restarts expose exactly that: the
+    returned **Gelman–Rubin R̂** (max over β) measures whether independent
+    starts converge to the same distribution. R̂ ≈ 1 ⇒ local Gibbs mixes ⇒ the
+    seed is trustworthy; R̂ ≫ 1 ⇒ glassy ⇒ the caller should fall back to the
+    robust ``max_chains`` pilot.
 
-    **Adaptive warmup.** Warmup runs in ``_ENERGY_WARMUP_BATCH``-sweep batches
-    and stops on the earliest of three exits, so easy targets pay a fraction of
-    a fixed budget while hard-but-mixing targets get up to ``warmup`` (default
-    ``_ENERGY_WARMUP_MAX`` — 4× the old fixed 500) sweeps:
-
-    - **stable** — the running cross-restart R̂ of batch-end energies (same
-      estimator as the final trust gate, over a ``_ENERGY_WARMUP_WINDOW``-batch
-      window) is below ``_ENERGY_RHAT_MAX`` for ``_ENERGY_WARMUP_PASSES``
-      consecutive checks;
-    - **plateau** — R̂ has stopped improving while still failing: the restarts
-      are trapped in separate basins and more *local* sweeps cannot merge them
-      (the identifiability failure mode of glassy targets), so further warmup
-      is wasted — the final R̂ gate will route the caller to the max_chains
-      pilot regardless;
-    - **cap** — ``warmup`` total sweeps.
-
-    Stability detection is necessary, not sufficient — a trapped chain looks
-    stable — which is why early stopping only ever triggers on *cross-restart
-    agreement*, and the post-hoc R̂ trust gate on the recorded window remains
-    the arbiter, unchanged.
+    Warmup is adaptive: ``_ENERGY_WARMUP_BATCH``-sweep batches, stopping on the
+    earliest of **stable** (cross-restart window R̂ passes), **plateau** (R̂
+    stopped improving while failing — trapped restarts that more local sweeps
+    cannot merge), or the ``warmup`` **cap** — see the ``_ENERGY_WARMUP_*``
+    constants. Stability is only ever declared on *cross-restart agreement* (a
+    single trapped chain looks stable), and the post-hoc R̂ gate on the recorded
+    window remains the arbiter.
 
     Returns ``(Λ̂, R̂_max)``.
     """
@@ -690,22 +670,15 @@ def _estimate_barrier_energy(
     sched_batch = SamplingSchedule(_ENERGY_WARMUP_BATCH, 1, 1)
     sched_sample = SamplingSchedule(0, ns, 1)
 
-    # The base EBM (β=1) and block spec are identical across the grid — only the
-    # tempered SAMPLING program (weights) changes. Build them once and jit the
-    # base-energy kernel so it compiles a single time, reused across the grid.
+    # The β = 1 base EBM and spec are grid-invariant; build once so the
+    # base-energy kernel compiles a single time.
     one = jnp.asarray(1.0)
     base_ebm, beta_ref = _make_reference_ebm(source.ebms_for_init(one[None]), one[None])
 
-    # Batched sampling over the whole (β grid × restarts) lattice — one vmapped
-    # call per warmup batch and one for the recording pass, instead of
-    # ``n_grid`` sequential dispatch+sync rounds. Lane ``i·R + c`` owns the key
-    # ``split(fold_in(key, i))[c]``; warmup batch ``b`` folds in ``b`` and the
-    # recording pass folds in ``_ENERGY_SAMPLING_TAG``, so streams are
-    # deterministic per seed (the adaptive warmup makes the sweep count — and
-    # hence the streams — data-dependent, unlike the old fixed-warmup run).
-    # Each lane samples with the *actual* β_i-tempered program's interaction
-    # arrays (stacked and vmapped, the same mechanism as nrpt's
-    # per-chain-sequence mode — no temperature-linearity assumed).
+    # One vmapped call over all (β, restart) lanes per pass; the per-lane key
+    # layout — lane i·R+c owns split(fold_in(key, i))[c], batch b folds in b,
+    # the recording pass folds in _ENERGY_SAMPLING_TAG — keeps streams
+    # deterministic per seed.
     keys_flat = jnp.concatenate(
         [jax.random.split(jax.random.fold_in(key, i), R) for i in range(G)]
     )
@@ -750,17 +723,11 @@ def _estimate_barrier_energy(
     carry = f_obs.init()
     fold_all = jax.vmap(jax.random.fold_in, in_axes=(0, None))
 
-    cap = max(int(warmup), _ENERGY_WARMUP_BATCH)
-    check_from = min(_ENERGY_WARMUP_MIN, cap)
-
     with device_ctx:
-        states = init_flat
-        e_hist: list[np.ndarray] = []  # batch-end energies, each (G, R)
-        rh_best, rh_passes, rh_stalls = float("inf"), 0, 0
-        total, exit_reason = 0, "cap"
-        while total < cap:
+
+        def run_batch(states, batch_index):
             out = _grid_sweep(
-                fold_all(keys_flat, total // _ENERGY_WARMUP_BATCH),
+                fold_all(keys_flat, batch_index),
                 base_prog,
                 sched_batch,
                 states,
@@ -769,29 +736,22 @@ def _estimate_barrier_energy(
                 f_obs,
                 carry,
             )
-            states = [o[:, 0] for o in out]
-            total += _ENERGY_WARMUP_BATCH
-            e_hist.append(
-                np.asarray(
-                    _grid_base_energies(base_ebm, beta_ref, spec, states, clamp_state)
-                ).reshape(G, R)
-            )
-            if total < check_from or len(e_hist) < _ENERGY_WARMUP_WINDOW:
-                continue
-            rh = _window_rhat_max(np.stack(e_hist[-_ENERGY_WARMUP_WINDOW:]), betas)
-            logger.debug("energy grid warmup: %d sweeps, window rhat=%.3f", total, rh)
-            rh_passes = rh_passes + 1 if rh < _ENERGY_WARMUP_RHAT else 0
-            if rh_passes >= _ENERGY_WARMUP_PASSES:
-                exit_reason = "stable"
-                break
-            if rh < rh_best * (1.0 - _ENERGY_PLATEAU_TOL):
-                rh_best, rh_stalls = rh, 0
-            else:
-                rh_stalls += 1
-                if rh_stalls >= _ENERGY_PLATEAU_K:
-                    exit_reason = "plateau"  # trapped basins: local sweeps
-                    break  # cannot help; the final R̂ gate handles trust
+            return [o[:, 0] for o in out]
 
+        def batch_energies(states):
+            return np.asarray(
+                _grid_base_energies(base_ebm, beta_ref, spec, states, clamp_state)
+            ).reshape(G, R)
+
+        states, total, exit_reason, _ = _adaptive_warmup(
+            init_flat,
+            run_batch,
+            batch_energies,
+            cap=warmup,
+            rhat_threshold=_ENERGY_WARMUP_RHAT,
+            rhat_betas=betas,
+            log_label="energy grid",
+        )
         logger.debug("energy grid warmup: %d sweeps (%s exit)", total, exit_reason)
         raw = _grid_sweep(
             fold_all(keys_flat, _ENERGY_SAMPLING_TAG),
@@ -826,7 +786,7 @@ def _estimate_barrier_energy(
 
 # ~p95 of the null single-series window R̂ at (8 restarts, 4-batch window):
 # simulated p50≈1.03, p95≈1.25. The grid's _ENERGY_WARMUP_RHAT is looser
-# (1.45) because it maximises over 10 grid points; a single chain family
+# (1.45) because it maximizes over 10 grid points; a single chain family
 # needs the tighter cut. Recalibrate if the window/restart counts change.
 _REPLICA_RHAT = 1.25
 _TAU_PROBE_TAG = 0x54415550  # "TAUP": fold_in tag for the autocorrelation probe
@@ -969,18 +929,11 @@ def tune_sampling_schedule(
     fold_all = jax.vmap(jax.random.fold_in, in_axes=(0, None))
     one_beta = np.ones(1)
 
-    cap = max(int(warmup_cap), _ENERGY_WARMUP_BATCH)
-    check_from = min(_ENERGY_WARMUP_MIN, cap)
-
     with device_ctx:
-        states = init_states
-        e_hist: list[np.ndarray] = []
-        rh = float("nan")
-        rh_best, rh_passes, rh_stalls = float("inf"), 0, 0
-        total, exit_reason = 0, "cap"
-        while total < cap:
+
+        def run_batch(states, batch_index):
             out = _replica_sweep(
-                fold_all(keys_flat, total // _ENERGY_WARMUP_BATCH),
+                fold_all(keys_flat, batch_index),
                 program,
                 sched_batch,
                 states,
@@ -988,32 +941,22 @@ def tune_sampling_schedule(
                 f_obs,
                 carry,
             )
-            states = [o[:, 0] for o in out]
-            total += _ENERGY_WARMUP_BATCH
-            e_hist.append(
-                np.asarray(
-                    _grid_base_energies(base_ebm, beta_ref, spec, states, clamp_state)
-                ).reshape(1, R)
-            )
-            if total < check_from or len(e_hist) < _ENERGY_WARMUP_WINDOW:
-                continue
-            rh = _window_rhat_max(np.stack(e_hist[-_ENERGY_WARMUP_WINDOW:]), one_beta)
-            logger.debug(
-                "tune_sampling_schedule warmup: %d sweeps, window rhat=%.3f",
-                total,
-                rh,
-            )
-            rh_passes = rh_passes + 1 if rh < rhat_threshold else 0
-            if rh_passes >= _ENERGY_WARMUP_PASSES:
-                exit_reason = "stable"
-                break
-            if rh < rh_best * (1.0 - _ENERGY_PLATEAU_TOL):
-                rh_best, rh_stalls = rh, 0
-            else:
-                rh_stalls += 1
-                if rh_stalls >= _ENERGY_PLATEAU_K:
-                    exit_reason = "plateau"
-                    break
+            return [o[:, 0] for o in out]
+
+        def batch_energies(states):
+            return np.asarray(
+                _grid_base_energies(base_ebm, beta_ref, spec, states, clamp_state)
+            ).reshape(1, R)
+
+        states, total, exit_reason, rh = _adaptive_warmup(
+            init_states,
+            run_batch,
+            batch_energies,
+            cap=warmup_cap,
+            rhat_threshold=rhat_threshold,
+            rhat_betas=one_beta,
+            log_label="tune_sampling_schedule",
+        )
 
         raw = _replica_sweep(
             fold_all(keys_flat, _TAU_PROBE_TAG),
@@ -1052,16 +995,9 @@ def tune_sampling_schedule(
     return schedule, info
 
 
-# Production-window floor for a discovery probe, as a multiple of the minimum
-# traversal length 2*(n-1). A DEO round trip needs >= 2*(n-1) rounds just to
-# complete once, so shorter windows cannot observe the conveyor at all (the
-# round-trip rate is a budget-dependent signal — see
-# hamon.round_trips.conveyor_is_alive; barrier resolution itself no longer needs
-# round trips). Empirically ~5-6x gives a high-N pilot on a 2D Ising ferromagnet
-# a measurable rate, so a probe whose rounds_per_probe falls short is topped up
-# to this — which only ever lifts high-N probes (the max keeps rounds_per_probe
-# otherwise), and only the production window (the cheaper tuning phases stay at
-# rounds_per_probe).
+# Probe production-window floor, in units of the minimum DEO traversal
+# 2*(n-1): a shorter window cannot observe the conveyor at all, and ~5-6x is
+# what gives a high-N pilot a measurable round-trip rate.
 _PROBE_MIN_RT_ROUNDS_FACTOR = 6
 
 
@@ -1100,16 +1036,15 @@ def tune_chains(
     1. Estimate Λ̂ = Σ rejection_rates at the current N (each probe runs
        ``tune_schedule``, which tunes the schedule toward equi-acceptance).
     2. Recommend N* = ceil(Λ̂·(1 + safety_margin) / r_target) + 1 — the
-       round-trip-optimal 2Λ + 1 chains at r* = 1/2 (target_acceptance = 0.5).
+       round-trip-optimal 2Λ + 1 chains at r* = 1/2 (target_acceptance = 0.5) —
+       using the running **max** of Λ̂ over probes (under-resolution can only
+       bias Λ̂ low, never high, so the max is the least-biased estimate).
     3. Iterate this fixed point (re-estimate Λ̂ at N*) until N* stops moving.
 
-    Because Λ̂ comes from the current probe (not a running maximum), the result is
-    essentially independent of the starting N — discovery from ``initial_n=None``
-    and from a reasonable guess converge to the same count. With no ``initial_n``
-    the first probe runs at a **high** pilot of ``max_chains`` chains: high on
-    purpose, because a low pilot's rejection rates saturate and bias Λ̂ low,
-    forcing the fixed point to climb over several probes. An over-resolved pilot
-    gives an unbiased Λ̂ in one probe, landing n* within ±1 immediately, so
+    With no ``initial_n`` the first probe runs a **high** pilot of
+    ``max_chains`` chains, on purpose: a low pilot's rejection rates saturate
+    and bias Λ̂ low, forcing the fixed point to climb over several probes,
+    while an over-resolved pilot gives an unbiased Λ̂ in one probe, so
     discovery converges in ~2 probes regardless of problem size.
 
     Instead of providing ``ebm_factory`` and ``program_factory``, you can pass
@@ -1200,14 +1135,8 @@ def tune_chains(
     def _clamp(n):
         return max(min_chains, min(max_chains, int(n)))
 
-    # Resolve the device once for all probes. Chain counts vary across probes
-    # (each recompiles regardless), but a single device avoids transfer thrash;
-    # the conservative score uses the (pilot) starting chain count. Borderline
-    # workloads can pass an explicit device.
-    # Pilot at the budget ceiling: an over-resolved first probe gives an unbiased
-    # Λ̂ (low-N probes saturate rejection rates and bias Λ̂ low), so the fixed
-    # point lands within ±1 of N* immediately and converges in ~2 probes instead
-    # of climbing. Measured: 1600-node grid 4→2 probes, −40% stage-1 wall.
+    # One device for all probes (avoids transfer thrash), scored at the pilot
+    # chain count; the max_chains pilot itself is justified in the docstring.
     _pilot_n = initial_n if initial_n is not None else max_chains
     _meta_betas = jnp.linspace(beta_range[0], beta_range[1], 1)
     dev = resolve_entry_device(
@@ -1227,25 +1156,17 @@ def tune_chains(
         if n in probed:
             return probed[n]
         betas0 = jnp.linspace(beta_range[0], beta_range[1], n)
-        # init_factory receives a programs list for free-block extraction; on the
-        # template route every entry is the template program (identical
-        # gibbs_spec) and no per-chain programs are constructed.
+        # On the template route every entry is the template program, so no
+        # per-chain programs are constructed for init.
         ebms = source.ebms_for_init(betas0)
         programs = source.programs_for_init(n, ebms)
         inits = init_factory(n, ebms, programs)
         key, k_probe = jax.random.split(key)
-        # Size the production window so a round trip is actually feasible at this
-        # N: a high-N pilot with only rounds_per_probe rounds can't complete one
-        # (2*(n-1) > rounds_per_probe), so its Σrej barrier reads as an
-        # unidentified within-basin artifact purely on budget. Top up to
-        # _PROBE_MIN_RT_ROUNDS_FACTOR*(n-1) — production only; the tuning phases
-        # stay at rounds_per_probe (they estimate Σrej, which needs no round
-        # trips). The max leaves low-N probes untouched.
+        # Top up only the production window so a high-N probe can round-trip
+        # (see _PROBE_MIN_RT_ROUNDS_FACTOR); tuning phases need no trips.
         probe_rounds = max(rounds_per_probe, _PROBE_MIN_RT_ROUNDS_FACTOR * (n - 1))
-        # Forward whichever route the caller used; tune_schedule re-dispatches
-        # through its own _ChainSource. The concrete device (or None) bypasses its
-        # heuristic, so probes never flip devices. Tuning is adaptive, so a
-        # wrong-N probe still self-limits its rounds.
+        # Passing the concrete device bypasses tune_schedule's heuristic, so
+        # probes never flip devices.
         _, stats = tune_schedule(
             k_probe,
             ebm_factory,
@@ -1276,10 +1197,9 @@ def tune_chains(
             "barrier_identified": stats.get("barrier_identified"),
         }
         if out["barrier_identified"] is False:
-            # tune_schedule already logged the authoritative gate message (INFO
-            # if this window was budget-limited, WARNING if a genuine stall).
-            # Add only the discovery-specific reassurance, at INFO, so a probe
-            # that under-resolves Λ does not read as an error.
+            # tune_schedule already logged the authoritative gate message; add
+            # only the discovery-specific reassurance so this reads as INFO,
+            # not an error.
             logger.info(
                 "tune_chains: probe at n=%d (%d rounds) did not round-trip; its "
                 "Lambda_raw=%.2f may under-estimate the barrier. The running-max "
@@ -1303,29 +1223,13 @@ def tune_chains(
             "history": history,
         }
 
-    # --- N tuning (Syed et al. 2021, Sec. "Tuning N") -----------------------
-    # Λ is a schedule invariant: Λ̂ = Σ rejection_rates ≈ Λ at any chain count
-    # (each probe runs tune_schedule, which tunes the schedule to equi-
-    # acceptance). Estimate Λ̂, set N* = ceil(Λ̂·margin/r) + 1 (= 2Λ + 1 at
-    # r* = 1/2), and iterate this fixed point until N* settles.
-    #
-    # N* uses the running MAX of Λ̂ over probes, not the current probe's value.
-    # The invariant holds only when the ladder resolves the barrier; on a glassy
-    # target the barrier concentrates near a small β_c, and a coarse low-N ladder
-    # cannot resolve that peak, so Λ̂ is biased LOW at low N and only reaches the
-    # true Λ at high N. Under-resolution can only MISS barrier, never fabricate
-    # it, so the max over probes is the least-biased estimate. Iterating on the
-    # current-N value instead would chase the biased-low low-N estimates and
-    # collapse to a too-low N that fails to mix; the running max converges to
-    # N* ≈ 2Λ in ~2 probes and errs high (safe — under-provisioning fails, over-
-    # provisioning only costs chains). On a non-glassy target Λ̂ is N-independent,
-    # so the max equals the current value and this is a no-op.
+    # --- N tuning (Syed et al. 2021, Sec. "Tuning N"): N* is driven by the
+    # running MAX of Λ̂ so biased-low low-N estimates on glassy targets cannot
+    # collapse N — see the docstring for the fixed point.
     margin = 1.0 + max(0.0, float(safety_margin))
     if getattr(ebm, "beta_affine", False) and seed_from_energy:
-        # The energy-variance seed (Theorem 2) estimates λ(β) from Var(E_base)
-        # assuming the linear path E_β = β·E_base; on an affine
-        # (reference-annealing) path the integrand is Var(Δ) instead, so the
-        # seed would be biased. Fall back to the robust max_chains pilot.
+        # Theorem 2 assumes the linear path E_β = β·E_base; an affine path's
+        # integrand is Var(Δ), so the seed would be biased — use the pilot.
         logger.debug(
             "tune_chains: beta-affine EBM — skipping the energy-variance seed "
             "(linear-path assumption); using the max_chains pilot."
@@ -1334,15 +1238,8 @@ def tune_chains(
     if initial_n is not None:
         n = _clamp(initial_n)
     elif seed_from_energy:
-        # Seed N* from a cheap energy-variance Λ̂ (Theorem 2, no PT ladder) using
-        # the same fixed-point formula below, so the first real probe lands on N*
-        # and the search converges in one probe instead of two. The estimate is
-        # only trustworthy when local exploration mixes; the returned Gelman–Rubin
-        # R̂ flags trapping (a glassy target), in which case we fall back to the
-        # robust max_chains pilot. Consuming exactly one key split (mirroring the
-        # discarded pilot probe) leaves the subsequent probe on the SAME RNG as
-        # the pilot's N* probe, so on a mixing target (R̂≈1) the result is
-        # bit-identical to the pilot path.
+        # Consuming exactly one key split (mirroring the discarded pilot probe)
+        # keeps the mixing-target path bit-identical to the pilot path.
         key, k_energy = jax.random.split(key)
         lam_seed, rhat = _estimate_barrier_energy(
             k_energy, source, init_factory, clamp_state, beta_range, dev
@@ -1389,14 +1286,9 @@ def tune_chains(
             break
         n = n_star
 
-    # Produce the returned schedule at the final count, reusing a cached probe
-    # where possible. On chain_count convergence n_star is within 1 of the last
-    # probed n (always cached), so when n_star itself was never probed, return n
-    # instead of running a full extra probe — that probe would recompile the
-    # round loop at a brand-new chain count (~1s) just to land on a count within
-    # the convergence tolerance of one already in hand. (Whether n_star equals
-    # the last probed n or is off by 1 is incidental to the Λ estimate, so this
-    # also makes the probe count robust across equally-good colourings.)
+    # On chain_count convergence, prefer the (always cached) last probed n over
+    # an unprobed n_star within tolerance — an extra probe would recompile the
+    # round loop just to land on a count already in hand.
     if reason == "chain_count" and _clamp(n_star) not in probed:
         n_final = n
     else:
@@ -1813,17 +1705,13 @@ def tune_exploration(
         rep = report_nrpt_diagnostics(stats)
         tau_obs = float(rep.tau_observed) if rep.tau_observed is not None else 0.0
 
-        # Flatten the per-round cold-chain block states into a (rounds, nodes)
-        # trace. ESS is per-column then median-reduced, so column order / node
-        # type are irrelevant — no node-reordering needed. median (not min) is
-        # the steadier order statistic across seeds.
+        # ESS is per-column then median-reduced (steadier than min across
+        # seeds), so cold-chain column order is irrelevant.
         cold = [np.asarray(o)[:, 0] for o in stats["observations"]]
         trace = np.concatenate([c.reshape(c.shape[0], -1) for c in cold], axis=1)
         ess = effective_sample_size(trace)
 
-        # (2) Per-round wall time — only the timing-based ("cost"/empirical)
-        # selectors need it. The ELE selector is timing-free (it reads the
-        # deterministic round-trip efficiency from this same run), so skip it.
+        # Only the timing-based selectors need wall time; ELE is timing-free.
         if select_by == "ele":
             t_round = 0.0
             objective = rep.efficiency if rep.efficiency is not None else 0.0
@@ -1855,9 +1743,8 @@ def tune_exploration(
         }
 
     if select_by == "ele":
-        # Deterministic, timing-free: pick the smallest n_expl whose round-trip
-        # efficiency (τ_obs/τ̂) reaches the ELE-adequacy knee. Reproducible across
-        # runs (no wall-clock in the objective).
+        # Timing-free: smallest n_expl whose round-trip efficiency reaches the
+        # ELE-adequacy knee, so the pick reproduces across runs.
         best, history = _select_gibbs_steps_ele(
             probe,
             int(start_steps),
@@ -1866,11 +1753,9 @@ def tune_exploration(
             float(target_efficiency),
         )
     elif use_reuse_timing:
-        # Doubling driven by ESS growth (deterministic — same key ⇒ same ESS ⇒
-        # the probed set is fixed run-to-run), collecting each probe's reused
-        # production timing. Then fit ONE cost line and pick the argmax objective,
-        # requiring a >improve_tol gain to climb so the near-flat peak resolves to
-        # the lower (cheaper) count instead of flipping on timing noise.
+        # ESS-driven doubling (deterministic probe set), then one fitted cost
+        # line; requiring a >improve_tol gain to climb resolves the near-flat
+        # peak to the cheaper count instead of flipping on timing noise.
         history = []
         n = int(start_steps)
         while True:

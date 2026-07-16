@@ -56,7 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   closed form, so `SliceGibbsConditional` performs one **slice-sampling**
   transition per site (Neal 2003) — stepping-out with Neal's *bounded* budget
   (the m-limited variant, exactly reversible by construction) and shrinkage —
-  vectorised over each colour class. This is hamon's first sampler that is a
+  vectorized over each color class. This is hamon's first sampler that is a
   Markov *transition* rather than an independent conditional draw (invariance
   is all block Gibbs needs, and the sampler contract explicitly allows it).
   The current value x₀ a transition kernel needs is delivered by a
@@ -79,7 +79,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `β(½xᵀPx − hᵀx)`, i.e. `N(P⁻¹h, (βP)⁻¹)`), `QuadraticSelfEBMFactor` /
   `QuadraticPairEBMFactor` with their interactions, `GaussianGibbsConditional`
   (the single-site conditionals of a GMRF are themselves Gaussian, so block
-  Gibbs over a graph colouring stays *exact* — within a colour class they are
+  Gibbs over a graph coloring stays *exact* — within a color class they are
   independent scalar Gaussians, no linear solve anywhere),
   `GaussianSamplingProgram`, and `gaussian_init`. The sampling engine needed no
   changes — states flow dtype-generically end to end — and all interaction
@@ -295,7 +295,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   segments per epoch because the chain mixing time τ grows as the parameters
   move away from zero (measured: negative τ 1.0 → 1.7 in the first 20 of ~360
   steps), so a schedule fixed at the start of the epoch under-thins the later
-  steps; thinning is quantised to powers of two to bound recompiles. The
+  steps; thinning is quantized to powers of two to bound recompiles. The
   negative phase trains with persistent chains (PCD) threaded through the
   segment scans. Runtime ~800 s → ~490 s at equal accuracy.
 - **The energy-grid barrier seed's warmup is now adaptive** (was a fixed 500
@@ -313,7 +313,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   500 was ~26% of the CPU grid stage), trapped targets stop at ~350 instead
   of burning 500. Warmup sweep counts are deterministic per seed but
   data-dependent, so grid-seeded results are **not bit-identical** to the
-  previous fixed-warmup behaviour (a deliberate behaviour change; the
+  previous fixed-warmup behavior (a deliberate behavior change; the
   `warmup` parameter now means the cap).
 
 - **Energy-grid barrier seed runs as one batched call; repeat `ising_sample`
@@ -331,7 +331,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (2) `ising_sample` built fresh `SpinNode`s per call, and node identity keys
   every downstream cache — so a repeat call with the same graph re-traced and
   recompiled every kernel (~3.6 s of XLA at 128², or a full re-trace with the
-  persistent cache). The coloured graph (nodes/edges/blocks) is now memoized
+  persistent cache). The colored graph (nodes/edges/blocks) is now memoized
   on edge-array content, the production draw's observer `Block` is memoized on
   node identity, and the grid's base-energy kernel is module-level instead of
   a per-call closure. A second in-process `ising_sample` call now compiles
@@ -384,19 +384,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and compiled programs are unchanged — only redundant Python object
   reconstruction was removed.
 
-- **`rlf_coloring` vectorised: up to ~140× faster graph colouring, identical
-  output.** The Recursive-Largest-First colouring that `ising_sample` runs on
+- **`rlf_coloring` vectorized: up to ~140× faster graph coloring, identical
+  output.** The Recursive-Largest-First coloring that `ising_sample` runs on
   the full variable graph (and `auto_color_blocks` on the block-conflict
   graph) evaluated its selection rule with per-candidate Python set
   intersections — O(|V|·|E|) with a large constant, and quadratic in practice
   (1.1 s on a 64×64 periodic lattice, 18 s at 128×128, dwarfing the sampling
   itself on GPU). The selection rule is now evaluated with incrementally
-  maintained neighbour counters over a CSR adjacency and a packed-key
-  vectorised argmax: 64×64 → 27 ms (41×), 128×128 → 127 ms (143×),
-  ER n=8192 → 76 ms (102×). Tie-breaking is reproduced exactly, so colourings
+  maintained neighbor counters over a CSR adjacency and a packed-key
+  vectorized argmax: 64×64 → 27 ms (41×), 128×128 → 127 ms (143×),
+  ER n=8192 → 76 ms (102×). Tie-breaking is reproduced exactly, so colorings
   — and therefore block structures and sample streams — are **bit-identical**
   to the previous implementation (fuzz-verified on 400 random graphs;
-  end-to-end `ising_sample` samples verified equal at L=32/64). RLF's colour
+  end-to-end `ising_sample` samples verified equal at L=32/64). RLF's color
   quality is unchanged: 1–2 fewer sequential block-Gibbs groups than greedy
   first-fit on non-bipartite graphs (fewer groups = less NRPT round-loop
   compile), matching DSATUR everywhere tested. `rlf_coloring` also accepts an
@@ -414,7 +414,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `nrpt` gains `pad_chains_to`: the ladder is padded to a fixed length with
   copies of the coldest chain and the true count enters the jitted loop as
   *traced* data — swaps beyond the live prefix are forced-rejected (identity
-  permutation, so the padding is fully decoupled by DEO's nearest-neighbour
+  permutation, so the padding is fully decoupled by DEO's nearest-neighbor
   coupling), attempt counters and the round-trip "top" are masked to the live
   prefix, and all outputs are sliced back to the true count, so schedule
   optimization and every downstream consumer see unpadded semantics.
@@ -633,18 +633,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   count within the convergence tolerance of one already in hand — costing ~2-4 s
   on roughly half of all discovery runs (those that converge one step off the
   last probe). This also makes the probe count robust across equally-good
-  colourings. The returned `n_chains` may be 1 lower than before (within the
+  colorings. The returned `n_chains` may be 1 lower than before (within the
   existing tolerance), so `ising_sample` results can differ for affected models;
   the impact is small — the cold-chain draw is robust to ±1 ladder rung and the
   22x22 grid bench is unchanged.
-- **Block colouring now uses Recursive Largest First (RLF).** `ising_sample`
-  previously coloured the variable graph with networkx DSATUR, and the
+- **Block coloring now uses Recursive Largest First (RLF).** `ising_sample`
+  previously colored the variable graph with networkx DSATUR, and the
   `auto_color_blocks` helper used a first-fit greedy. Both now use RLF
-  (`hamon.graph_utils.rlf_coloring`), which minimises the colour count more
+  (`hamon.graph_utils.rlf_coloring`), which minimizes the color count more
   aggressively on dense graphs (a 484-node 6-/12-regular graph drops 5→4 / 7→6
-  colours) and matches DSATUR on sparse/bipartite ones. The colour count is the
+  colors) and matches DSATUR on sparse/bipartite ones. The color count is the
   number of sequential block-Gibbs groups in the NRPT round loop, which sets its
-  XLA compile cost, so fewer colours directly cuts compile on dense models. RLF
+  XLA compile cost, so fewer colors directly cuts compile on dense models. RLF
   is O(|V|·|E|) (~tens of ms, one-time) and deterministic, and the change also
   drops the networkx dependency from the `ising_sample` path. **Because the
   block partition changes, samples from `ising_sample` differ byte-for-byte from
@@ -756,7 +756,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`sample_states_batched`** — runs several independent single-chain draws in
   parallel under one `jax.vmap`, and `ising_sample` gains an `n_draw_chains`
-  argument (default `1`, exact previous behaviour) that splits the sample budget
+  argument (default `1`, exact previous behavior) that splits the sample budget
   across that many chains, each seeded from the equilibrated cold state. The
   draw is dispatch-bound on an accelerator, so fewer, wider kernels collect the
   same total samples in less wall time.
@@ -797,11 +797,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `discover_chain_count` now auto-allocate their tuning budgets instead of
   running fixed `n_tune` × `rounds_per_tune` phases. Each tuning phase runs only
   as many rounds as the Λ estimate needs to settle (`round_batch` increments up
-  to the `rounds_per_tune` ceiling); the best-equalised schedule seen is kept
+  to the `rounds_per_tune` ceiling); the best-equalized schedule seen is kept
   for production (not the noisy last one); and phases stop once the ladder is
-  equalised or its movement is at the Monte-Carlo floor for `phase_patience`
+  equalized or its movement is at the Monte-Carlo floor for `phase_patience`
   consecutive phases (capped at `n_tune`). `n_tune`/`rounds_per_tune` become
-  safety caps. Pass `adaptive_tuning=False` for the exact previous behaviour.
+  safety caps. Pass `adaptive_tuning=False` for the exact previous behavior.
   Evaluated across easy→hard Ising problems (chain/grid, ferro/frustrated):
   adaptive matches the old fixed-full schedule's correctness (cold-chain
   marginals vs exact enumeration) and round-trip efficiency while using fewer
@@ -811,7 +811,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Per-block global-state layout** — when a block-Gibbs program is
   "split-safe" (every free block reads each of its tail blocks from a single
-  block, e.g. a 2-coloured grid), each free block now occupies its own
+  block, e.g. a 2-colored grid), each free block now occupies its own
   global-state slot instead of all same-structure blocks being concatenated
   into one array. A block update then replaces its slot outright rather than
   `dynamic_update_slice`-ing into a shared array, removing the device-to-device
@@ -1024,7 +1024,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Observer support for NRPT** — collect per-round samples via pluggable observers
-- **Tuning diagnostics** — utilities for inspecting adaptive schedule behaviour
+- **Tuning diagnostics** — utilities for inspecting adaptive schedule behavior
 - **`ising_sample` wrapper** — high-level convenience function for Ising model sampling
 - **Template EBM/program objects** — `nrpt_adaptive` and `discover_chain_count` now
   accept a template object directly, reducing boilerplate

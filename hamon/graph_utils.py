@@ -10,17 +10,17 @@ Background
 ----------
 Block Gibbs sampling only requires that blocks within the *same* sampling group
 are conditionally independent — i.e. no block in the group appears as a tail
-(neighbour) of any other block in the group.  Deciding which blocks can share a
-group is equivalent to graph colouring: nodes are blocks, and there is an edge
+(neighbor) of any other block in the group.  Deciding which blocks can share a
+group is equivalent to graph coloring: nodes are blocks, and there is an edge
 between two blocks whenever one block's nodes appear in an interaction that
-affects the other block.  Each colour class becomes one ``SuperBlock``
-(sampling group), and blocks in the same colour class are updated
+affects the other block.  Each color class becomes one ``SuperBlock``
+(sampling group), and blocks in the same color class are updated
 simultaneously from the same global-state snapshot.
 
-Fewer colour groups → fewer sequential write-back barriers per scan step →
+Fewer color groups → fewer sequential write-back barriers per scan step →
 faster wall-clock time.  The greedy algorithm used here gives the *chromatic
 number* for bipartite graphs (the most common case in practice) and produces a
-good colouring for general graphs, though it is not globally optimal for all
+good coloring for general graphs, though it is not globally optimal for all
 graph topologies.
 """
 
@@ -37,32 +37,32 @@ from hamon.block_sampling import SuperBlock  # noqa: F401
 
 
 def rlf_coloring(n_nodes: int, edges: Iterable[tuple[int, int]]) -> list[int]:
-    """Colour an integer-indexed graph with Recursive Largest First (RLF).
+    """Color an integer-indexed graph with Recursive Largest First (RLF).
 
     Nodes are ``0 .. n_nodes - 1``; ``edges`` are (u, v) index pairs (direction
     and duplicates ignored, self-loops dropped) — any iterable of pairs or an
     ``(m, 2)`` integer array. Returns ``colors`` where ``colors[i]`` is the
-    colour class of node ``i``.
+    color class of node ``i``.
 
-    RLF builds each colour class as a maximal independent set, repeatedly adding
-    the vertex with the most neighbours already excluded from the class (ties
-    broken toward fewest remaining-candidate neighbours, then smallest index).
-    It minimises the number of colours more aggressively than first-fit/greedy
+    RLF builds each color class as a maximal independent set, repeatedly adding
+    the vertex with the most neighbors already excluded from the class (ties
+    broken toward fewest remaining-candidate neighbors, then smallest index).
+    It minimizes the number of colors more aggressively than first-fit/greedy
     heuristics on dense graphs and matches them on sparse/bipartite ones — and
-    in hamon the colour count is the number of sequential block-Gibbs groups,
+    in hamon the color count is the number of sequential block-Gibbs groups,
     which sets the NRPT round-loop XLA compile cost. Deterministic (index
-    tie-breaking) so colourings are reproducible.
+    tie-breaking) so colorings are reproducible.
 
-    The selection rule is evaluated with incrementally maintained neighbour
-    counters over a CSR adjacency and a vectorised argmax, so the cost is
+    The selection rule is evaluated with incrementally maintained neighbor
+    counters over a CSR adjacency and a vectorized argmax, so the cost is
     O(|V|² elementwise + |V|·χ + |E|·χ) in NumPy rather than O(|V|·|E|) in
-    Python-set operations. The colouring produced is identical to the
+    Python-set operations. The coloring produced is identical to the
     reference set-based implementation for any input.
     """
     if n_nodes == 0:
         return []
 
-    # --- normalise edges to a deduplicated undirected (m, 2) index array ---
+    # --- normalize edges to a deduplicated undirected (m, 2) index array ---
     e = np.asarray(
         edges if isinstance(edges, np.ndarray) else list(edges), dtype=np.int64
     )
@@ -83,36 +83,34 @@ def rlf_coloring(n_nodes: int, edges: Iterable[tuple[int, int]]) -> list[int]:
     np.cumsum(degrees, out=indptr[1:])
 
     NEG = np.iinfo(np.int64).min
-    # Lexicographic keys are packed into one int64 score: primary * BASE ±
-    # secondary, with BASE > any secondary value so the primary always
-    # dominates; np.argmax takes the first maximum, which is exactly the
-    # smallest-index tie-break of the reference implementation.
+    # Lexicographic keys packed into one int64 score (primary * BASE ±
+    # secondary, BASE > any secondary); np.argmax's first-maximum is exactly
+    # the reference implementation's smallest-index tie-break.
     BASE = np.int64(n_nodes + 1)
 
     colors = np.full(n_nodes, -1, dtype=np.int64)
     uncolored = np.ones(n_nodes, dtype=bool)
     n_uncolored = n_nodes
 
-    # gU[x] = |adj(x) ∩ uncolored|, maintained across classes (decremented once
-    # per coloured neighbour) so each class starts with cU = gU.copy() instead
-    # of an O(|E|) recount — that recount is what made dense graphs (χ ≈ |V|
-    # classes) quadratic in |E|.
+    # gU[x] = |adj(x) ∩ uncolored| is maintained across classes so each class
+    # starts with cU = gU.copy() instead of the O(|E|) recount that made dense
+    # graphs quadratic in |E|.
     gU = degrees.astype(np.int64)
     cW = np.zeros(n_nodes, dtype=np.int64)  # |adj(x) ∩ W| (excluded nbrs)
     key = np.empty(n_nodes, dtype=np.int64)
 
     k = 0
     while n_uncolored:
-        # U: vertices that may still join this colour class; W: their already-
-        # excluded neighbours. cU[x] = |adj(x) ∩ U| is maintained exactly:
-        # decremented once for every neighbour of x that leaves U.
+        # U: vertices that may still join this color class; W: their already-
+        # excluded neighbors. cU[x] = |adj(x) ∩ U| is maintained exactly:
+        # decremented once for every neighbor of x that leaves U.
         in_U = uncolored.copy()
         n_U = n_uncolored
         cU = gU.copy()
         cW.fill(0)
 
         def select(v: int, in_U=in_U, cU=cU) -> int:
-            """Colour v, expel its U-neighbours to W, update counters/keys."""
+            """Color v, expel its U-neighbors to W, update counters/keys."""
             colors[v] = k
             in_U[v] = False
             key[v] = NEG
@@ -167,7 +165,7 @@ def auto_color_blocks(
 ) -> list[SuperBlock]:
     """Derive a minimal parallel sampling order from the interaction graph.
 
-    Analyses which free blocks interact with which others and returns a list of
+    Analyzes which free blocks interact with which others and returns a list of
     ``SuperBlock`` values (each either a plain :class:`~hamon.Block` or a
     tuple of :class:`~hamon.Block` objects) that can be passed directly to
     :class:`~hamon.BlockGibbsSpec` as ``free_super_blocks``.
@@ -182,8 +180,8 @@ def auto_color_blocks(
 
     **Arguments:**
 
-    - ``free_blocks``: The free blocks whose sampling order you want to optimise.
-      The order of this list is preserved within each colour group, so the
+    - ``free_blocks``: The free blocks whose sampling order you want to optimize.
+      The order of this list is preserved within each color group, so the
       resulting ``BlockGibbsSpec`` will have the same ``free_blocks`` ordering.
     - ``interaction_groups``: The compiled interactions for your program (e.g.
       the output of ``factor.to_interaction_groups()``).  Only interactions whose
@@ -203,13 +201,9 @@ def auto_color_blocks(
         even   = Block(nodes[::2])   # {0, 2, 4}
         odd    = Block(nodes[1::2])  # {1, 3}
 
-        # Each of even/odd is internally an independent set, but every chain
-        # edge links an even node to an odd one, so the two blocks conflict and
-        # cannot share a sampling group — they must be updated sequentially. By
-        # hand you would have to reason this out and write:
-        #   free_super_blocks = [even, odd]   # two separate groups
-        #
-        # auto_color_blocks derives the same order from the interaction groups:
+        # Every chain edge links an even node to an odd one, so the two
+        # blocks conflict and must be sequential sampling groups;
+        # auto_color_blocks derives that order from the interaction groups:
         igs    = [f.to_interaction_groups() for f in model.factors]
         igs    = [g for sublist in igs for g in sublist]
         super_blocks = auto_color_blocks([even, odd], igs)
@@ -265,9 +259,9 @@ def auto_color_blocks(
                     conflicts.add((t, h))  # symmetric
 
     # -------------------------------------------------------------------------
-    # Step 3 — colour the block-conflict graph with Recursive Largest First.
+    # Step 3 — color the block-conflict graph with Recursive Largest First.
     #
-    # RLF minimises the colour count (= number of sequential sampling groups,
+    # RLF minimizes the color count (= number of sequential sampling groups,
     # which sets the round-loop compile cost) more aggressively than first-fit,
     # especially on dense conflict graphs, and matches it on sparse/bipartite
     # ones. Optimal for bipartite graphs; a good heuristic otherwise.
@@ -275,13 +269,13 @@ def auto_color_blocks(
     color = rlf_coloring(n, conflicts)
 
     # -------------------------------------------------------------------------
-    # Step 4 — group blocks by colour, preserving original order within groups.
+    # Step 4 — group blocks by color, preserving original order within groups.
     # -------------------------------------------------------------------------
     color_groups: dict[int, list[Block]] = defaultdict(list)
     for block_idx in range(n):  # ascending index preserves original order
         color_groups[color[block_idx]].append(free_blocks[block_idx])
 
-    # Return colour groups in ascending colour order so the sampling sequence
+    # Return color groups in ascending color order so the sampling sequence
     # is deterministic and independent of dict iteration order.
     result: list[SuperBlock] = []
     for c in sorted(color_groups):

@@ -27,6 +27,7 @@ from jax import lax
 from hamon._nrpt_energy import _compute_base_energies, _make_reference_ebm
 from hamon._nrpt_schedule import _pchip_interp
 from hamon._nrpt_swap import _make_swap_branch
+from hamon.interaction import interaction_float_dtype as _interaction_float_dtype
 from hamon.block_sampling import _run_blocks, BlockSamplingProgram
 from hamon.device import (
     DeviceLike,
@@ -178,19 +179,6 @@ def _make_pbi_in_axes(stacked_pbi):
     )
 
 
-def _interaction_float_dtype(pbi) -> jnp.dtype:
-    """The dtype the Gibbs kernel computes in: the result type of every
-    floating-point interaction array. β values are cast to this so that
-    enabling x64 in the host application does not promote a float32 model
-    to float64 on device."""
-    dtypes = [
-        x.dtype
-        for x in jax.tree.leaves(pbi)
-        if isinstance(x, jax.Array) and jnp.issubdtype(x.dtype, jnp.floating)
-    ]
-    return jnp.result_type(*dtypes) if dtypes else jnp.dtype(jnp.float32)
-
-
 # ---------------------------------------------------------------------------
 # Adaptive schedule (Section 5.4)
 # ---------------------------------------------------------------------------
@@ -237,9 +225,8 @@ class NRPTCarry(NamedTuple):
     obs_carry: Any  # observer carry (None when no observer)
 
 
-# Incremented each time _nrpt_rounds is (re)traced. Test instrumentation for
-# verifying that repeated calls with identical static structure reuse the
-# compiled executable instead of retracing.
+# Test instrumentation: incremented on each (re)trace of _nrpt_rounds so
+# tests can assert the jit cache was reused.
 _nrpt_rounds_trace_count = [0]
 
 
@@ -277,8 +264,7 @@ def _build_gibbs_runner(
 
     if base_pbi is not None and base_pbi_offset is not None:
         # Affine (reference-annealing) mode: E_β = E₀ + β·(E₁ − E₀), so each
-        # chain's interactions are offset + β·slope. offset carries the
-        # reference weights (β = 0); slope carries target − reference.
+        # chain's interactions are offset (reference, β=0) + β·slope.
         _slope_pbi = base_pbi
         _offset_pbi = base_pbi_offset
         chain_in_axes: object = 0
@@ -291,12 +277,10 @@ def _build_gibbs_runner(
             )
             return _run_one(gibbs_key, state_free, pbi_c)
     elif base_pbi is not None:
-        # Temperature-linear mode: one shared base program at β = 1; scale
-        # every interaction array by the chain's β inside the vmapped kernel.
-        # Scalar-times-array commutes with the slicing done at program
-        # construction, so for β-linear interactions this is bit-identical to
-        # building per-chain programs, without materializing n_chains copies
-        # of the weight tensors.
+        # Temperature-linear mode: scale one shared β=1 program by each
+        # chain's β inside the vmapped kernel — bit-identical to per-chain
+        # programs for β-linear interactions (scalar-times-array commutes with
+        # program-construction slicing) without n_chains weight copies.
         _base_pbi = base_pbi
         chain_in_axes: object = 0
 
@@ -500,9 +484,8 @@ def _nrpt_rounds(
             do_odd,
             (new_states, carry.accepted, carry.attempted, k_swap, bE, carry.idx_state),
         )
-        # Keep energies aligned with the states the swap just permuted. The
-        # cached strategy needs this for the next round's deltas; observers
-        # need it in both modes, since they receive (states, energies) pairs.
+        # Keep energies aligned with the just-permuted states; the cached
+        # strategy and the observers both consume the pair.
         bE = bE[pm]
 
         obs_carry, obs_out = observer_step(new_states, bE, round_idx, carry.obs_carry)
@@ -518,10 +501,9 @@ def _nrpt_rounds(
         obs_carry=observer_init(),
     )
 
-    # No observer ⇒ no per-round outputs needed, so use a dynamic-trip-count
-    # fori_loop (n_rounds is a traced scalar here): the compile is reused across
-    # round counts. With an observer, scan's static length is required to build
-    # the stacked per-round output.
+    # Without an observer, a traced-n_rounds fori_loop lets one compile serve
+    # every round count; an observer needs scan's static length for its
+    # stacked per-round output.
     if observer is None:
 
         def _loop_body(_round_idx, carry):
@@ -575,17 +557,14 @@ def _phase_diagnostics(
     new_betas: jax.Array,
     acceptance_rate: jax.Array,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-    """The per-phase scalar diagnostics of ``tune_schedule``'s tuning loop.
+    """``(rej_std, max_beta_shift, Lambda, mean_acceptance, max_rej)`` for one
+    ``tune_schedule`` phase, in one fused kernel (same motivation as
+    ``_swap_rate_stats``: separate eager reductions each pay a dispatch and a
+    first-shape compile, dominating the cold cost of a tiny computation).
 
-    Returns ``(rej_std, max_beta_shift, Lambda, mean_acceptance, max_rej)`` in
-    one fused kernel. Computing them as separate eager ``jnp.std`` / ``jnp.max``
-    / ``jnp.sum`` / ``jnp.mean`` calls makes each its own XLA dispatch (and a
-    separate compile the first time a shape is seen), which dominates the
-    cold-start cost of an otherwise tiny per-phase computation. ``rej_std`` is
-    the equalization quality (keep-best + equalize-stop); ``max_beta_shift`` is
-    the ladder movement (settle check); ``max_rej`` is the worst pair's
-    rejection rate, which flags a ladder still saturating at β_c (see
-    ``tune_schedule``'s keep-best and Λ-plateau stop)."""
+    ``rej_std`` drives keep-best and the equalization stop; ``max_beta_shift``
+    the settle check; ``max_rej`` the saturation checks (keep-best ranking and
+    the Λ-plateau gate)."""
     return (
         jnp.std(rej),
         jnp.max(jnp.abs(new_betas - old_betas)),
@@ -650,9 +629,8 @@ def _resolve_run_inputs(
             )
         beta_attr = getattr(ebms, "beta", None)
         if beta_attr is not None and float(beta_attr) == 1.0:
-            # Already a β = 1 base pair. Reuse it as-is so repeated calls
-            # (e.g. tune_schedule tuning phases) present identical static
-            # structure to the jit cache and skip retracing entirely.
+            # Reuse the β=1 base pair as-is so repeated calls present
+            # identical static structure to the jit cache.
             base_ebm = ebms
             run_program = programs
         else:
@@ -666,13 +644,8 @@ def _resolve_run_inputs(
         chain_data: object = betas
         ebm_ref, beta_ref = base_ebm, jnp.asarray(1.0, dtype=compute_dtype)
         if getattr(base_ebm, "beta_affine", False):
-            # Affine (reference-annealing) path: E_β = E₀ + β·(E₁ − E₀). The
-            # kernel interpolates interactions as offset + β·slope, where
-            # offset = pbi(β=0) (the reference) and slope = pbi(β=1) − pbi(β=0)
-            # elementwise (same factor structure at every β, only weights
-            # differ). Swap energies must be Δ = E₁ − E₀ — E₀ is β-independent
-            # and cancels exactly in every swap ratio — so the β = 0 EBM is
-            # kept for the base-energy computation.
+            # Affine path: build the β=0 offset program alongside the β=1
+            # slope so the kernel interpolates and swaps use Δ = E₁ − E₀.
             ebm_ref0 = base_ebm.with_beta(jnp.asarray(0.0, dtype=compute_dtype))
             program0 = run_program.with_ebm(ebm_ref0)
             base_pbi_offset = program0.per_block_interactions
@@ -694,9 +667,8 @@ def _resolve_run_inputs(
         if len(ebms) != len(programs):
             raise ValueError("ebms and programs must have the same length.")
         if any(getattr(e, "beta_affine", False) for e in ebms):
-            # The per-chain-sequence swap math recovers base energies from a
-            # single reference EBM assuming E_β = β·E_base; an affine path
-            # needs Δ = E₁ − E₀ instead, which only template mode computes.
+            # Per-chain-sequence swap math assumes E_β = β·E_base; an affine
+            # path needs Δ = E₁ − E₀, which only template mode computes.
             raise ValueError(
                 "beta-affine EBMs (e.g. AnnealedEBM) require temperature-linear "
                 "template mode: pass a single ebm/program pair with betas=."
@@ -794,8 +766,7 @@ def _stack_init_states(
         stacked_states = list(init_states)
         if len(stacked_states) != n_free_blocks:
             raise ValueError(
-                f"Stacked init_states must have one entry per free block "
-                f"({n_free_blocks}), got {len(stacked_states)}."
+                f"Stacked init_states must have one entry per free block ({n_free_blocks}), got {len(stacked_states)}."
             )
         for leaf in jax.tree.leaves(stacked_states):
             if leaf.shape[0] != n_chains:
@@ -843,8 +814,9 @@ def nrpt(
     the same length share ONE compiled round loop instead of recompiling per
     count (the dominant cold cost of ``tune_chains``), at the price of wasted
     Gibbs work on the padding chains (~free on a dispatch-bound accelerator).
-    Temperature-linear mode only; incompatible with ``observer`` and
-    ``energy_delta_fn``.
+    Temperature-linear mode only; incompatible with ``energy_delta_fn``, and an
+    ``observer`` must be masking-safe (see
+    :class:`~hamon.observers.ColdIndexObserver`).
 
     Single-pass DEO: one swap parity per round, alternating even/odd.
     Multi-pass breaks non-reversibility (even∘odd∘odd∘even = identity).
@@ -902,10 +874,9 @@ def nrpt(
     # --- Validation and mode selection -----------------------------------------
     clamp_state = clamp_state or []
 
-    # init_states may be a sequence of per-chain block-state lists, or a
-    # single block-state list of stacked (n_chains, ...) arrays (e.g. from
-    # hinton_init with batch_shape=(n_chains,)). Per-chain entries are always
-    # lists, so the formats are unambiguous.
+    # init_states is either per-chain block-state lists or one stacked
+    # (n_chains, ...) block-state list; per-chain entries are always lists, so
+    # the formats are unambiguous.
     stacked_init = bool(init_states) and not isinstance(init_states[0], (list, tuple))
 
     ri = _resolve_run_inputs(ebms, programs, init_states, betas, stacked_init)
@@ -930,10 +901,8 @@ def nrpt(
             "the target energy."
         )
 
-    # Continuous/unbounded models have no proper β = 0 member (no uniform
-    # distribution over ℝⁿ; a Gaussian conditional's variance 1/(β·P) diverges),
-    # so a ladder starting at exactly β = 0 would silently produce non-finite
-    # states on the hottest chain. Fail loudly instead.
+    # Continuous/unbounded models have no proper β=0 member (variance 1/(β·P)
+    # diverges), so a β=0 rung would silently go non-finite — fail loudly.
     if float(np.asarray(betas)[0]) == 0.0 and not ebm_ref.proper_at_beta_zero:
         raise ValueError(
             f"{type(ebm_ref).__name__} is not proper at beta=0 (unbounded state "
@@ -955,15 +924,12 @@ def nrpt(
             )
         if energy_delta_fn is not None:
             raise ValueError(
-                "pad_chains_to is incompatible with energy_delta_fn "
-                "(boundary deltas would span the padded ladder)."
+                "pad_chains_to is incompatible with energy_delta_fn (boundary deltas would span the padded ladder)."
             )
-        # A masking-safe observer (reads only live positions) IS allowed under
-        # padding: the padded ladder is (pad_to, ...), padding chains evolve
-        # independently, so a raw -1 index records a divergent copy and an
-        # all-chains aggregate is polluted. ColdIndexObserver reads a traced live
-        # index (cold chain = n_chains-1), so draws at different live N share ONE
-        # compiled observer round loop.
+        # Padding chains evolve independently, so an observer must read only
+        # live positions (a raw -1 index records a divergent copy); a
+        # masking-safe observer like ColdIndexObserver reads a traced live
+        # index, letting draws at different live N share one compiled loop.
         if observer is not None and not getattr(observer, "masking_safe", False):
             raise ValueError(
                 "pad_chains_to is incompatible with this observer: it would see "
@@ -1005,16 +971,14 @@ def nrpt(
         )
         if base_pbi is not None:
             if base_pbi_offset is not None:
-                # Affine mode: slope/offset/β=0-EBM are standalone trees (the
-                # slope was computed as pbi(1) − pbi(0), not aliasing the
-                # program) — move them to the device directly.
+                # slope/offset/β=0-EBM are standalone trees (slope does not
+                # alias the program), so move them to the device directly.
                 base_pbi, base_pbi_offset, ebm_ref0 = tree_device_put(
                     (base_pbi, base_pbi_offset, ebm_ref0), dev
                 )
             else:
-                # base_pbi aliases run_program.per_block_interactions; re-derive
-                # it from the moved program so the kernel reads on-device
-                # tensors.
+                # base_pbi aliases the program's interactions; re-derive it
+                # from the moved program so the kernel reads on-device tensors.
                 base_pbi = run_program.per_block_interactions
     device_ctx = (
         jax.default_device(dev) if dev is not None else contextlib.nullcontext()
@@ -1025,11 +989,9 @@ def nrpt(
             init_states, stacked_init, n_chains, n_free_blocks
         )
 
-        # --- Chain masking (padding) -------------------------------------------
-        # Pad the ladder to the fixed pad_to length with copies of the coldest
-        # chain and hand the round loop the true count as traced data. In
-        # temperature-linear mode chain_data IS the betas array, so one padded
-        # array serves both.
+        # Chain masking: pad the ladder to pad_to with copies of the coldest
+        # chain and pass the true count as traced data (in temperature-linear
+        # mode chain_data IS the betas array).
         live_chains = None
         betas_run = betas
         chain_data_run = chain_data
@@ -1050,10 +1012,8 @@ def nrpt(
         # --- Run --------------------------------------------------------------
         n_pairs = n_chains - 1
         if n_rounds > 0:
-            # Without an observer the round loop is compile-independent of the
-            # round count, so hand it a traced scalar (different n_rounds reuse
-            # one compile). The observer path needs scan's static length, so
-            # pass the Python int.
+            # Traced n_rounds shares one compile across round counts; the
+            # observer path needs scan's static length (Python int).
             n_rounds_arg: int | jax.Array = (
                 jnp.asarray(n_rounds, dtype=jnp.int32) if observer is None else n_rounds
             )
@@ -1076,9 +1036,8 @@ def nrpt(
                 base_pbi_offset,
                 ebm_ref0,
             )
-            # Slice every padded carry field back to the live prefix, so the
-            # public return is indistinguishable in shape and semantics from an
-            # unpadded run at n_chains.
+            # Slice padded carries back to the live prefix so the return is
+            # indistinguishable from an unpadded run at n_chains.
             if pad_to is not None and pad_to > n_chains:
                 final = final._replace(
                     states=[st[:n_chains] for st in final.states],
@@ -1099,13 +1058,9 @@ def nrpt(
             )
             observations = None
 
-    # --- Unstack --------------------------------------------------------------
-    # The public return is per-chain [chain][block] lists. ``_return_stacked``
-    # (set by tune_schedule's tuning loop) instead hands back the stacked
-    # [block]-of-(n_chains, ...) carry as-is, so threading states across the many
-    # tuning batches skips the n_chains × n_free_blocks eager slices this
-    # unstack would otherwise dispatch every call. nrpt re-ingests the stacked
-    # form directly (see ``_stack_init_states``).
+    # ``_return_stacked`` (tune_schedule's tuning loop) keeps the stacked
+    # [block]-of-(n_chains, ...) carry, skipping the n_chains × n_free_blocks
+    # eager slices per call; nrpt re-ingests it via ``_stack_init_states``.
     if _return_stacked:
         states_out = final.states
     else:
@@ -1115,11 +1070,9 @@ def nrpt(
     stats: dict[str, Any] = _swap_rate_stats(final.accepted, final.attempted, betas)
     rejection_rates = stats["rejection_rates"]
 
-    # ``_emit_diagnostics=False`` (set by tune_schedule's tuning batches) skips
-    # this eager per-call summary — a handful of host-dispatched reductions that
-    # tuning never reads. ``track_round_trips`` itself is left untouched so the
-    # in-loop index tracking stays in the jitted body and the compiled round loop
-    # is still shared with the production run.
+    # ``_emit_diagnostics=False`` (tuning batches) skips these host-dispatched
+    # reductions tuning never reads; in-loop round-trip tracking stays jitted
+    # so the compiled round loop is still shared with production.
     if track_round_trips and _emit_diagnostics:
         stats["round_trip_diagnostics"] = round_trip_summary(
             final.idx_state,
