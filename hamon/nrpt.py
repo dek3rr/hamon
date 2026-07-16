@@ -27,6 +27,7 @@ from jax import lax
 from hamon._nrpt_energy import _compute_base_energies, _make_reference_ebm
 from hamon._nrpt_schedule import _pchip_interp
 from hamon._nrpt_swap import _make_swap_branch
+from hamon.interaction import interaction_float_dtype as _interaction_float_dtype
 from hamon.block_sampling import _run_blocks, BlockSamplingProgram
 from hamon.device import (
     DeviceLike,
@@ -176,19 +177,6 @@ def _make_pbi_in_axes(stacked_pbi):
         lambda x: 0 if isinstance(x, jax.Array) else None,
         stacked_pbi,
     )
-
-
-def _interaction_float_dtype(pbi) -> jnp.dtype:
-    """The dtype the Gibbs kernel computes in: the result type of every
-    floating-point interaction array. β values are cast to this so that
-    enabling x64 in the host application does not promote a float32 model
-    to float64 on device."""
-    dtypes = [
-        x.dtype
-        for x in jax.tree.leaves(pbi)
-        if isinstance(x, jax.Array) and jnp.issubdtype(x.dtype, jnp.floating)
-    ]
-    return jnp.result_type(*dtypes) if dtypes else jnp.dtype(jnp.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -575,17 +563,14 @@ def _phase_diagnostics(
     new_betas: jax.Array,
     acceptance_rate: jax.Array,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-    """The per-phase scalar diagnostics of ``tune_schedule``'s tuning loop.
+    """``(rej_std, max_beta_shift, Lambda, mean_acceptance, max_rej)`` for one
+    ``tune_schedule`` phase, in one fused kernel (same motivation as
+    ``_swap_rate_stats``: separate eager reductions each pay a dispatch and a
+    first-shape compile, dominating the cold cost of a tiny computation).
 
-    Returns ``(rej_std, max_beta_shift, Lambda, mean_acceptance, max_rej)`` in
-    one fused kernel. Computing them as separate eager ``jnp.std`` / ``jnp.max``
-    / ``jnp.sum`` / ``jnp.mean`` calls makes each its own XLA dispatch (and a
-    separate compile the first time a shape is seen), which dominates the
-    cold-start cost of an otherwise tiny per-phase computation. ``rej_std`` is
-    the equalization quality (keep-best + equalize-stop); ``max_beta_shift`` is
-    the ladder movement (settle check); ``max_rej`` is the worst pair's
-    rejection rate, which flags a ladder still saturating at β_c (see
-    ``tune_schedule``'s keep-best and Λ-plateau stop)."""
+    ``rej_std`` drives keep-best and the equalization stop; ``max_beta_shift``
+    the settle check; ``max_rej`` the saturation checks (keep-best ranking and
+    the Λ-plateau gate)."""
     return (
         jnp.std(rej),
         jnp.max(jnp.abs(new_betas - old_betas)),
@@ -839,8 +824,9 @@ def nrpt(
     the same length share ONE compiled round loop instead of recompiling per
     count (the dominant cold cost of ``tune_chains``), at the price of wasted
     Gibbs work on the padding chains (~free on a dispatch-bound accelerator).
-    Temperature-linear mode only; incompatible with ``observer`` and
-    ``energy_delta_fn``.
+    Temperature-linear mode only; incompatible with ``energy_delta_fn``, and an
+    ``observer`` must be masking-safe (see
+    :class:`~hamon.observers.ColdIndexObserver`).
 
     Single-pass DEO: one swap parity per round, alternating even/odd.
     Multi-pass breaks non-reversibility (even∘odd∘odd∘even = identity).

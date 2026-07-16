@@ -47,14 +47,15 @@ from jaxtyping import Array, Key, PyTree
 from hamon.block_management import Block, BlockSpec, from_global_state
 from hamon.block_sampling import BlockGibbsSpec, _State
 from hamon.conditional_samplers import AbstractConditionalSampler
-from hamon.factor import FactorSamplingProgram
-from hamon.interaction import InteractionGroup
+from hamon.factor import ModelSamplingProgram
+from hamon.interaction import InteractionGroup, interaction_float_dtype
 from hamon.models.ebm import AbstractFactorizedEBM, EBMFactor
 from hamon.models.gaussian import (
     QuadraticPairEBMFactor,
     QuadraticPairInteraction,
     QuadraticSelfInteraction,
     _gaussian_factor_blocks,
+    _per_block_init,
 )
 from hamon.pgm import AbstractNode, GaussianNode, _as_identity_seq
 
@@ -152,15 +153,7 @@ class SliceGibbsConditional(AbstractConditionalSampler):
         sampler_state: None,
         output_sd: PyTree[jax.ShapeDtypeStruct],
     ) -> tuple[_State, None]:
-        dtype = jnp.result_type(
-            *(
-                leaf.dtype
-                for interaction in interactions
-                for leaf in jax.tree.leaves(interaction)
-                if isinstance(leaf, jax.Array)
-                and jnp.issubdtype(leaf.dtype, jnp.floating)
-            )
-        )
+        dtype = interaction_float_dtype(interactions)
         shape = output_sd.shape
         coef_a = jnp.zeros(shape, dtype=dtype)
         coef_b = jnp.zeros(shape, dtype=dtype)
@@ -319,8 +312,8 @@ class DoubleWellEBM(AbstractFactorizedEBM):
         return fs
 
 
-class DoubleWellSamplingProgram(FactorSamplingProgram):
-    """Thin wrapper specializing :class:`FactorSamplingProgram` to the φ⁴ model."""
+class DoubleWellSamplingProgram(ModelSamplingProgram):
+    """Thin wrapper specializing :class:`ModelSamplingProgram` to the φ⁴ model."""
 
     def __init__(
         self,
@@ -332,25 +325,18 @@ class DoubleWellSamplingProgram(FactorSamplingProgram):
         max_stepout: int = 8,
         _gibbs_spec: BlockGibbsSpec | None = None,
     ):
-        samp = SliceGibbsConditional(width=width, max_stepout=max_stepout)
-        spec = (
-            _gibbs_spec
-            if _gibbs_spec is not None
-            else BlockGibbsSpec(free_blocks, clamped_blocks, ebm.node_shape_dtypes)
+        super().__init__(
+            ebm,
+            free_blocks,
+            clamped_blocks,
+            SliceGibbsConditional(width=width, max_stepout=max_stepout),
+            _gibbs_spec=_gibbs_spec,
         )
-        super().__init__(spec, [samp for _ in spec.free_blocks], ebm.factors, [])
 
-    def with_ebm(self, ebm: DoubleWellEBM) -> "DoubleWellSamplingProgram":
+    def _with_ebm_kwargs(self) -> dict:
         samp = self.samplers[0]
         assert isinstance(samp, SliceGibbsConditional)
-        return DoubleWellSamplingProgram(
-            ebm,
-            list(self.gibbs_spec.superblocks),
-            self.gibbs_spec.clamped_blocks,
-            width=samp.width,
-            max_stepout=samp.max_stepout,
-            _gibbs_spec=self.gibbs_spec,
-        )
+        return {"width": samp.width, "max_stepout": samp.max_stepout}
 
 
 def double_well_init(
@@ -366,20 +352,15 @@ def double_well_init(
     Not the target distribution — a sensibly-scaled start, like
     ``gaussian_init`` / ``hinton_init``. Requires β > 0.
     """
-    pos = {id(n): i for i, n in enumerate(model.nodes)}
-    keys = jax.random.split(key, max(len(blocks), 1))
-    out = []
-    for k, block in zip(keys, blocks):
-        idx = jnp.asarray([pos[id(n)] for n in block.nodes], dtype=jnp.int32)
+
+    def site_draw(k, idx, shape):
         k_sign, k_noise = jax.random.split(k)
         sign = jnp.where(
-            jax.random.bernoulli(k_sign, 0.5, (*batch_shape, len(block.nodes))),
+            jax.random.bernoulli(k_sign, 0.5, shape),
             jnp.float32(1.0),
             jnp.float32(-1.0),
         )
         std = jax.lax.rsqrt(model.beta * 8.0 * model.barrier[idx])
-        noise = jax.random.normal(
-            k_noise, (*batch_shape, len(block.nodes)), dtype=jnp.float32
-        )
-        out.append((sign + std * noise).astype(jnp.float32))
-    return out
+        return sign + std * jax.random.normal(k_noise, shape, dtype=jnp.float32)
+
+    return _per_block_init(key, model, blocks, batch_shape, site_draw)

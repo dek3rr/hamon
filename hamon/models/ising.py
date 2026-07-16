@@ -25,11 +25,11 @@ from hamon.block_sampling import (
     SuperBlock,
     sample_with_observation,
 )
-from hamon.factor import FactorSamplingProgram
+from hamon.factor import ModelSamplingProgram
 from hamon.models.discrete_ebm import SpinEBMFactor, SpinGibbsConditional
 from hamon.models.ebm import AbstractFactorizedEBM, EBMFactor
 from hamon.observers import AbstractObserver, MomentAccumulatorObserver
-from hamon.pgm import AbstractNode, SpinNode, _as_identity_seq
+from hamon.pgm import AbstractNode, SpinNode, _as_identity_seq, _fifo_cache
 
 logger = logging.getLogger(__name__)
 
@@ -40,30 +40,26 @@ Edge = tuple[AbstractNode, AbstractNode]
 # ``with_beta``/``with_ebm``), and its node-group Blocks depend only on the
 # ``nodes``/``edges`` lists — which ``with_beta`` passes through by reference —
 # never on β or the weights. Rebuilding them cost two O(|edges|) list
-# comprehensions plus three O(|nodes|) Block type scans per rebuild. Keyed on
-# list identity; entries pin their key lists (no id reuse while live) and the
-# cache is a bounded FIFO.
+# comprehensions plus three O(|nodes|) Block type scans per rebuild.
 _FACTOR_BLOCK_CACHE: dict = {}
-_FACTOR_BLOCK_CACHE_MAX = 32
 
 
 def _ising_factor_blocks(
     nodes: Sequence[AbstractNode], edges: Sequence[Edge]
 ) -> tuple[Block, Block, Block]:
     """Build (cached) the bias Block and the edge head/tail Blocks."""
-    key = (id(nodes), id(edges))
-    hit = _FACTOR_BLOCK_CACHE.get(key)
-    if hit is not None and hit[0] is nodes and hit[1] is edges:
-        return hit[2], hit[3], hit[4]
 
-    bias_block = Block(nodes)
-    head_block = Block([x[0] for x in edges])
-    tail_block = Block([x[1] for x in edges])
+    def build():
+        return (
+            nodes,  # pin the id()-keyed objects (see _fifo_cache)
+            edges,
+            Block(nodes),
+            Block([x[0] for x in edges]),
+            Block([x[1] for x in edges]),
+        )
 
-    if len(_FACTOR_BLOCK_CACHE) >= _FACTOR_BLOCK_CACHE_MAX:
-        _FACTOR_BLOCK_CACHE.pop(next(iter(_FACTOR_BLOCK_CACHE)))
-    _FACTOR_BLOCK_CACHE[key] = (nodes, edges, bias_block, head_block, tail_block)
-    return bias_block, head_block, tail_block
+    hit = _fifo_cache(_FACTOR_BLOCK_CACHE, 32, (id(nodes), id(edges)), build)
+    return hit[2], hit[3], hit[4]
 
 
 class IsingEBM(AbstractFactorizedEBM):
@@ -137,8 +133,8 @@ class IsingEBM(AbstractFactorizedEBM):
         ]
 
 
-class IsingSamplingProgram(FactorSamplingProgram):
-    """A very thin wrapper on FactorSamplingProgram that specializes it to the case of an Ising Model."""
+class IsingSamplingProgram(ModelSamplingProgram):
+    """Thin wrapper specializing :class:`ModelSamplingProgram` to an Ising model."""
 
     def __init__(
         self,
@@ -148,24 +144,12 @@ class IsingSamplingProgram(FactorSamplingProgram):
         *,
         _gibbs_spec: BlockGibbsSpec | None = None,
     ):
-        samp = SpinGibbsConditional()
-        # _gibbs_spec: internal fast path for with_ebm — the spec is pure
-        # structure (no β, no weights), so a rebuild over the same blocks would
-        # reproduce it node for node while paying an O(|nodes|) location-map
-        # construction.
-        spec = (
-            _gibbs_spec
-            if _gibbs_spec is not None
-            else BlockGibbsSpec(free_blocks, clamped_blocks, ebm.node_shape_dtypes)
-        )
-        super().__init__(spec, [samp for _ in spec.free_blocks], ebm.factors, [])
-
-    def with_ebm(self, ebm: IsingEBM) -> "IsingSamplingProgram":
-        return IsingSamplingProgram(
+        super().__init__(
             ebm,
-            list(self.gibbs_spec.superblocks),
-            self.gibbs_spec.clamped_blocks,
-            _gibbs_spec=self.gibbs_spec,
+            free_blocks,
+            clamped_blocks,
+            SpinGibbsConditional(),
+            _gibbs_spec=_gibbs_spec,
         )
 
 
@@ -555,12 +539,10 @@ def estimate_kl_grad(
 
 
 # ising_sample builds fresh SpinNodes per call, and node identity keys every
-# downstream cache — so without this memo a repeat call with the same graph
-# retraces and recompiles every jitted kernel (~3.5 s of XLA at 128² without
-# the persistent compile cache, and a full re-trace even with it). Keyed on
-# graph *content*; bounded FIFO, entries pin nothing external.
+# downstream cache — so without this content-keyed memo a repeat call with the
+# same graph retraces and recompiles every jitted kernel (~3.5 s of XLA at 128²
+# without the persistent compile cache, and a full re-trace even with it).
 _GRAPH_CACHE: dict = {}
-_GRAPH_CACHE_MAX = 8
 
 
 def _ising_graph(n: int, edges_np: np.ndarray):
@@ -572,33 +554,26 @@ def _ising_graph(n: int, edges_np: np.ndarray):
     """
     from hamon.graph_utils import rlf_coloring
 
+    def build():
+        nodes: list[AbstractNode] = [SpinNode() for _ in range(n)]
+        # .tolist() converts the whole edge array to Python ints in C, instead
+        # of 2·|edges| per-element int(...) casts on numpy scalars.
+        node_edges: list[Edge] = [(nodes[u], nodes[v]) for u, v in edges_np.tolist()]
+
+        # Recursive-Largest-First coloring: each color class is an independent
+        # set and becomes one block-Gibbs group. The color count is the number
+        # of sequential sample groups in the NRPT round loop, which sets its
+        # XLA compile cost, so minimizing colors directly cuts compile.
+        coloring = rlf_coloring(n, edges_np)
+        n_colors = (max(coloring) + 1) if n else 1
+        color_groups: list[list[AbstractNode]] = [[] for _ in range(n_colors)]
+        for idx in range(n):
+            color_groups[coloring[idx]].append(nodes[idx])
+        free_blocks: list[SuperBlock] = [Block(group) for group in color_groups]
+        return nodes, node_edges, free_blocks
+
     key = (n, edges_np.shape, edges_np.tobytes())
-    hit = _GRAPH_CACHE.get(key)
-    if hit is not None:
-        return hit
-
-    nodes: list[AbstractNode] = [SpinNode() for _ in range(n)]
-    # .tolist() converts the whole edge array to Python ints in C, instead of
-    # 2·|edges| per-element int(...) casts on numpy scalars.
-    node_edges: list[Edge] = [(nodes[u], nodes[v]) for u, v in edges_np.tolist()]
-
-    # Recursive-Largest-First coloring of the variable graph: each color class
-    # is an independent set and becomes one block-Gibbs group. The color count
-    # is the number of sequential sample groups in the NRPT round loop, which
-    # sets its XLA compile cost, so minimizing colors directly cuts compile —
-    # RLF does that more aggressively than greedy heuristics on dense graphs and
-    # matches them on sparse/bipartite ones.
-    coloring = rlf_coloring(n, edges_np)
-    n_colors = (max(coloring) + 1) if n else 1
-    color_groups: list[list[AbstractNode]] = [[] for _ in range(n_colors)]
-    for idx in range(n):
-        color_groups[coloring[idx]].append(nodes[idx])
-    free_blocks: list[SuperBlock] = [Block(group) for group in color_groups]
-
-    if len(_GRAPH_CACHE) >= _GRAPH_CACHE_MAX:
-        _GRAPH_CACHE.pop(next(iter(_GRAPH_CACHE)))
-    _GRAPH_CACHE[key] = (nodes, node_edges, free_blocks)
-    return nodes, node_edges, free_blocks
+    return _fifo_cache(_GRAPH_CACHE, 8, key, build)
 
 
 def ising_sample(

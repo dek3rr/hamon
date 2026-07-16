@@ -82,6 +82,27 @@ def _as_identity_seq(items) -> _IdentitySeq:
     return items if isinstance(items, _IdentitySeq) else _IdentitySeq(items)
 
 
+def _fifo_cache(cache: dict, max_size: int, key, build):
+    """Bounded memo: return ``cache[key]``, building and storing it on a miss
+    (evicting the oldest entry at ``max_size``).
+
+    The shared skeleton of hamon's identity-keyed caches (factor blocks,
+    memoized graphs, observer blocks). When the key is ``id()``-based, ``build``
+    must include the keyed objects in the stored value: a live entry then pins
+    them, so an id can never be reused while its cache entry exists, and an
+    evicted entry takes its key with it — no reuse-after-GC false hits either
+    way.
+    """
+    hit = cache.get(key)
+    if hit is not None:
+        return hit
+    value = build()
+    if len(cache) >= max_size:
+        cache.pop(next(iter(cache)))
+    cache[key] = value
+    return value
+
+
 class _CounterMeta(abc.ABCMeta):
     """Metaclass that automatically calls __post_init__ and provides unique ordering.
 

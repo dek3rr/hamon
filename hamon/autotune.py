@@ -213,12 +213,11 @@ class NRPTPlan:
         n_total = n_warmup + n_samples * steps
         dev = self.device if self.device is not None else "auto"
         ebms, programs = self._source.nrpt_args(self._betas_dev)
-        # Chain-masked draw: pad the ladder to max_chains and record the live cold
-        # chain (absolute index n_chains-1 of the padded ladder) via a traced
-        # index, so draws at different discovered N reuse ONE compiled observer
-        # round loop. Bit-identical to the unpadded draw on the live prefix
-        # (threefry key/uniform streams are prefix-stable). Off (pad=None) ⇒ the
-        # original unpadded static -1 observer.
+        # Chain-masked draw (see _pad_draw): the live cold chain sits at
+        # absolute index n_chains-1 of the padded ladder, read via a traced
+        # index. Bit-identical to the unpadded draw on the live prefix
+        # (threefry streams are prefix-stable). Off (pad=None) ⇒ the unpadded
+        # static -1 observer.
         pad = self._pad_draw
         observer = (
             ColdIndexObserver(self.n_chains - 1)
@@ -291,25 +290,20 @@ class NRPTPlan:
 
 # The production draw's StateObserver carries this Block as a jit static, and
 # Blocks compare by identity — a fresh Block over the same nodes per autotune
-# call would retrace and recompile the draw kernel every call. Keyed on node
-# identities; entries pin their nodes (no id reuse while live), bounded FIFO —
-# the same pattern as the factor-block caches in hamon.models.
+# call would retrace and recompile the draw kernel every call.
 _OBS_BLOCK_CACHE: dict = {}
-_OBS_BLOCK_CACHE_MAX = 32
 
 
 def _obs_block(out_nodes: list):
     from hamon.block_management import Block
+    from hamon.pgm import _fifo_cache
+
+    def build():
+        # pin the id()-keyed nodes (see _fifo_cache)
+        return tuple(out_nodes), Block(out_nodes)
 
     key = tuple(map(id, out_nodes))
-    hit = _OBS_BLOCK_CACHE.get(key)
-    if hit is not None:
-        return hit[1]
-    blk = Block(out_nodes)
-    if len(_OBS_BLOCK_CACHE) >= _OBS_BLOCK_CACHE_MAX:
-        _OBS_BLOCK_CACHE.pop(next(iter(_OBS_BLOCK_CACHE)))
-    _OBS_BLOCK_CACHE[key] = (tuple(out_nodes), blk)
-    return blk
+    return _fifo_cache(_OBS_BLOCK_CACHE, 32, key, build)[1]
 
 
 def autotune(

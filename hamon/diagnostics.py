@@ -561,10 +561,8 @@ def report_nrpt_diagnostics(
         report.tau_predicted = float(rt["tau_predicted"])
         report.efficiency = float(rt["efficiency"])
         report.total_round_trips = int(np.sum(np.asarray(rt["round_trips_per_chain"])))
-        # Resolution is structural (Λ̂ <= N-1; a saturating ladder reports its cap),
-        # so it reads the rejection rates, not the round-trip rate — the latter is
-        # budget-dependent and would call a correct-but-under-observed ladder
-        # stalled. See hamon.round_trips.barrier_is_identified.
+        # Structural gate — reads the rejection rates, never the budget-
+        # dependent round-trip rate (see hamon.round_trips.barrier_is_identified).
         report.barrier_identified = barrier_is_identified(rej)
 
         if not report.barrier_identified:

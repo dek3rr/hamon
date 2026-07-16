@@ -1,5 +1,6 @@
 import abc
 from collections.abc import Sequence
+from typing import Self
 
 import equinox as eqx
 from jaxtyping import Array
@@ -110,3 +111,45 @@ class FactorSamplingProgram(BlockSamplingProgram):
             all_interaction_groups += factor.to_interaction_groups()
 
         super().__init__(gibbs_spec, samplers, all_interaction_groups)
+
+
+class ModelSamplingProgram(FactorSamplingProgram):
+    """Shared base for the per-model program wrappers (Ising, Gaussian, φ⁴…).
+
+    Handles the boilerplate every model wrapper repeats: build the
+    ``BlockGibbsSpec`` (or reuse a caller-supplied one — the spec is pure
+    structure, no β or weights, so a rebuild over the same blocks would
+    reproduce it node for node while paying an O(|nodes|) location-map
+    construction), replicate one conditional per free block, and rebind new
+    EBM weights via :meth:`with_ebm` without re-deriving the spec.
+    """
+
+    def __init__(
+        self,
+        ebm,
+        free_blocks: list,
+        clamped_blocks: list[Block],
+        sampler: AbstractConditionalSampler,
+        *,
+        _gibbs_spec: BlockGibbsSpec | None = None,
+    ):
+        spec = (
+            _gibbs_spec
+            if _gibbs_spec is not None
+            else BlockGibbsSpec(free_blocks, clamped_blocks, ebm.node_shape_dtypes)
+        )
+        super().__init__(spec, [sampler for _ in spec.free_blocks], ebm.factors, [])
+
+    def _with_ebm_kwargs(self) -> dict:
+        """Extra constructor kwargs :meth:`with_ebm` must forward (e.g. sampler
+        configuration). Default: none."""
+        return {}
+
+    def with_ebm(self, ebm) -> Self:
+        return type(self)(
+            ebm,
+            list(self.gibbs_spec.superblocks),
+            self.gibbs_spec.clamped_blocks,
+            _gibbs_spec=self.gibbs_spec,
+            **self._with_ebm_kwargs(),
+        )
