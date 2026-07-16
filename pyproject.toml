@@ -100,7 +100,7 @@ packages = { find = { include = ["hamon", "hamon.*"] } }
 [tool.ruff]
 extend-include = ["*.ipynb"]
 src = []
-line-length = 120
+line-length = 88
 target-version = "py312"
 
 [tool.ruff.lint]
