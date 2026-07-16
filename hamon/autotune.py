@@ -594,7 +594,7 @@ def autotune(
         cold_program = program_factory([cold_ebm])[0]
 
     # Output column order: caller-supplied (e.g. the model's original node
-    # order) or, by default, all free nodes in free-block (colour) order.
+    # order) or, by default, all free nodes in free-block (color) order.
     if sample_nodes is not None:
         out_nodes = list(sample_nodes)
     else:

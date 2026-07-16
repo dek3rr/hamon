@@ -566,7 +566,7 @@ _GRAPH_CACHE_MAX = 8
 def _ising_graph(n: int, edges_np: np.ndarray):
     """(nodes, node_edges, free_blocks) for a variable graph, memoized.
 
-    The colouring is deterministic, so equal-content graphs always produce the
+    The coloring is deterministic, so equal-content graphs always produce the
     same block structure; reusing the node objects is what lets the structure
     cache and every jit cache hit on repeat calls.
     """
@@ -582,10 +582,10 @@ def _ising_graph(n: int, edges_np: np.ndarray):
     # 2·|edges| per-element int(...) casts on numpy scalars.
     node_edges: list[Edge] = [(nodes[u], nodes[v]) for u, v in edges_np.tolist()]
 
-    # Recursive-Largest-First colouring of the variable graph: each colour class
-    # is an independent set and becomes one block-Gibbs group. The colour count
+    # Recursive-Largest-First coloring of the variable graph: each color class
+    # is an independent set and becomes one block-Gibbs group. The color count
     # is the number of sequential sample groups in the NRPT round loop, which
-    # sets its XLA compile cost, so minimising colours directly cuts compile —
+    # sets its XLA compile cost, so minimizing colors directly cuts compile —
     # RLF does that more aggressively than greedy heuristics on dense graphs and
     # matches them on sparse/bipartite ones.
     coloring = rlf_coloring(n, edges_np)
@@ -618,7 +618,7 @@ def ising_sample(
     r"""Sample from an Ising model Boltzmann distribution via fully autotuned NRPT.
 
     A thin Ising-specific front end over :func:`hamon.autosample`: it builds and
-    colours the graph, then **autotunes the full NRPT configuration** — chain
+    colors the graph, then **autotunes the full NRPT configuration** — chain
     count, local-exploration count (``gibbs_steps_per_round``), and schedule —
     before drawing from the cold chain. Unlike earlier versions, the
     exploration count is no longer a fixed argument; it is discovered (and
@@ -686,7 +686,7 @@ def ising_sample(
             "per-variable preference; sampling results may be uninformative."
         )
 
-    # --- build (or reuse) the coloured graph for block Gibbs ---
+    # --- build (or reuse) the colored graph for block Gibbs ---
     # Node identity keys every downstream cache (block structure, jit statics),
     # so a repeat call with the same graph must reuse the same node objects —
     # otherwise every kernel retraces and recompiles per call.

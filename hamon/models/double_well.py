@@ -24,7 +24,7 @@ explicitly allows, and the first hamon sampler that is a Markov *transition*
 rather than an independent conditional draw. The current value x₀ it needs is
 delivered through a **self-anchored interaction**: the polynomial factor lists
 its own node group as the tail block, so each site receives its own pre-sweep
-value as a tail state (pairing is positional; the graph colouring adds no
+value as a tail state (pairing is positional; the graph coloring adds no
 self-conflict for it).
 
 Randomness inside the shrinkage loop is keyed by ``fold_in(key, iteration)``,
@@ -127,7 +127,7 @@ class SliceGibbsConditional(AbstractConditionalSampler):
     under log p(x₀), bounded stepping-out (budget ``max_stepout`` split
     uniformly between the two directions — the m-limited variant, exact by
     construction), then shrinkage until acceptance. The transition leaves the
-    conditional invariant; sites in a colour class update independently.
+    conditional invariant; sites in a color class update independently.
 
     **Attributes:**
 

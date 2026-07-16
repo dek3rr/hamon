@@ -12,8 +12,8 @@ mean P⁻¹h, and the single-site conditionals are themselves Gaussian —
 $$x_i \\mid x_{\\setminus i} \\sim \\mathcal{N}\\!\\left(
     \\frac{h_i - \\sum_j c_{ij} x_j}{d_i},\\; \\frac{1}{\\beta d_i} \\right)$$
 
-— so block Gibbs over a graph colouring is *exact*, just as for the discrete
-models: within a colour class the conditionals are independent scalar
+— so block Gibbs over a graph coloring is *exact*, just as for the discrete
+models: within a color class the conditionals are independent scalar
 Gaussians (no linear solve anywhere).
 
 Positive definiteness of P is the caller's responsibility; strict diagonal

@@ -49,7 +49,7 @@ class _IdentitySeq(Sequence[_T]):
             # id()-based: mirrors the unique-by-construction node semantics
             # without calling each element's Python-level __hash__. Edge
             # entries are (node, node) tuples, whose own ids are not stable
-            # across rebuilds — canonicalise one level so freshly built
+            # across rebuilds — canonicalize one level so freshly built
             # tuples over the same nodes hash (and compare) equal.
             h = self._hash = hash(
                 tuple(

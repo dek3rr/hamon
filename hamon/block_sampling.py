@@ -261,7 +261,7 @@ def _build_block_structure(
                                 global_inds[k] = loc[0]
                             elif global_inds[k] != loc[0]:
                                 raise RuntimeError(
-                                    "Tail neighbours of a free block span "
+                                    "Tail neighbors of a free block span "
                                     "multiple global slots; cannot build a "
                                     "single-slot gather."
                                 )
@@ -673,7 +673,7 @@ def _run_blocks(
                 if block_owns_slot[i]:
                     # The block is the sole occupant of its slot (per-block
                     # layout), so the whole slot is replaced — no slice/scatter
-                    # and no device copy of an unchanged neighbour. This is the
+                    # and no device copy of an unchanged neighbor. This is the
                     # main lever against dispatch-bound Gibbs sweeps.
                     new_global[sd_ind] = new_states[i]
                 elif block_slice_starts[i] is not None:

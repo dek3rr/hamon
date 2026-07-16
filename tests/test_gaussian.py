@@ -26,7 +26,7 @@ from hamon.tuning import tune_chains, tune_schedule
 
 
 def _lattice_gmrf(L=4, d=4.5, c=-1.0, beta=0.8, seed=0):
-    """Periodic L×L lattice GMRF: P_ii = d, P_ij = c on nearest-neighbour
+    """Periodic L×L lattice GMRF: P_ii = d, P_ij = c on nearest-neighbor
     edges (each undirected edge once), random linear term h. Diagonal dominance
     (d > 4|c|) makes P positive definite."""
     n = L * L

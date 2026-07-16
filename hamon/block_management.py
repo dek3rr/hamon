@@ -292,7 +292,7 @@ def block_state_to_global(
 
     **Arguments:**
 
-    - `block_state`: State organised per block, same length as
+    - `block_state`: State organized per block, same length as
         ``spec.blocks``.
     - `spec`: The [`hamon.BlockSpec`][] that defines the mapping.
 
@@ -338,7 +338,7 @@ def _block_layout(block: Block, spec: BlockSpec) -> tuple[int, int | None, np.nd
     # Read the slot from the location map (rather than sd_index_map[node_type])
     # so this is correct under any layout, including the per-block layout where a
     # block's slot is its own index rather than its shared structure group. All
-    # of a block's nodes live in one slot, so the first node fixes it. Behaviour
+    # of a block's nodes live in one slot, so the first node fixes it. Behavior
     # is identical to the structure-group lookup under the default layout.
     sd_ind = spec.node_global_location_map[block.nodes[0]][0]
     locs = np.array([spec.node_global_location_map[node][1] for node in block])
@@ -389,7 +389,7 @@ def scatter_block_to_global(
     if len(spec.block_to_global_slice_spec[sd_ind]) == 1:
         # The block is the sole occupant of its slot (per-block layout), so the
         # whole slot is replaced — no slice/scatter and no copy of an unchanged
-        # neighbour.
+        # neighbor.
         new_global[sd_ind] = new_block_state
     elif start is not None:
         new_global[sd_ind] = jax.tree.map(
@@ -542,7 +542,7 @@ def make_empty_block_state(
     batch_shape: tuple | None = None,
 ) -> list[_State]:
     """
-    Allocate a zero-initialised block state.
+    Allocate a zero-initialized block state.
 
     **Arguments:**
 

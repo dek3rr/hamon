@@ -826,7 +826,7 @@ def _estimate_barrier_energy(
 
 # ~p95 of the null single-series window R̂ at (8 restarts, 4-batch window):
 # simulated p50≈1.03, p95≈1.25. The grid's _ENERGY_WARMUP_RHAT is looser
-# (1.45) because it maximises over 10 grid points; a single chain family
+# (1.45) because it maximizes over 10 grid points; a single chain family
 # needs the tighter cut. Recalibrate if the window/restart counts change.
 _REPLICA_RHAT = 1.25
 _TAU_PROBE_TAG = 0x54415550  # "TAUP": fold_in tag for the autocorrelation probe
@@ -1396,7 +1396,7 @@ def tune_chains(
     # round loop at a brand-new chain count (~1s) just to land on a count within
     # the convergence tolerance of one already in hand. (Whether n_star equals
     # the last probed n or is off by 1 is incidental to the Λ estimate, so this
-    # also makes the probe count robust across equally-good colourings.)
+    # also makes the probe count robust across equally-good colorings.)
     if reason == "chain_count" and _clamp(n_star) not in probed:
         n_final = n
     else:

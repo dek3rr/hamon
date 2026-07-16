@@ -6,7 +6,7 @@ filtered 3-class MNIST subset using persistent contrastive divergence (PCD),
 then measures classification accuracy by clamping the image and sampling the
 label spots. The schedules for both training phases are calibrated per segment
 at the current parameters (``tune_sampling_schedule``) rather than hand-picked,
-which is the behaviour this end-to-end run exercises.
+which is the behavior this end-to-end run exercises.
 
 This used to live in the unit suite (``tests/test_train_mnist.py``) but it is a
 full training pipeline, not a unit test: it takes minutes, loads ~31 MB of data,
@@ -66,8 +66,8 @@ def get_double_grid(
     edge_groups = [np.column_stack((indices, indices))]
     for d in jumps:
         for di, dj in ((-d, 0), (d, 0), (0, -d), (0, d)):
-            neighbours = ((rows + di) % side_len) * side_len + ((cols + dj) % side_len)
-            edge_groups.append(np.column_stack((indices, neighbours)))
+            neighbors = ((rows + di) % side_len) * side_len + ((cols + dj) % side_len)
+            edge_groups.append(np.column_stack((indices, neighbors)))
 
     edges_arr = np.concatenate(edge_groups, axis=0)
 
@@ -160,7 +160,7 @@ class MnistTraining:
     def _pow2_ceil(x, cap=16):
         """Round up to the nearest power of two (≤ cap).
 
-        Quantising ``steps_per_sample`` this way keeps the number of distinct
+        Quantizing ``steps_per_sample`` this way keeps the number of distinct
         schedules — and therefore segment-scan recompiles — small as the
         calibrated thinning grows monotonically through training.
         """
@@ -176,7 +176,7 @@ class MnistTraining:
         negative phase is free — they mix at different rates and get separate
         schedules. The negative chains are persistent (PCD): warmup is paid
         once up front, so the per-step negative schedule carries none. Thinning
-        is quantised to a power of two to bound recompiles.
+        is quantized to a power of two to bound recompiles.
         """
         k_pos, k_neg, k_ip, k_in = jax.random.split(key, 4)
         R = self.calibration_replicas
@@ -210,7 +210,7 @@ class MnistTraining:
         schedule_negative = SamplingSchedule(
             0, self.n_samples_negative, self._pow2_ceil(sched_neg.steps_per_sample)
         )
-        # Positive warmup quantised to a coarse grid for the same reason.
+        # Positive warmup quantized to a coarse grid for the same reason.
         pos_warmup = int(np.ceil(sched_pos.n_warmup / 64) * 64)
         schedule_positive = SamplingSchedule(
             pos_warmup,
@@ -316,7 +316,7 @@ class MnistTraining:
             # Recalibrate the schedules every segment: the mixing time τ grows
             # as θ moves away from 0, so a schedule fixed at the start of the
             # epoch (τ ≈ 1, uniform model) badly under-thins the later steps.
-            # Segments are equal-length so each distinct (quantised) schedule
+            # Segments are equal-length so each distinct (quantized) schedule
             # compiles its scan body at most once.
             seg_size = n_batches // n_segments
             params = model.weights, model.biases

@@ -1,4 +1,4 @@
-"""Tests for hamon.graph_utils graph colouring."""
+"""Tests for hamon.graph_utils graph coloring."""
 
 import numpy as np
 import pytest
@@ -7,9 +7,9 @@ from hamon.graph_utils import rlf_coloring
 
 
 def _reference_rlf(n_nodes, edges):
-    """Original set-based RLF (pre-vectorisation) — the semantic contract.
+    """Original set-based RLF (pre-vectorization) — the semantic contract.
 
-    The vectorised implementation must reproduce this colouring exactly,
+    The vectorized implementation must reproduce this coloring exactly,
     including all tie-breaking, so downstream block structures (and therefore
     sample streams) are unchanged.
     """
