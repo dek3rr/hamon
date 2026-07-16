@@ -29,7 +29,7 @@ from hamon.factor import FactorSamplingProgram
 from hamon.models.discrete_ebm import SpinEBMFactor, SpinGibbsConditional
 from hamon.models.ebm import AbstractFactorizedEBM, EBMFactor
 from hamon.observers import AbstractObserver, MomentAccumulatorObserver
-from hamon.pgm import AbstractNode, SpinNode, _IdentitySeq
+from hamon.pgm import AbstractNode, SpinNode, _as_identity_seq
 
 logger = logging.getLogger(__name__)
 
@@ -110,8 +110,8 @@ class IsingEBM(AbstractFactorizedEBM):
     ):
         sd_map = {nodes[0].__class__: jax.ShapeDtypeStruct((), jnp.bool_)}
         super().__init__(sd_map)
-        self.nodes = nodes if isinstance(nodes, _IdentitySeq) else _IdentitySeq(nodes)
-        self.edges = edges if isinstance(edges, _IdentitySeq) else _IdentitySeq(edges)
+        self.nodes = _as_identity_seq(nodes)
+        self.edges = _as_identity_seq(edges)
         # β must match the float dtype of the parameters it scales: a strong
         # float64 β (e.g. jnp.array(1.0) with x64 enabled in the host
         # application) would otherwise promote every β·W interaction tensor —

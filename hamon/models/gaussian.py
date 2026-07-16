@@ -39,7 +39,7 @@ from hamon.conditional_samplers import AbstractParametricConditionalSampler
 from hamon.factor import FactorSamplingProgram
 from hamon.interaction import InteractionGroup
 from hamon.models.ebm import AbstractFactorizedEBM, EBMFactor
-from hamon.pgm import AbstractNode, GaussianNode, _IdentitySeq
+from hamon.pgm import AbstractNode, GaussianNode, _as_identity_seq
 
 __all__ = [
     "QuadraticSelfInteraction",
@@ -271,8 +271,8 @@ class GaussianEBM(AbstractFactorizedEBM):
 
     ``nodes`` and ``edges`` are identity-hashed sequences shared across
     ``with_beta`` copies, keeping the jit caches hitting (same convention as
-    :class:`~hamon.models.IsingEBM`). The β = 0 member of the family is an
-    improper flat density over ℝⁿ, so ``proper_at_beta_zero`` is ``False``.
+    :class:`~hamon.models.IsingEBM`). See the module docstring for why
+    ``proper_at_beta_zero`` is ``False``.
     """
 
     nodes: Sequence[AbstractNode]
@@ -284,8 +284,8 @@ class GaussianEBM(AbstractFactorizedEBM):
 
     def __init__(self, nodes, edges, diag: Array, lin: Array, couplings: Array, beta):
         super().__init__({GaussianNode: jax.ShapeDtypeStruct((), jnp.float32)})
-        self.nodes = nodes if isinstance(nodes, _IdentitySeq) else _IdentitySeq(nodes)
-        self.edges = edges if isinstance(edges, _IdentitySeq) else _IdentitySeq(edges)
+        self.nodes = _as_identity_seq(nodes)
+        self.edges = _as_identity_seq(edges)
         param_dtype = jnp.result_type(diag, lin, couplings)
         self.diag = diag
         self.lin = lin

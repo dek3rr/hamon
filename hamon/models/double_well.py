@@ -54,8 +54,9 @@ from hamon.models.gaussian import (
     QuadraticPairEBMFactor,
     QuadraticPairInteraction,
     QuadraticSelfInteraction,
+    _gaussian_factor_blocks,
 )
-from hamon.pgm import AbstractNode, GaussianNode, _IdentitySeq
+from hamon.pgm import AbstractNode, GaussianNode, _as_identity_seq
 
 __all__ = [
     "PolynomialSelfInteraction",
@@ -72,8 +73,8 @@ class PolynomialSelfInteraction(eqx.Module):
 
     All coefficients are energy coefficients with β already folded in (the
     factor convention shared with the Gaussian stack). Its interaction group is
-    **self-anchored** — the head block reappears as the tail — so the sampler
-    receives each site's current value x₀, which a slice sampler requires.
+    self-anchored (see the module docstring), delivering each site's own
+    pre-sweep value alongside its coefficients.
     """
 
     quart: Array
@@ -266,7 +267,7 @@ class DoubleWellEBM(AbstractFactorizedEBM):
     - `couplings`: per-edge coefficient ``c``.
     - `beta`: scalar inverse temperature.
 
-    Unbounded state space ⇒ ``proper_at_beta_zero`` is ``False``.
+    See the module docstring for why ``proper_at_beta_zero`` is ``False``.
     """
 
     nodes: Sequence[AbstractNode]
@@ -278,8 +279,8 @@ class DoubleWellEBM(AbstractFactorizedEBM):
 
     def __init__(self, nodes, edges, barrier: Array, lin: Array, couplings, beta):
         super().__init__({GaussianNode: jax.ShapeDtypeStruct((), jnp.float32)})
-        self.nodes = nodes if isinstance(nodes, _IdentitySeq) else _IdentitySeq(nodes)
-        self.edges = edges if isinstance(edges, _IdentitySeq) else _IdentitySeq(edges)
+        self.nodes = _as_identity_seq(nodes)
+        self.edges = _as_identity_seq(edges)
         param_dtype = jnp.result_type(barrier, lin, couplings)
         self.barrier = barrier
         self.lin = lin
@@ -298,8 +299,6 @@ class DoubleWellEBM(AbstractFactorizedEBM):
     @property
     def factors(self) -> list[EBMFactor]:
         # β·params recomputed on every call — caching breaks AD tracer flow.
-        from hamon.models.gaussian import _gaussian_factor_blocks
-
         self_block, head_block, tail_block = _gaussian_factor_blocks(
             self.nodes, self.edges
         )

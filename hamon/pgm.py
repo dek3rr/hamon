@@ -72,6 +72,16 @@ class _IdentitySeq(Sequence[_T]):
         return f"{self.__class__.__name__}({list(self._items)!r})"
 
 
+def _as_identity_seq(items) -> _IdentitySeq:
+    """Wrap ``items`` as an :class:`_IdentitySeq` unless it already is one.
+
+    The common ``self.nodes = ...`` / ``self.edges = ...`` idiom in EBM
+    ``__init__`` methods: reusing an existing wrapper (e.g. one passed through
+    by ``with_beta``) keeps the jit cache hitting on the shared identity.
+    """
+    return items if isinstance(items, _IdentitySeq) else _IdentitySeq(items)
+
+
 class _CounterMeta(abc.ABCMeta):
     """Metaclass that automatically calls __post_init__ and provides unique ordering.
 

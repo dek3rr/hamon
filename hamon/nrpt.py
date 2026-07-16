@@ -666,13 +666,9 @@ def _resolve_run_inputs(
         chain_data: object = betas
         ebm_ref, beta_ref = base_ebm, jnp.asarray(1.0, dtype=compute_dtype)
         if getattr(base_ebm, "beta_affine", False):
-            # Affine (reference-annealing) path: E_β = E₀ + β·(E₁ − E₀). The
-            # kernel interpolates interactions as offset + β·slope, where
-            # offset = pbi(β=0) (the reference) and slope = pbi(β=1) − pbi(β=0)
-            # elementwise (same factor structure at every β, only weights
-            # differ). Swap energies must be Δ = E₁ − E₀ — E₀ is β-independent
-            # and cancels exactly in every swap ratio — so the β = 0 EBM is
-            # kept for the base-energy computation.
+            # Affine path (see _build_gibbs_runner): build the β = 0 offset
+            # program alongside the β = 1 slope so the kernel can interpolate
+            # and the swap energies can use Δ = E₁ − E₀.
             ebm_ref0 = base_ebm.with_beta(jnp.asarray(0.0, dtype=compute_dtype))
             program0 = run_program.with_ebm(ebm_ref0)
             base_pbi_offset = program0.per_block_interactions

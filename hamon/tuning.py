@@ -333,15 +333,9 @@ def tune_schedule(
         )
         quality = float(rej_std_a)
         max_rej = float(max_rej_a)
-        # A pair pinned at ~100% rejection means the ladder still has an
-        # unbridged gap at β_c: no state crosses it, so Λ̂ = Σ rej across it is a
-        # within-basin artifact (and wildly unstable — the same saturated ladder
-        # can read Λ̂ = 8 or 52). Such a ladder must never win keep-best, and
-        # rej_std alone does not rule it out: on a glassy target the untuned
-        # linear ladder scores a *better* rej_std than the partially-retuned
-        # ladders of the tuning transient, so plain rej_std ranking reverts all
-        # the way to the initial schedule and tuning becomes a no-op. Rank
-        # unsaturated over saturated first, then by rej_std.
+        # Rank unsaturated ladders over saturated ones before comparing spread
+        # (see the "Best" paragraph in the docstring) — the fix for keep-best
+        # reverting to the untuned input on glassy targets.
         saturated = max_rej >= saturation_tol
         if adaptive_tuning and (
             (best_saturated and not saturated)
@@ -384,13 +378,9 @@ def tune_schedule(
             # phases.
             equalized = quality < equalize_tol
             settled = effective_tol is not None and max_beta_shift < effective_tol
-            # Λ-plateau: the estimate we actually care about has stopped moving.
-            # Needed because on a glassy target rej_std settles just *above*
-            # equalize_tol (~0.05-0.07) so `equalized` never fires, and max|Δβ|
-            # only touches its noise floor intermittently — leaving the phase cap
-            # to decide, which is what mis-tuned these ladders in the first place.
-            # Gated on an unsaturated ladder: Λ̂ across a pair pinned at ~100%
-            # rejection is a within-basin artifact whose stability means nothing.
+            # Λ̂-plateau stop (see "Tuning stops" in the docstring): needed
+            # because equalized/settled alone leave the phase cap to decide on
+            # glassy targets.
             plateaued = (
                 prev_lambda is not None
                 and not saturated
