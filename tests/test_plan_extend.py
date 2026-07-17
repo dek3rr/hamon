@@ -133,7 +133,7 @@ def test_extend_requires_prior_tempered_draw():
 def test_sample_until_respects_budget_and_returns_advice(plan_bw):
     plan, _, _ = plan_bw
     samples, advice = plan.sample_until(
-        jax.random.key(16), chunk=32, max_total=96, patience=99
+        jax.random.key(16), chunk=32, max_total=96, patience_deliveries=1e9
     )
     assert samples.shape[0] == 96
     assert advice is not None
@@ -146,6 +146,17 @@ def test_sample_until_stops_on_target(plan_bw):
         jax.random.key(17), chunk=32, max_total=320, target_energy=1e9
     )
     assert samples.shape[0] == 32  # first chunk already beats the target
+
+
+def test_sample_until_delivery_patience_stops_on_plateau(plan_bw):
+    # A healthy conveyor that plateaus should stop before the budget: with a
+    # low delivery threshold the flat stretch trips the patience quickly.
+    plan, _, _ = plan_bw
+    samples, _ = plan.sample_until(
+        jax.random.key(18), chunk=32, max_total=3200, patience_deliveries=0.5
+    )
+    # any single delivered trip on a flat chunk crosses 0.5 -> well under budget
+    assert samples.shape[0] < 3200
 
 
 def test_padded_and_unpadded_sessions_bit_identical():

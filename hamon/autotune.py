@@ -371,30 +371,44 @@ class NRPTPlan:
         *,
         chunk: int = 512,
         max_total: int | None = None,
-        patience: int = 3,
+        patience_deliveries: float = 30.0,
         target_energy: float | None = None,
         n_warmup: int = 0,
         steps_per_sample: int = 1,
+        stop_on_mixing: bool = False,
     ) -> tuple[jax.Array, Any]:
         """Sample/extend in fixed-size chunks until the running min stops improving.
 
-        Stops when `patience` consecutive chunks set no new record; when the
-        total reaches ``max_total`` (default ``16 * chunk``); when the minimum
-        reaches ``target_energy``; or when the advisor returns a confident
-        MIXING_LIMITED verdict (drawing more cannot help a broken conveyor).
+        Stops when ``target_energy`` is reached, ``max_total`` (default
+        ``16 * chunk``) draws are taken, or the tempering conveyor has
+        **delivered ``patience_deliveries`` independent states with no new
+        record** — a plateau measured in round trips, not raw draws.
+
+        The delivery count is the right clock for a minimum-energy search: at
+        the cold β needed for ground-state search the conveyor freezes out and
+        delivers slowly, so counting silent *draws* (or chunks) would abandon a
+        still-improving search after a short flat stretch — the exact regime
+        where more draws keep converting near-misses into ground-state hits.
+        Counting silent *deliveries* keeps drawing while the conveyor is slow
+        (few trips accrue) and stops promptly only once a healthy conveyor has
+        delivered many independent states without improvement. A dead-slow
+        conveyor therefore runs to ``max_total`` — set ``target_energy`` and a
+        generous budget for an exhaustive search.
+
+        ``stop_on_mixing`` (default ``False``) is off deliberately: a
+        MIXING_LIMITED verdict recommends *more chains*, but with budget in
+        hand more draws still lower the running minimum, so aborting on it
+        loses hits. Enable it only when re-tuning is cheaper than drawing.
+
         The fixed chunk size means every iteration reuses one compiled round
         loop. Returns ``(samples, advice)`` with all chunks concatenated.
-
-        The default ``patience=3`` waits three silent chunks — roughly one
-        e-folding of the 1/t record law at the default chunk size — before
-        concluding the floor is real.
         """
         from hamon.advisor import SearchVerdict
 
         max_total = int(max_total) if max_total is not None else 16 * chunk
         chunks: list[jax.Array] = []
         best = np.inf
-        silent = 0
+        trips_since_record = 0.0
         total = 0
         while total < max_total:
             key, k = jax.random.split(key)
@@ -407,18 +421,20 @@ class NRPTPlan:
             chunks.append(draw)
             total += chunk
             new_min = float(np.asarray(self._energy_chunks[-1]).min())
+            chunk_trips = float(self._window_stats[-1]["total_round_trips"])
             if new_min < best - 1e-12:
                 best = new_min
-                silent = 0
+                trips_since_record = 0.0
             else:
-                silent += 1
-            advice = self.last_advice
+                trips_since_record += chunk_trips
             if target_energy is not None and best <= target_energy:
                 break
-            if silent >= patience:
+            if trips_since_record >= patience_deliveries:
                 break
+            advice = self.last_advice
             if (
-                advice is not None
+                stop_on_mixing
+                and advice is not None
                 and advice.verdict is SearchVerdict.MIXING_LIMITED
                 and advice.confidence in ("medium", "high")
             ):

@@ -57,12 +57,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `NRPTPlan.extend(key, n_more)` continues a tempered draw from its
     retained final ladder — no re-autotune, no re-warmup, no retrace at a
     repeated size (`nrpt` re-ingests its own stacked device-side return) —
-    and `NRPTPlan.sample_until(key, chunk=512, patience=3, ...)` loops
-    extensions until the running minimum stops improving, the budget or a
-    `target_energy` is reached, or a confident MIXING verdict makes further
-    draws pointless. Bit-identical under chain masking (padded and unpadded
-    sessions agree exactly), and the per-window round-trip tallies are
-    pooled exactly across extensions for the advisor's mixing gates.
+    and `NRPTPlan.sample_until(key, chunk=512, patience_deliveries=30, ...)`
+    loops extensions until the running minimum stops improving, the budget or
+    a `target_energy` is reached. The plateau clock counts conveyor
+    **deliveries** (round trips) since the last record, not raw draws: at the
+    cold β of a ground-state search the conveyor freezes out and delivers
+    slowly, so a draw- or chunk-counted patience would abandon a still-
+    improving search after a short flat stretch — the exact regime where more
+    draws keep converting near-misses into ground-state hits (measured:
+    dropping a spurious mixing-abort took the 128-spin chain from 12/25 to
+    23/25 exact ground states at a fixed budget). A dead-slow conveyor
+    therefore runs to the budget; pair `target_energy` with a generous
+    `max_total` for an exhaustive search. Bit-identical under chain masking
+    (padded and unpadded sessions agree exactly), and the per-window
+    round-trip tallies are pooled exactly across extensions for the advisor's
+    mixing gates.
 
   `AutotuneReport` gains `rejection_rates`, `search_advice`, and
   `beta_estimate` (all defaulted; existing fields unchanged), and the
