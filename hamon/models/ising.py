@@ -754,13 +754,32 @@ def ising_sample(
     # pulls the array over once instead of ~2·n_edges blocking transfers.
     edges_np = np.asarray(edges)
 
+    # Landscape context: the excitation-cost spectrum picks beta under
+    # "auto" AND tells the post-draw advisor where the thermal floor of the
+    # *resolved* beta sits, so a warm draw is diagnosed as beta-limited even
+    # while its running minimum still improves. Host-side milliseconds.
+    from hamon.advisor import estimate_beta_max, excess_energy
+
+    if isinstance(beta, str) and beta != "auto":
+        raise ValueError(f"beta must be a float or 'auto', got {beta!r}")
     beta_estimate = None
-    if isinstance(beta, str):
-        if beta != "auto":
-            raise ValueError(f"beta must be a float or 'auto', got {beta!r}")
-        beta_estimate = ising_estimate_beta(biases, edges_np, weights)
-        beta = beta_estimate.beta_max
-        logger.info("beta='auto': %s", beta_estimate.summary())
+    search_context = None
+    try:
+        costs, e_scale, method = ising_excitation_costs(biases, edges_np, weights)
+        estimate = estimate_beta_max(costs, e_scale, method=method)
+        if isinstance(beta, str):
+            beta_estimate = estimate
+            beta = estimate.beta_max
+            logger.info("beta='auto': %s", estimate.summary())
+        pos = costs[costs > 1e-12]
+        if e_scale > 0 and pos.size:
+            search_context = {
+                "predicted_floor_rel": excess_energy(pos, float(beta)) / e_scale,
+                "estimator_beta": estimate.beta_max,
+            }
+    except ValueError:
+        if isinstance(beta, str):
+            raise  # "auto" needs a cost spectrum; plain draws don't
 
     # --- degenerate model checks ---
     if edges_np.shape[0] == 0:
@@ -809,6 +828,7 @@ def ising_sample(
         beta_range=(0.0, float(beta)),
         target_acceptance=target_acceptance,
         max_chains=max_chains,
+        search_context=search_context,
         device=device,
     )
 

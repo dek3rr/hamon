@@ -184,6 +184,9 @@ class NRPTPlan:
     _window_stats: list = field(default_factory=list)
     _last_steps: int = 1
     last_advice: Any = None
+    # Optional landscape context for the advisor (e.g. from the Ising cost
+    # spectrum): {"predicted_floor_rel": float, "estimator_beta": float}.
+    search_context: dict | None = None
 
     def sample(
         self,
@@ -280,11 +283,14 @@ class NRPTPlan:
         from hamon.advisor import diagnose_search
 
         energy = np.asarray(jnp.concatenate(self._energy_chunks))
+        ctx = self.search_context or {}
         advice = diagnose_search(
             energy,
             stats=self._window_stats,
             report=self.report,
             cold_beta=float(np.asarray(self.betas)[-1]),
+            predicted_floor_rel=ctx.get("predicted_floor_rel"),
+            estimator_beta=ctx.get("estimator_beta"),
             warn_beta_limited=warn_beta_limited,
             log=False,
         )
@@ -509,6 +515,7 @@ def autotune(
     n_rounds: int = 1000,
     compile_cache: bool | str = True,
     pad_probes: bool | None = None,
+    search_context: dict | None = None,
     device: DeviceLike = "auto",
 ) -> NRPTPlan:
     """Autotune the full NRPT configuration: N, exploration count, and schedule.
@@ -819,6 +826,7 @@ def autotune(
         # pipeline shares one padded ladder length and varying-N draws reuse
         # the observer round loop.
         _pad_draw=(max_chains if pad_probes else None),
+        search_context=search_context,
     )
 
 

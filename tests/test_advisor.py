@@ -189,9 +189,16 @@ def test_mixing_limited_barrier_saturated_wins_over_everything():
     assert adv.should_warn
 
 
+def _plateaued(rng, T, floor=1.0, base=3.0):
+    """Trace with a single early record and a long silent tail (unique min)."""
+    e = np.abs(rng.normal(0.0, 1.0, T)) + base
+    e[3] = floor
+    return e
+
+
 def test_mixing_limited_dead_conveyor_attributes_knob():
     rng = np.random.default_rng(7)
-    e = _noise(rng, 1000)
+    e = _plateaued(rng, 2000)  # plateau + tiny floor mass -> stuck-in-basin
     # equalized ladder, ample expected trips, but none observed -> ELE knob
     stats = {
         "rejection_rates": np.full(3, 0.3),
@@ -211,10 +218,71 @@ def test_mixing_limited_dead_conveyor_attributes_knob():
     assert adv2.recommended_gibbs_steps is None
 
 
-def test_inconclusive_on_tiny_effective_sample():
+def test_dead_conveyor_with_heavy_floor_mass_is_freezeout_not_mixing():
+    # cold-β freeze-out: slow conveyor but half the draws sit on the floor —
+    # the search converged; MIXING would be a false alarm (GPU replay case)
+    rng = np.random.default_rng(70)
+    e = np.where(rng.random(2000) < 0.5, -10.0, -9.0)
+    e[1] = -10.0
+    stats = {
+        "rejection_rates": np.full(3, 0.3),
+        "n_rounds": 5000,
+        "total_round_trips": 1,
+    }
+    adv = diagnose_search(e, stats=stats, log=False)
+    assert adv.verdict is SearchVerdict.BETA_LIMITED
+    assert adv.conveyor_alive is False
+    assert any("freeze-out" in n for n in adv.notes)
+
+
+def test_inconclusive_when_tail_has_too_few_deliveries():
+    # plateaued trace, conveyor window too short to judge (conveyor None),
+    # and only ~1 delivery in the silent tail -> silence proves nothing
     rng = np.random.default_rng(8)
-    adv = diagnose_search(_noise(rng, 10), stats=_healthy_stats(), log=False)
+    e = _plateaued(rng, 300)
+    stats = {
+        "rejection_rates": np.full(3, 0.3),
+        "n_rounds": 100,  # tau_pred * 100 = 26 expected trips < 40 -> conveyor None
+        "total_round_trips": 1,
+    }
+    adv = diagnose_search(e, stats=stats, log=False)
     assert adv.verdict is SearchVerdict.INCONCLUSIVE
+    assert adv.conveyor_alive is None
+
+
+def test_inconclusive_ess_fallback_without_roundtrip_data():
+    rng = np.random.default_rng(80)
+    adv = diagnose_search(_plateaued(rng, 12), log=False)
+    assert adv.verdict is SearchVerdict.INCONCLUSIVE
+
+
+def test_drifting_trace_is_draw_limited_despite_tiny_ess():
+    # an EA-1600-like still-improving trace: records recent, ESS ~ 0 —
+    # improvement is proof enough, the ESS gate must not block it
+    rng = np.random.default_rng(9)
+    e = -0.01 * np.arange(2000) + rng.normal(0.0, 0.5, 2000)
+    adv = diagnose_search(e, stats=_healthy_stats(), log=False)
+    assert adv.verdict is SearchVerdict.DRAW_LIMITED
+
+
+def test_floor_context_overrides_draw_limited():
+    # records still arriving BUT the predicted floor at this beta is 9% of
+    # |E| — the 128-chain beta=3 replay case: go colder, not longer
+    rng = np.random.default_rng(10)
+    e = _noise(rng, 1000) + 5.0
+    e[950] = e.min() - 1.0
+    adv = diagnose_search(
+        e,
+        stats=_healthy_stats(),
+        cold_beta=3.0,
+        predicted_floor_rel=0.09,
+        estimator_beta=37.0,
+        log=False,
+    )
+    assert adv.verdict is SearchVerdict.BETA_LIMITED
+    assert adv.confidence == "high"
+    assert adv.recommended_beta == 37.0
+    assert any("colder beats going longer" in n for n in adv.notes)
 
 
 def test_frozen_trace_is_beta_limited_with_full_floor_fraction():

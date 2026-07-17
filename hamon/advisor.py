@@ -302,7 +302,11 @@ def diagnose_search(
     stats: Sequence[dict] | dict | None = None,
     report: AutotuneReport | None = None,
     cold_beta: float | None = None,
+    predicted_floor_rel: float | None = None,
+    estimator_beta: float | None = None,
     min_effective_draws: int = 30,
+    min_tail_deliveries: float = 3.0,
+    floor_alarm: float = 1e-2,
     draw_evidence: float = 1.0,
     plateau_evidence: float = 3.0,
     level_rtol: float = 1e-6,
@@ -321,19 +325,35 @@ def diagnose_search(
       windows. Optional; `report` is the fallback evidence source.
     - `report`: the :class:`hamon.AutotuneReport` of the plan (tuning-time
       mixing evidence).
+    - `predicted_floor_rel` / `estimator_beta`: optional landscape context
+      (from :func:`estimate_beta_max` at the *current* β): the predicted
+      relative thermal floor and the estimator's recommended β. When the
+      floor exceeds ``floor_alarm``, "records still arriving" is overridden
+      to BETA_LIMITED — going colder beats going longer by orders of
+      magnitude when the current β's equilibrium sits far above tolerance.
     - `warn_beta_limited`: escalate a confident BETA_LIMITED verdict to
       ``logger.warning``. Off by default — sampling at the requested β is
       working-as-designed unless the caller declared a search intent
       (``extend`` / ``sample_until`` set this).
 
-    Decision order: mixing gates (structural, then dynamical) → effective
-    draw count → record statistics of the running minimum. The record test
-    uses ``x = ln(T/(r_last+1))``: under the stationary "still improving"
-    null, records arrive with hazard ``1/t``, so ``x`` is the expected number
-    of records after the last observed one — small ``x`` means the silence is
-    uninformative (DRAW_LIMITED), large ``x`` means the floor is real
-    (BETA_LIMITED). ``x`` is invariant under uniform thinning, so no
-    autocorrelation correction is applied to the ratio itself.
+    Decision order (v2, recalibrated on the RL4Ising GPU replays):
+
+    1. A saturated ladder (``barrier_is_identified`` False) is MIXING_LIMITED
+       outright — structural, nothing downstream is trustworthy.
+    2. Recent records (``x = ln(T/(r_last+1)) < draw_evidence``) mean draws
+       are still paying → DRAW_LIMITED — unless the landscape context says
+       the thermal floor at this β is ≫ tolerance (BETA override above).
+       Record recency is checked *before* any effective-sample gate: a
+       drifting trace has ~zero ESS precisely because it is improving.
+    3. A silent tail only establishes a plateau if enough conveyor *deliveries*
+       occurred in it: at cold β records arrive per round trip, not per
+       draw, so fewer than ``min_tail_deliveries`` expected deliveries since
+       the last record → INCONCLUSIVE (ESS is the fallback gate when no
+       round-trip data exists).
+    4. An established plateau with a dead conveyor AND little mass at the
+       minimum (< 25%) means stuck-in-a-basin → MIXING_LIMITED. A dead-slow
+       conveyor with heavy floor mass is cold-β freeze-out — expected during
+       ground-state search — and stays a note on the BETA/converged verdict.
     """
     e = np.asarray(energy_trace, dtype=np.float64).ravel()
     T = int(e.size)
@@ -426,15 +446,61 @@ def diagnose_search(
             (logger.warning if adv.should_warn else logger.info)(adv.summary())
         return adv
 
-    if barrier is False or conveyor is False:
+    # 1. saturated ladder: structural failure, absolute
+    if barrier is False:
         return _advice(
             SearchVerdict.MIXING_LIMITED,
             "high",
             recommended_n_chains=rec_chains,
-            recommended_gibbs_steps=rec_gibbs,
         )
 
-    if ess < min_effective_draws:
+    floor_high = predicted_floor_rel is not None and predicted_floor_rel > floor_alarm
+
+    # 2. recent records: draws are demonstrably paying (checked before any
+    # effective-sample gate — a drifting trace has ~zero ESS by construction)
+    if x < draw_evidence:
+        if floor_high:
+            adv = _advice(
+                SearchVerdict.BETA_LIMITED, "high", recommended_beta=estimator_beta
+            )
+            adv.notes.append(
+                f"records are still arriving, but the predicted thermal floor at "
+                f"beta={cold_beta} is {predicted_floor_rel:.2g} of |E| — far above "
+                f"tolerance; going colder beats going longer"
+            )
+            return adv
+        return _advice(
+            SearchVerdict.DRAW_LIMITED,
+            "high" if x < 0.5 else "medium",
+            recommended_n_more=2 * T,
+        )
+
+    # 3. plateau side. A DEAD conveyor (ample expected trips, none observed)
+    # with little floor mass means stuck-in-a-basin — MIXING, and the low
+    # delivery count is itself the evidence, not a reason for doubt. A dead-
+    # slow conveyor with heavy floor mass is cold-β freeze-out (expected
+    # during ground-state search) and falls through to BETA with a note.
+    if conveyor is False:
+        if frac_min < 0.25:
+            return _advice(
+                SearchVerdict.MIXING_LIMITED,
+                "high",
+                recommended_n_chains=rec_chains,
+                recommended_gibbs_steps=rec_gibbs,
+            )
+    elif trips is not None:
+        # otherwise a silent tail only establishes a plateau if it plausibly
+        # contained independent visits (deliveries arrive per round trip)
+        tail_deliveries = trips * (T - r_last) / max(T, 1)
+        if tail_deliveries < min_tail_deliveries:
+            adv = _advice(SearchVerdict.INCONCLUSIVE, "low")
+            adv.notes.append(
+                f"only ~{tail_deliveries:.1f} conveyor deliveries since the last "
+                f"record (< {min_tail_deliveries:g}); the silence does not yet "
+                "establish a plateau — draw more before concluding"
+            )
+            return adv
+    elif ess < min_effective_draws:
         adv = _advice(SearchVerdict.INCONCLUSIVE, "low")
         adv.notes.append(
             f"only ~{ess:.0f} effective draws (< {min_effective_draws}); "
@@ -442,22 +508,33 @@ def diagnose_search(
         )
         return adv
 
-    if x < draw_evidence:
-        return _advice(
-            SearchVerdict.DRAW_LIMITED,
-            "high" if x < 0.5 else "medium",
-            recommended_n_more=2 * T,
-        )
-
     confidence = "high" if x >= plateau_evidence else ("medium" if x >= 2.0 else "low")
-    rec_beta = None
-    if cold_beta is not None and gap is not None and gap > 0 and frac_min < 0.5:
+    rec_beta = estimator_beta if floor_high else None
+    if (
+        rec_beta is None
+        and cold_beta is not None
+        and gap is not None
+        and gap > 0
+        and frac_min < 0.5
+    ):
         # two-level Boltzmann estimate: β at which the floor level reaches
         # even odds against the next observed level, clamped to a sane band.
         est = cold_beta + float(np.log((1.0 - frac_min) / max(frac_min, 1e-12))) / gap
         rec_beta = float(np.clip(est, 1.5 * cold_beta, 10.0 * cold_beta))
     adv = _advice(SearchVerdict.BETA_LIMITED, confidence, recommended_beta=rec_beta)
-    if conveyor is None:
+    if conveyor is False:
+        knob = (
+            f"gibbs_steps_per_round -> {rec_gibbs}"
+            if rec_gibbs
+            else f"max_chains -> ~{rec_chains}"
+            if rec_chains
+            else "more exploration"
+        )
+        adv.notes.append(
+            f"the conveyor is slow (efficiency {efficiency:.2f}) — expected "
+            f"during cold-β freeze-out; if you suspect missed modes, {knob}"
+        )
+    elif conveyor is None:
         adv.notes.append(
             "round-trip rate not yet measurable in this window; the BETA verdict "
             "rests on the record statistics alone"
