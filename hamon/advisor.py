@@ -201,7 +201,7 @@ class SearchAdvice:
     effective_draws: float
     last_record_draw: int
     expected_tail_records: float  # x = ln(n_draws / (last_record_draw + 1))
-    fraction_at_min: float
+    fraction_at_min: float  # floor mass over the post-last-record tail
     energy_gap: float | None  # min -> next distinct observed level
     cold_beta: float | None
     barrier_identified: bool | None = None
@@ -222,7 +222,7 @@ class SearchAdvice:
             f"  min E = {self.min_energy:.6g} at draw {self.argmin_draw}/{self.n_draws} "
             f"(last record at {self.last_record_draw}; "
             f"~{self.expected_tail_records:.2f} records expected since, "
-            f"{self.fraction_at_min:.1%} of draws at min)"
+            f"{self.fraction_at_min:.1%} of post-record draws at min)"
         )
         if self.verdict is SearchVerdict.DRAW_LIMITED and self.recommended_n_more:
             lines.append(
@@ -368,7 +368,10 @@ def diagnose_search(
     e_min = float(e[argmin])
     scale = max(abs(e_min), 1.0)
     at_min = np.isclose(e, e_min, rtol=level_rtol, atol=level_rtol * scale)
-    frac_min = float(at_min.mean())
+    # Floor mass over the POST-record tail only: draws before the last record
+    # predate the current minimum's discovery and would dilute the occupancy
+    # of a floor found late in a long (e.g. extended) session.
+    frac_min = float(at_min[r_last:].mean())
     above = e[~at_min]
     gap = float(above.min() - e_min) if above.size else None
     ess = float(_ess_1d(e))

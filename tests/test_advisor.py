@@ -235,6 +235,25 @@ def test_dead_conveyor_with_heavy_floor_mass_is_freezeout_not_mixing():
     assert any("freeze-out" in n for n in adv.notes)
 
 
+def test_floor_mass_is_measured_over_post_record_tail():
+    # A session that found its floor at draw 800 of 3000 and then sat on it
+    # 30% of the time: whole-trace mass (22%) would read stuck-in-a-basin
+    # (< 25% -> MIXING) but the post-record tail (30%) shows freeze-out
+    # convergence — the sample_until GPU-replay artifact.
+    tail = np.where(np.arange(2200) % 10 < 3, -10.0, -9.5)
+    e = np.concatenate([[-8.0], np.full(799, -9.0), tail])
+    stats = {
+        "rejection_rates": np.full(3, 0.3),
+        "n_rounds": 5000,
+        "total_round_trips": 1,  # dead-slow conveyor
+    }
+    adv = diagnose_search(e, stats=stats, log=False)
+    assert adv.last_record_draw == 800
+    assert np.isclose(adv.fraction_at_min, 0.3, atol=0.01)  # tail, not 660/3000
+    assert adv.verdict is SearchVerdict.BETA_LIMITED  # freeze-out, not MIXING
+    assert any("freeze-out" in n for n in adv.notes)
+
+
 def test_inconclusive_when_tail_has_too_few_deliveries():
     # plateaued trace, conveyor window too short to judge (conveyor None),
     # and only ~1 delivery in the silent tail -> silence proves nothing
