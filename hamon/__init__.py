@@ -38,6 +38,7 @@ from .factor import WeightedFactor as WeightedFactor
 from .interaction import InteractionGroup as InteractionGroup
 from .observers import AbstractNRPTObserver as AbstractNRPTObserver
 from .observers import AbstractObserver as AbstractObserver
+from .observers import ColdChainObserver as ColdChainObserver
 from .observers import MomentAccumulatorObserver as MomentAccumulatorObserver
 from .observers import NRPTEnergyObserver as NRPTEnergyObserver
 from .observers import NRPTStateObserver as NRPTStateObserver
@@ -61,6 +62,11 @@ from .autotune import autotune as autotune
 from .autotune import autosample as autosample
 from .autotune import NRPTPlan as NRPTPlan
 from .autotune import AutotuneReport as AutotuneReport
+from .advisor import BetaEstimate as BetaEstimate
+from .advisor import SearchAdvice as SearchAdvice
+from .advisor import SearchVerdict as SearchVerdict
+from .advisor import diagnose_search as diagnose_search
+from .advisor import estimate_beta_max as estimate_beta_max
 from .round_trips import round_trip_summary as round_trip_summary
 from .round_trips import recommend_n_chains as recommend_n_chains
 from .round_trips import thermodynamic_integration as thermodynamic_integration
@@ -77,5 +83,7 @@ from .dynamic_blocks import classify_nodes as classify_nodes
 
 from . import diagnostics as diagnostics
 from .models.ising import ising_sample as ising_sample
+from .models.ising import ising_estimate_beta as ising_estimate_beta
+from .models.ising import ising_excitation_costs as ising_excitation_costs
 
 __version__ = importlib.metadata.version("hamon")

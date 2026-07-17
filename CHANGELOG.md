@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Ground-state-search support: fast β estimation, a post-draw advisor, and
+  continuable draws.** Users who sample to *minimize* energy previously had to
+  guess the cold β and could not tell whether a disappointing minimum needed a
+  colder ladder, more draws, or a mixing fix. Three additions close that gap:
+
+  - `hamon.estimate_beta_max` / `hamon.ising_estimate_beta` /
+    `ising_sample(..., beta="auto")` pick the coldest useful β **before**
+    tuning, from an excitation-cost spectrum of the landscape: exact
+    (`c_i = 2|J_i|` per bond) on field-free forests, greedy-descent probe
+    (per-site min of `2|local field|` over 64 replicas) elsewhere — host-side
+    milliseconds, zero compiles, one autotune at the final range. The
+    selection rule is an **equilibrium-excess tolerance**: smallest β with
+    `Σ c_i/(1+e^{β c_i}) ≤ gap_tol·|E_GS|` (default `gap_tol=1e-3`). A
+    GS-occupancy target was rejected: near-zero soft-mode costs (real in any
+    loopy/frustrated landscape) push it to β → ∞ while contributing nothing
+    to the energy gap, whereas the excess is self-regularizing (`c·p ≤ c/2`).
+    Calibrated on a private RL4Ising-benchmark study against certified exact
+    ground states: the rule reproduced the empirically-derived β on every
+    family (1-D chains 32–128, toroidal 2-D glasses 16–256, open EA
+    100–1600), and its companion closed form
+    `Λ(β) = ∫₀^β σ_E/√π db` (`σ_E² = Σ c²p(1−p)`) matched hamon's measured
+    communication barrier within 1–6% — Λ saturates in β, so erring cold is
+    nearly free in chains, while erring warm is catastrophic (a β=3 draw on a
+    128-spin chain plateaus 1.5% above the ground state).
+
+  - `hamon.diagnose_search` classifies a finished draw as `MIXING_LIMITED`
+    (existing gates: saturated ladder / dead conveyor, with the
+    `efficiency_limiter` knob attribution), `DRAW_LIMITED`, `BETA_LIMITED`,
+    or `INCONCLUSIVE`, via record statistics of the cold chain's running
+    minimum: with `x = ln(T/(r_last+1))` (the expected number of records
+    after the last observed one under the 1/t record law — thinning
+    invariant), `x < 1` means the silence is uninformative (draw more),
+    `x ≥ 3` means the floor is real at this β (p ≈ e⁻³ under the
+    still-improving null). Tempered draws now record the cold chain's base
+    energy each round (`ColdChainObserver`, masking-safe) and track round
+    trips, so every `NRPTPlan.sample` attaches a `SearchAdvice` to
+    `report.search_advice` (and `ising_sample` to
+    `diagnostics["search_advice"]`). Confident MIXING/DRAW verdicts warn;
+    BETA warns only from the explicit search paths below (sampling at the
+    requested β is otherwise working-as-designed). Freeze-out caveat, from
+    the same study: equilibrium GS occupancy does *not* predict exact-hit
+    rates at large n (conveyor-delivered states quench before equilibrating
+    at the coldest rungs), so the advisor reports occupancy as rationale
+    only and treats the residual gap as a draw-budget problem.
+
+  - `NRPTPlan.extend(key, n_more)` continues a tempered draw from its
+    retained final ladder — no re-autotune, no re-warmup, no retrace at a
+    repeated size (`nrpt` re-ingests its own stacked device-side return) —
+    and `NRPTPlan.sample_until(key, chunk=512, patience=3, ...)` loops
+    extensions until the running minimum stops improving, the budget or a
+    `target_energy` is reached, or a confident MIXING verdict makes further
+    draws pointless. Bit-identical under chain masking (padded and unpadded
+    sessions agree exactly), and the per-window round-trip tallies are
+    pooled exactly across extensions for the advisor's mixing gates.
+
+  `AutotuneReport` gains `rejection_rates`, `search_advice`, and
+  `beta_estimate` (all defaulted; existing fields unchanged), and the
+  `ising_sample` diagnostics dict gains the `beta_estimate` and
+  `search_advice` keys.
+
 ## [0.10.0] — 2026-07-16
 
 ### Added

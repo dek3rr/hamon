@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import warnings
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import jax
@@ -66,6 +66,12 @@ class AutotuneReport:
             production run (summed across chains), or ``None``.
         production_rounds: number of rounds the production run used (the window
             ``total_round_trips`` and ``tau_observed`` were measured over).
+        rejection_rates: per-pair swap rejection rates of the production run
+            (the input to :func:`hamon.round_trips.barrier_is_identified`).
+        search_advice: the latest :class:`hamon.SearchAdvice` computed after a
+            tempered draw on this plan, or ``None``.
+        beta_estimate: the :class:`hamon.BetaEstimate` that chose this run's
+            cold β (``beta="auto"`` paths), or ``None``.
     """
 
     n_chains: int
@@ -78,6 +84,9 @@ class AutotuneReport:
     round_trip_diagnostics: dict | None
     total_round_trips: int | None = None
     production_rounds: int | None = None
+    rejection_rates: np.ndarray | None = None
+    search_advice: Any = None
+    beta_estimate: Any = None
 
     def summary(self) -> str:
         """Human-readable multi-line summary."""
@@ -111,6 +120,10 @@ class AutotuneReport:
                 f"tau_pred={float(rt['tau_predicted']):.4f}  "
                 f"efficiency={float(rt['efficiency']):.3f}"
             )
+        if self.beta_estimate is not None:
+            lines.append(f"  {self.beta_estimate.summary()}")
+        if self.search_advice is not None:
+            lines.append("  " + self.search_advice.summary().replace("\n", "\n  "))
         return "\n".join(lines)
 
 
@@ -161,6 +174,16 @@ class NRPTPlan:
     # this length and reads the cold chain at a traced live index, so draws at
     # different discovered N share one compiled observer round loop.
     _pad_draw: int | None = None
+    # --- search-session state (populated by tempered draws) ---------------
+    # The final ladder of the most recent tempered draw (device-side, stacked)
+    # so extend() can continue exactly where the draw stopped, plus the
+    # accumulated cold-chain energy trace and per-window mixing tallies that
+    # feed the ground-state-search advisor.
+    _last_ladder: list | None = None
+    _energy_chunks: list = field(default_factory=list)
+    _window_stats: list = field(default_factory=list)
+    _last_steps: int = 1
+    last_advice: Any = None
 
     def sample(
         self,
@@ -200,42 +223,201 @@ class NRPTPlan:
             )
         return self._sample_cold_gibbs(key, n_samples, n_warmup, steps_per_sample)
 
-    def _sample_tempered(
-        self, key: jax.Array, n_samples: int, n_warmup: int, steps_per_sample: int
-    ) -> jax.Array:
-        from hamon.nrpt import nrpt
-        from hamon.observers import ColdIndexObserver, NRPTStateObserver
+    def _run_tempered(
+        self, key: jax.Array, n_total: int, *, init_ladder: list | None = None
+    ) -> tuple[jax.Array, jax.Array, list, dict]:
+        """One tempered NRPT window; returns (state_trace, energy_trace, ladder, stats).
 
-        steps = max(1, steps_per_sample)
-        n_total = n_warmup + n_samples * steps
+        The final ladder comes back in ``nrpt``'s stacked device form, which
+        ``nrpt`` re-ingests directly — that is what makes :meth:`extend` a
+        true warm restart with no host round-trip.
+        """
+        from hamon.nrpt import nrpt
+        from hamon.observers import ColdChainObserver
+
         dev = self.device if self.device is not None else "auto"
         ebms, programs = self._source.nrpt_args(self._betas_dev)
         # Chain-masked draw: read the live cold chain (index n_chains-1) via
         # a traced index — bit-identical to the unpadded draw since threefry
         # streams are prefix-stable. pad=None keeps the static -1 observer.
         pad = self._pad_draw
-        observer = (
-            ColdIndexObserver(self.n_chains - 1)
-            if pad is not None
-            else NRPTStateObserver(chain_indices=(-1,))
-        )
-        _, stats = nrpt(
+        observer = ColdChainObserver(self.n_chains - 1 if pad is not None else None)
+        ladder, stats = nrpt(
             key,
             ebms,
             programs,
-            self._warm_ladder,
+            init_ladder if init_ladder is not None else self._warm_ladder,
             self._clamp_state,
             n_total,
             self.gibbs_steps_per_round,
             betas=self._betas_dev,
-            track_round_trips=False,
+            track_round_trips=True,
             observer=observer,
             device=dev,
             pad_chains_to=pad,
+            _return_stacked=True,
         )
-        trace = _cold_trace_from_observations(stats["observations"], self._col_perm)
-        # Discard warmup, thin by steps_per_sample, keep exactly n_samples rows.
+        obs = stats["observations"]
+        trace = _cold_trace_from_observations(obs["states"], self._col_perm)
+        return trace, obs["energy"], ladder, stats
+
+    @staticmethod
+    def _window_dict(stats: dict, n_rounds: int) -> dict:
+        """Host-side per-window mixing tallies for the search advisor."""
+        rtd = stats.get("round_trip_diagnostics")
+        trips = (
+            int(np.sum(np.asarray(rtd["round_trips_per_chain"])))
+            if rtd is not None
+            else 0
+        )
+        return {
+            "rejection_rates": np.asarray(stats["rejection_rates"]),
+            "n_rounds": int(n_rounds),
+            "total_round_trips": trips,
+        }
+
+    def _compute_advice(self, *, warn_beta_limited: bool):
+        from hamon.advisor import diagnose_search
+
+        energy = np.asarray(jnp.concatenate(self._energy_chunks))
+        advice = diagnose_search(
+            energy,
+            stats=self._window_stats,
+            report=self.report,
+            cold_beta=float(np.asarray(self.betas)[-1]),
+            warn_beta_limited=warn_beta_limited,
+            log=False,
+        )
+        # Emit once per verdict change, not once per chunk — sample_until
+        # recomputes after every extension and an unchanged verdict is noise.
+        prev = self.last_advice
+        changed = (
+            prev is None
+            or prev.verdict != advice.verdict
+            or prev.confidence != advice.confidence
+        )
+        if changed:
+            (logger.warning if advice.should_warn else logger.info)(advice.summary())
+        else:
+            logger.debug(advice.summary())
+        self.last_advice = advice
+        if self.report is not None:
+            self.report.search_advice = advice
+        return advice
+
+    def _sample_tempered(
+        self, key: jax.Array, n_samples: int, n_warmup: int, steps_per_sample: int
+    ) -> jax.Array:
+        steps = max(1, steps_per_sample)
+        n_total = n_warmup + n_samples * steps
+        trace, energy, ladder, stats = self._run_tempered(key, n_total)
+        # A fresh sample() starts a new search session: extend() continues it.
+        self._last_ladder = ladder
+        self._last_steps = steps
+        # Keep exactly the energies of the returned draws (post-warmup,
+        # thinned) — the advisor reasons about what the caller actually holds.
+        self._energy_chunks = [energy[n_warmup::steps][:n_samples]]
+        self._window_stats = [self._window_dict(stats, n_total)]
+        self._compute_advice(warn_beta_limited=False)
         return trace[n_warmup::steps][:n_samples]
+
+    def extend(
+        self,
+        key: jax.Array,
+        n_more: int,
+        *,
+        steps_per_sample: int | None = None,
+    ) -> jax.Array:
+        """Draw ``n_more`` further samples continuing from the post-draw ladder.
+
+        No re-autotune and no re-warmup: the run starts exactly where the last
+        tempered draw ended (its final ladder is retained on the plan), so
+        chasing a still-improving minimum costs only the extra rounds. The
+        accumulated cold-energy trace and pooled round-trip tallies feed the
+        search advisor; the refreshed :class:`hamon.SearchAdvice` lands on
+        ``plan.last_advice`` / ``plan.report.search_advice`` (β-verdicts warn
+        here — calling ``extend`` declares a search intent).
+
+        ``steps_per_sample`` defaults to the previous draw's value. Raises
+        ``RuntimeError`` if no tempered draw has been made on this plan
+        (``sample(tempered=False)`` draws are not continuable).
+        """
+        if self._last_ladder is None:
+            raise RuntimeError(
+                "extend() continues a tempered draw, but none has been made on "
+                "this plan — call plan.sample(key, n, tempered=True) first."
+            )
+        steps = max(1, int(steps_per_sample or self._last_steps))
+        n_total = int(n_more) * steps
+        trace, energy, ladder, stats = self._run_tempered(
+            key, n_total, init_ladder=self._last_ladder
+        )
+        self._last_ladder = ladder
+        self._last_steps = steps
+        self._energy_chunks.append(energy[::steps][:n_more])
+        self._window_stats.append(self._window_dict(stats, n_total))
+        self._compute_advice(warn_beta_limited=True)
+        return trace[::steps][:n_more]
+
+    def sample_until(
+        self,
+        key: jax.Array,
+        *,
+        chunk: int = 512,
+        max_total: int | None = None,
+        patience: int = 3,
+        target_energy: float | None = None,
+        n_warmup: int = 0,
+        steps_per_sample: int = 1,
+    ) -> tuple[jax.Array, Any]:
+        """Sample/extend in fixed-size chunks until the running min stops improving.
+
+        Stops when `patience` consecutive chunks set no new record; when the
+        total reaches ``max_total`` (default ``16 * chunk``); when the minimum
+        reaches ``target_energy``; or when the advisor returns a confident
+        MIXING_LIMITED verdict (drawing more cannot help a broken conveyor).
+        The fixed chunk size means every iteration reuses one compiled round
+        loop. Returns ``(samples, advice)`` with all chunks concatenated.
+
+        The default ``patience=3`` waits three silent chunks — roughly one
+        e-folding of the 1/t record law at the default chunk size — before
+        concluding the floor is real.
+        """
+        from hamon.advisor import SearchVerdict
+
+        max_total = int(max_total) if max_total is not None else 16 * chunk
+        chunks: list[jax.Array] = []
+        best = np.inf
+        silent = 0
+        total = 0
+        while total < max_total:
+            key, k = jax.random.split(key)
+            if not chunks:
+                draw = self.sample(
+                    k, chunk, n_warmup=n_warmup, steps_per_sample=steps_per_sample
+                )
+            else:
+                draw = self.extend(k, chunk)
+            chunks.append(draw)
+            total += chunk
+            new_min = float(np.asarray(self._energy_chunks[-1]).min())
+            if new_min < best - 1e-12:
+                best = new_min
+                silent = 0
+            else:
+                silent += 1
+            advice = self.last_advice
+            if target_energy is not None and best <= target_energy:
+                break
+            if silent >= patience:
+                break
+            if (
+                advice is not None
+                and advice.verdict is SearchVerdict.MIXING_LIMITED
+                and advice.confidence in ("medium", "high")
+            ):
+                break
+        return jnp.concatenate(chunks, axis=0), self.last_advice
 
     def _sample_cold_gibbs(
         self,
@@ -616,6 +798,7 @@ def autotune(
         round_trip_diagnostics=rt_diag,
         total_round_trips=total_round_trips,
         production_rounds=n_rounds,
+        rejection_rates=np.asarray(polish_stats["rejection_rates"]),
     )
     return NRPTPlan(
         n_chains=n_chains,

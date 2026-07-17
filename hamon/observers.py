@@ -415,6 +415,49 @@ class ColdIndexObserver(AbstractNRPTObserver):
         return None, [s[i][None] for s in stacked_states]
 
 
+class ColdChainObserver(AbstractNRPTObserver):
+    """Record the cold chain's state AND base energy each round.
+
+    Powers the ground-state-search advisor (:func:`hamon.diagnose_search`):
+    the per-round energy trace costs nothing extra to record — ``nrpt`` hands
+    every observer the post-swap ``base_energies`` anyway.
+
+    ``idx=None`` reads the static ``-1`` tail position (unpadded draws);
+    an integer ``idx`` is traced like :class:`ColdIndexObserver` (the live
+    cold chain at absolute position ``n_chains - 1`` of a padded ladder) and
+    is masking-safe.
+
+    Observation: ``{"states": [(1, ...) per free block], "energy": ()}``,
+    scan-stacked to ``{"states": [(n_rounds, 1, ...)], "energy": (n_rounds,)}``.
+    The energy is the UNSCALED base energy (``E_beta = beta * E_base``); in
+    affine/``ebm_ref0`` mode it is the swap-path Δ = E₁ − E₀, not E₁.
+    """
+
+    idx: Array | None  # None => static -1; else traced live position
+
+    def __init__(self, idx: int | Array | None = None):
+        self.idx = None if idx is None else jnp.asarray(idx, dtype=jnp.int32)
+
+    @property
+    def masking_safe(self) -> bool:
+        # The traced-index form reads only the caller-supplied live position;
+        # the static -1 form would read the padding tail, so it is not safe.
+        return self.idx is not None
+
+    def __call__(
+        self,
+        stacked_states: list[Array],
+        base_energies: Array,
+        round_idx: Int[Array, ""],
+        carry: None,
+    ) -> tuple[None, dict]:
+        i = -1 if self.idx is None else self.idx
+        return None, {
+            "states": [s[i][None] for s in stacked_states],
+            "energy": base_energies[i],
+        }
+
+
 class NRPTEnergyObserver(AbstractNRPTObserver):
     r"""Accumulate per-chain mean base energy μ(β_i) = E[V^(β_i)] for
     thermodynamic integration of the log normalizing constant.

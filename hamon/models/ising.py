@@ -570,13 +570,125 @@ def _ising_graph(n: int, edges_np: np.ndarray):
     return _fifo_cache(_GRAPH_CACHE, 8, key, build)
 
 
+def _is_forest(n: int, edges_np: np.ndarray) -> bool:
+    """Union-find acyclicity check on the coupling graph."""
+    parent = list(range(n))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    for u, v in edges_np.tolist():
+        ru, rv = find(int(u)), find(int(v))
+        if ru == rv:
+            return False
+        parent[ru] = rv
+    return True
+
+
+def _descent_probe(
+    biases_np: np.ndarray,
+    edges_np: np.ndarray,
+    weights_np: np.ndarray,
+    *,
+    n_replicas: int = 64,
+    seed: int = 0,
+) -> tuple[np.ndarray, float]:
+    """Excitation costs from greedy descents: (per-site min 2|local field|, best E).
+
+    Vectorized over replicas; sweep-style descent with a random half-mask per
+    iteration (avoids two-spin flip oscillations), forcing the single best
+    flip for replicas the mask left empty. Host-side numpy — milliseconds,
+    no jit involvement.
+    """
+    rng = np.random.default_rng(seed)
+    n = biases_np.shape[0]
+    ea, eb = edges_np[:, 0], edges_np[:, 1]
+    s = rng.choice([-1.0, 1.0], size=(n_replicas, n))
+
+    def local_field(s):
+        lf = np.tile(biases_np, (n_replicas, 1))
+        if len(weights_np):
+            np.add.at(lf.T, ea, (weights_np[None, :] * s[:, eb]).T)
+            np.add.at(lf.T, eb, (weights_np[None, :] * s[:, ea]).T)
+        return lf
+
+    for _ in range(10 * n):
+        lf = local_field(s)
+        gains = -2.0 * s * lf
+        improvable = gains > 1e-12
+        if not improvable.any():
+            break
+        mask = improvable & (rng.random((n_replicas, n)) < 0.5)
+        empty = improvable.any(1) & ~mask.any(1)
+        if empty.any():
+            best = np.argmax(np.where(improvable, gains, -np.inf), axis=1)
+            mask[empty, best[empty]] = True
+        s = np.where(mask, -s, s)
+    lf = local_field(s)
+    energies = -(s @ biases_np)
+    if len(weights_np):
+        energies -= (weights_np[None, :] * s[:, ea] * s[:, eb]).sum(1)
+    return 2.0 * np.abs(lf).min(axis=0), float(energies.min())
+
+
+def ising_excitation_costs(
+    biases, edges, weights, *, n_replicas: int = 64, seed: int = 0
+) -> tuple[np.ndarray, float, str]:
+    """Elementary excitation-cost spectrum of an Ising landscape.
+
+    Returns ``(costs, energy_scale, method)``. Field-free forests are exact:
+    bond defects are independent with cost ``2|J|`` and ``|E_GS| = Σ|J|``.
+    Anything else uses the greedy-descent probe (``2|local field|`` per-site
+    minima across replicas, energy scale = best minimum found).
+    """
+    biases_np = np.asarray(biases, dtype=np.float64)
+    weights_np = np.asarray(weights, dtype=np.float64)
+    edges_np = np.asarray(edges)
+    n = biases_np.shape[0]
+    if not biases_np.any() and _is_forest(n, edges_np):
+        return 2.0 * np.abs(weights_np), float(np.abs(weights_np).sum()), "tree-exact"
+    costs, best_e = _descent_probe(
+        biases_np, edges_np, weights_np, n_replicas=n_replicas, seed=seed
+    )
+    return costs, abs(best_e), "descent-probe"
+
+
+def ising_estimate_beta(
+    biases,
+    edges,
+    weights,
+    *,
+    gap_tol: float = 1e-3,
+    n_replicas: int = 64,
+    seed: int = 0,
+):
+    """Estimate the coldest useful β for ground-state search on an Ising model.
+
+    A thin front end over :func:`hamon.estimate_beta_max`: extracts the
+    excitation-cost spectrum (exact on field-free forests, greedy-descent
+    probe elsewhere) and selects the smallest β whose predicted equilibrium
+    excess energy is at most ``gap_tol`` of the ground-state scale. Runs on
+    the host in milliseconds — no tuning, no compiles. Returns a
+    :class:`hamon.BetaEstimate`.
+    """
+    from hamon.advisor import estimate_beta_max
+
+    costs, scale, method = ising_excitation_costs(
+        biases, edges, weights, n_replicas=n_replicas, seed=seed
+    )
+    return estimate_beta_max(costs, scale, gap_tol=gap_tol, method=method)
+
+
 def ising_sample(
     biases: Shaped[Array, " n"],
     edges: Shaped[Array, "m 2"],
     weights: Shaped[Array, " m"],
     *,
     key: Key[Array, ""],
-    beta: float = 1.0,
+    beta: float | str = 1.0,
     n_samples: int = 1000,
     n_warmup: int = 500,
     steps_per_sample: int = 1,
@@ -606,7 +718,13 @@ def ising_sample(
         edges: integer index pairs of shape ``(m, 2)``.
         weights: per-edge coupling of shape ``(m,)``.
         key: JAX PRNG key.
-        beta: inverse temperature for the target distribution.
+        beta: inverse temperature for the target distribution, or ``"auto"``
+            to choose it for ground-state search: the excitation-cost spectrum
+            of the landscape (exact on field-free forests, greedy-descent
+            probe elsewhere) picks the smallest β whose predicted equilibrium
+            excess energy is ≤ 0.1% of the ground-state scale — see
+            :func:`ising_estimate_beta`. The estimate and its rationale are
+            returned under ``diagnostics["beta_estimate"]``.
         n_samples: number of samples to return.
         n_warmup: warmup steps before collecting samples.
         steps_per_sample: Gibbs sweeps between recorded samples.
@@ -635,6 +753,14 @@ def ising_sample(
     # Graph construction indexes every edge endpoint on the host; np.asarray
     # pulls the array over once instead of ~2·n_edges blocking transfers.
     edges_np = np.asarray(edges)
+
+    beta_estimate = None
+    if isinstance(beta, str):
+        if beta != "auto":
+            raise ValueError(f"beta must be a float or 'auto', got {beta!r}")
+        beta_estimate = ising_estimate_beta(biases, edges_np, weights)
+        beta = beta_estimate.beta_max
+        logger.info("beta='auto': %s", beta_estimate.summary())
 
     # --- degenerate model checks ---
     if edges_np.shape[0] == 0:
@@ -686,6 +812,9 @@ def ising_sample(
         device=device,
     )
 
+    if beta_estimate is not None:
+        report.beta_estimate = beta_estimate
+
     mean_spins = float(jnp.mean(jnp.sum(samples, axis=1).astype(jnp.float32)))
     diagnostics = {
         "n_chains": report.n_chains,
@@ -696,5 +825,7 @@ def ising_sample(
         "device": report.device,
         "round_trip_diagnostics": report.round_trip_diagnostics,
         "report": report,
+        "beta_estimate": beta_estimate,
+        "search_advice": report.search_advice,
     }
     return samples, diagnostics
