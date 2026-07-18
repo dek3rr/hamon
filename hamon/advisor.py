@@ -12,26 +12,20 @@ Two host-side, model-agnostic tools for users who sample to *minimize* energy
 
 Both operate on plain numpy scalars/arrays; nothing here touches jit.
 
-Calibration (2026-07 study on the RL4Ising benchmark families, where exact
-ground states are certifiable):
+Design notes:
 
-- The **equilibrium excess energy** of an independent-defect spectrum,
-  ``⟨E⟩ − E_GS = Σ_i c_i·p_i(β)`` with ``p_i = 1/(1+e^{β c_i})``, predicts the
-  observed min-over-draws floor within a small factor (within 25% at cold β).
-  Selecting the smallest β whose predicted relative excess is below ``gap_tol``
-  reproduced the empirically-derived good β on every family tested (1-D chains
-  32-128, toroidal 2-D glasses 16-256, open EA 100-1600).
-- A **ground-state-occupancy** target is the wrong selector on loopy graphs:
-  near-zero-cost soft modes push it to β → ∞ while contributing nothing to the
+- The β selector uses the **equilibrium excess energy** of an
+  independent-defect spectrum, ``⟨E⟩ − E_GS = Σ_i c_i·p_i(β)`` with
+  ``p_i = 1/(1+e^{β c_i})`` — not a ground-state-occupancy target, which is
+  driven to β → ∞ by near-zero-cost soft modes that contribute nothing to the
   energy gap. The excess is self-regularizing (``c·p ≤ c/2``).
-- ``Λ(β) = ∫₀^β σ_E(b)/√π db`` with ``σ_E²= Σ c²p(1−p)`` matched the measured
-  communication barrier within 1-6% on chains, and its saturation in β means
-  overshooting β_max costs almost no extra chains — err cold, never warm.
+- ``Λ(β) = ∫₀^β σ_E(b)/√π db`` (``σ_E² = Σ c²p(1−p)``) estimates the
+  communication barrier and saturates in β, so overshooting β_max costs few
+  extra chains — err cold, never warm.
 - Equilibrium occupancy does NOT predict exact-hit rates at large n (conveyor
   freeze-out: delivered states quench before equilibrating at the coldest
-  rungs), so this module reports occupancy as rationale but never promises
-  hit probabilities; closing the residual gap is the job of more draws
-  (:meth:`hamon.NRPTPlan.extend`), which :func:`diagnose_search` detects.
+  rungs), so this module reports occupancy as rationale only; closing the
+  residual gap is the job of more draws (:meth:`hamon.NRPTPlan.extend`).
 """
 
 from __future__ import annotations
@@ -336,7 +330,7 @@ def diagnose_search(
       working-as-designed unless the caller declared a search intent
       (``extend`` / ``sample_until`` set this).
 
-    Decision order (v2, recalibrated on the RL4Ising GPU replays):
+    Decision order:
 
     1. A saturated ladder (``barrier_is_identified`` False) is MIXING_LIMITED
        outright — structural, nothing downstream is trustworthy.
@@ -478,11 +472,9 @@ def diagnose_search(
             recommended_n_more=2 * T,
         )
 
-    # 3. plateau side. A DEAD conveyor (ample expected trips, none observed)
-    # with little floor mass means stuck-in-a-basin — MIXING, and the low
-    # delivery count is itself the evidence, not a reason for doubt. A dead-
-    # slow conveyor with heavy floor mass is cold-β freeze-out (expected
-    # during ground-state search) and falls through to BETA with a note.
+    # 3. plateau side. A dead conveyor with little floor mass is stuck-in-a-
+    # basin (MIXING); with heavy floor mass it is cold-β freeze-out, which
+    # falls through to a BETA verdict with a note.
     if conveyor is False:
         if frac_min < 0.25:
             return _advice(

@@ -10,68 +10,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Ground-state-search support: fast β estimation, a post-draw advisor, and
-  continuable draws.** Users who sample to *minimize* energy previously had to
-  guess the cold β and could not tell whether a disappointing minimum needed a
-  colder ladder, more draws, or a mixing fix. Three additions close that gap:
+  continuable draws.** For users who sample to *minimize* energy rather than
+  integrate at a fixed temperature, three additions remove the guesswork
+  around how cold to go, how long to draw, and why a minimum stalled.
 
   - `hamon.estimate_beta_max` / `hamon.ising_estimate_beta` /
     `ising_sample(..., beta="auto")` pick the coldest useful β **before**
-    tuning, from an excitation-cost spectrum of the landscape: exact
-    (`c_i = 2|J_i|` per bond) on field-free forests, greedy-descent probe
-    (per-site min of `2|local field|` over 64 replicas) elsewhere — host-side
-    milliseconds, zero compiles, one autotune at the final range. The
-    selection rule is an **equilibrium-excess tolerance**: smallest β with
-    `Σ c_i/(1+e^{β c_i}) ≤ gap_tol·|E_GS|` (default `gap_tol=1e-3`). A
-    GS-occupancy target was rejected: near-zero soft-mode costs (real in any
-    loopy/frustrated landscape) push it to β → ∞ while contributing nothing
-    to the energy gap, whereas the excess is self-regularizing (`c·p ≤ c/2`).
-    Calibrated on a private RL4Ising-benchmark study against certified exact
-    ground states: the rule reproduced the empirically-derived β on every
-    family (1-D chains 32–128, toroidal 2-D glasses 16–256, open EA
-    100–1600), and its companion closed form
-    `Λ(β) = ∫₀^β σ_E/√π db` (`σ_E² = Σ c²p(1−p)`) matched hamon's measured
-    communication barrier within 1–6% — Λ saturates in β, so erring cold is
-    nearly free in chains, while erring warm is catastrophic (a β=3 draw on a
-    128-spin chain plateaus 1.5% above the ground state).
+    tuning, from an excitation-cost spectrum of the landscape (exact
+    `c_i = 2|J_i|` per bond on field-free forests, a greedy-descent probe
+    elsewhere) — host-side milliseconds, so the full NRPT config is tuned
+    once at the chosen range. The selection rule is an **equilibrium-excess
+    tolerance**: the smallest β whose predicted mean excess
+    `Σ c_i/(1+e^{β c_i})` is `≤ gap_tol·|E_GS|` (default `1e-3`). A
+    GS-occupancy target is deliberately avoided — near-zero soft-mode costs
+    push it to β → ∞ while contributing nothing to the energy gap, whereas
+    the excess is self-regularizing (`c·p ≤ c/2`). A companion closed form
+    `Λ(β) = ∫₀^β σ_E/√π db` estimates the resulting communication barrier;
+    it saturates in β, so overshooting β_max costs few extra chains.
 
-  - `hamon.diagnose_search` classifies a finished draw as `MIXING_LIMITED`
-    (existing gates: saturated ladder / dead conveyor, with the
-    `efficiency_limiter` knob attribution), `DRAW_LIMITED`, `BETA_LIMITED`,
-    or `INCONCLUSIVE`, via record statistics of the cold chain's running
-    minimum: with `x = ln(T/(r_last+1))` (the expected number of records
-    after the last observed one under the 1/t record law — thinning
-    invariant), `x < 1` means the silence is uninformative (draw more),
-    `x ≥ 3` means the floor is real at this β (p ≈ e⁻³ under the
-    still-improving null). Tempered draws now record the cold chain's base
-    energy each round (`ColdChainObserver`, masking-safe) and track round
-    trips, so every `NRPTPlan.sample` attaches a `SearchAdvice` to
-    `report.search_advice` (and `ising_sample` to
+  - `hamon.diagnose_search` classifies a finished draw as `MIXING_LIMITED`,
+    `DRAW_LIMITED`, `BETA_LIMITED`, or `INCONCLUSIVE`. Mixing uses the
+    existing barrier/conveyor gates and their `efficiency_limiter` knob
+    attribution; the draw-vs-β split uses record statistics of the cold
+    chain's running minimum (`x = ln(T/(r_last+1))`, the records still
+    expected after the last one under the 1/t hazard — small `x` means draw
+    more, large `x` means the floor is real at this β). Tempered draws now
+    record the cold chain's base energy each round (`ColdChainObserver`,
+    masking-safe) and track round trips, so every `NRPTPlan.sample` attaches
+    a `SearchAdvice` to `report.search_advice` (and `ising_sample` to
     `diagnostics["search_advice"]`). Confident MIXING/DRAW verdicts warn;
-    BETA warns only from the explicit search paths below (sampling at the
-    requested β is otherwise working-as-designed). Freeze-out caveat, from
-    the same study: equilibrium GS occupancy does *not* predict exact-hit
-    rates at large n (conveyor-delivered states quench before equilibrating
-    at the coldest rungs), so the advisor reports occupancy as rationale
-    only and treats the residual gap as a draw-budget problem.
+    BETA is quiet unless raised from an explicit search path.
 
   - `NRPTPlan.extend(key, n_more)` continues a tempered draw from its
     retained final ladder — no re-autotune, no re-warmup, no retrace at a
-    repeated size (`nrpt` re-ingests its own stacked device-side return) —
-    and `NRPTPlan.sample_until(key, chunk=512, patience_deliveries=30, ...)`
-    loops extensions until the running minimum stops improving, the budget or
-    a `target_energy` is reached. The plateau clock counts conveyor
-    **deliveries** (round trips) since the last record, not raw draws: at the
-    cold β of a ground-state search the conveyor freezes out and delivers
-    slowly, so a draw- or chunk-counted patience would abandon a still-
-    improving search after a short flat stretch — the exact regime where more
-    draws keep converting near-misses into ground-state hits (measured:
-    dropping a spurious mixing-abort took the 128-spin chain from 12/25 to
-    23/25 exact ground states at a fixed budget). A dead-slow conveyor
-    therefore runs to the budget; pair `target_energy` with a generous
-    `max_total` for an exhaustive search. Bit-identical under chain masking
-    (padded and unpadded sessions agree exactly), and the per-window
-    round-trip tallies are pooled exactly across extensions for the advisor's
-    mixing gates.
+    repeated size — and `NRPTPlan.sample_until(...)` loops extensions until
+    the running minimum stops improving, the budget, or a `target_energy` is
+    reached. The plateau clock counts conveyor **deliveries** (round trips)
+    since the last record, not raw draws: at the cold β of a search the
+    conveyor freezes out and delivers slowly, so a draw-counted patience
+    would abandon a still-improving run — a dead-slow conveyor therefore runs
+    to `max_total`. Continuations are bit-identical under chain masking and
+    pool round-trip tallies exactly for the advisor's gates.
 
   `AutotuneReport` gains `rejection_rates`, `search_advice`, and
   `beta_estimate` (all defaulted; existing fields unchanged), and the

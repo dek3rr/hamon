@@ -754,10 +754,9 @@ def ising_sample(
     # pulls the array over once instead of ~2·n_edges blocking transfers.
     edges_np = np.asarray(edges)
 
-    # Landscape context: the excitation-cost spectrum picks beta under
-    # "auto" AND tells the post-draw advisor where the thermal floor of the
-    # *resolved* beta sits, so a warm draw is diagnosed as beta-limited even
-    # while its running minimum still improves. Host-side milliseconds.
+    # The cost spectrum picks beta under "auto" and tells the advisor where the
+    # resolved beta's thermal floor sits (so a warm draw reads beta-limited even
+    # while still improving). Host-side milliseconds.
     from hamon.advisor import estimate_beta_max, excess_energy
 
     if isinstance(beta, str) and beta != "auto":

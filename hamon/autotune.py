@@ -174,11 +174,10 @@ class NRPTPlan:
     # this length and reads the cold chain at a traced live index, so draws at
     # different discovered N share one compiled observer round loop.
     _pad_draw: int | None = None
-    # --- search-session state (populated by tempered draws) ---------------
-    # The final ladder of the most recent tempered draw (device-side, stacked)
-    # so extend() can continue exactly where the draw stopped, plus the
-    # accumulated cold-chain energy trace and per-window mixing tallies that
-    # feed the ground-state-search advisor.
+    # --- search-session state (populated by tempered draws) ---
+    # Final ladder of the last tempered draw (device-side, stacked) so extend()
+    # resumes exactly where it stopped, plus the accumulated energy trace and
+    # per-window mixing tallies that feed the search advisor.
     _last_ladder: list | None = None
     _energy_chunks: list = field(default_factory=list)
     _window_stats: list = field(default_factory=list)
