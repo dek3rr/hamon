@@ -460,10 +460,9 @@ class TestEnergyFastPath(unittest.TestCase):
 
 
 class TestDegreeBucketedBlocks(unittest.TestCase):
-    """_ising_graph splits each colour into log2-degree buckets so a hub does
-    not force its whole colour to pad to the hub's degree. Splitting an
-    independent set into subsets keeps each block independent, so the target
-    distribution is unchanged."""
+    """_ising_graph splits each color into log2-degree buckets so a hub can't
+    force its whole color to pad to the hub's degree. A subset of an
+    independent set is still independent, so the target distribution holds."""
 
     def test_hub_graph_is_split_and_samples_correctly(self):
         import itertools
@@ -489,7 +488,7 @@ class TestDegreeBucketedBlocks(unittest.TestCase):
             members = sorted(node_to_idx[id(nd)] for nd in blk.nodes)
             for a, b in itertools.combinations(members, 2):
                 self.assertNotIn((a, b), eset)
-        # the hub graph must produce more blocks than colours (splitting happened)
+        # the hub graph must produce more blocks than colors (splitting happened)
         self.assertGreater(len(free_blocks), 2)
 
         # sampling matches the exact Boltzmann marginals
@@ -516,11 +515,11 @@ class TestDegreeBucketedBlocks(unittest.TestCase):
         self.assertLess(float(np.abs(exact_mag - s.mean(0)).max()), 0.03)
 
     def test_regular_graph_is_a_no_op(self):
-        # a degree-uniform ring: each colour is one bucket (no extra splitting)
+        # a degree-uniform ring: each color is one bucket (no extra splitting)
         from hamon.models.ising import _ising_graph
 
         n = 12
         edges = np.array([(i, (i + 1) % n) for i in range(n)])
         _, _, free_blocks = _ising_graph(n, edges)
-        # ring is 2-colourable and degree-uniform -> exactly 2 blocks
+        # ring is 2-colorable and degree-uniform -> exactly 2 blocks
         self.assertEqual(len(free_blocks), 2)
