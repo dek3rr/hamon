@@ -133,6 +133,26 @@ def test_costs_probe_ferromagnet_sees_domain_walls():
     assert scale <= len(edges) + 1e-12  # best-found E can't beat the true GS
 
 
+def test_costs_fall_back_to_couplings_when_probe_degenerates(monkeypatch):
+    # On highly regular graphs the descent probe minima can have a zero local
+    # field at every site (all-zero costs); the fallback must still return a
+    # usable positive spectrum so estimate_beta_max never sees an empty input.
+    import hamon.models.ising as isstandingmod
+
+    monkeypatch.setattr(
+        isstandingmod, "_descent_probe", lambda *a, **k: (np.zeros(4), -7.0)
+    )
+    edges = np.array([(0, 1), (1, 2), (2, 3), (3, 0)])  # loopy -> probe path
+    w = np.array([1.0, 2.0, 1.0, 2.0])
+    costs, scale, method = ising_excitation_costs(np.zeros(4), edges, w)
+    assert method == "coupling-fallback"
+    np.testing.assert_allclose(costs, 2.0 * np.abs(w))
+    assert scale == 7.0
+    # and it feeds a valid beta estimate rather than raising
+    est = estimate_beta_max(costs, scale)
+    assert est.beta_max > 0
+
+
 # ---------------------------------------------------------------------------
 # diagnose_search: decision tree on synthetic evidence
 # ---------------------------------------------------------------------------

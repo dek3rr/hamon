@@ -642,7 +642,10 @@ def ising_excitation_costs(
     Returns ``(costs, energy_scale, method)``. Field-free forests are exact:
     bond defects are independent with cost ``2|J|`` and ``|E_GS| = Σ|J|``.
     Anything else uses the greedy-descent probe (``2|local field|`` per-site
-    minima across replicas, energy scale = best minimum found).
+    minima across replicas, energy scale = best minimum found). On highly
+    regular graphs the probe minima can have a zero local field at every site
+    (a genuine degeneracy), leaving no positive costs; there we fall back to
+    the coupling-magnitude spectrum ``2|J|``.
     """
     biases_np = np.asarray(biases, dtype=np.float64)
     weights_np = np.asarray(weights, dtype=np.float64)
@@ -653,6 +656,8 @@ def ising_excitation_costs(
     costs, best_e = _descent_probe(
         biases_np, edges_np, weights_np, n_replicas=n_replicas, seed=seed
     )
+    if not (costs > 1e-12).any():
+        return 2.0 * np.abs(weights_np), abs(best_e), "coupling-fallback"
     return costs, abs(best_e), "descent-probe"
 
 
