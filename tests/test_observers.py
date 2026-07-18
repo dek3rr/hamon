@@ -275,3 +275,37 @@ class TestMomentAccumulatorDedup(unittest.TestCase):
         observer = MomentAccumulatorObserver([[(n1, n2)]])
         expected = jnp.argsort(observer._flat_scatter_index)
         self.assertTrue(jnp.array_equal(observer._flat_value_order, expected))
+
+
+class TestColdChainObserver(unittest.TestCase):
+    """Eager-call contract of the state+energy cold-chain observer."""
+
+    def _call(self, obs):
+        from hamon.observers import ColdChainObserver  # noqa: F401
+
+        stacked = [jnp.arange(12).reshape(4, 3), jnp.arange(8).reshape(4, 2)]
+        base_e = jnp.array([10.0, 20.0, 30.0, 40.0])
+        carry, out = obs(stacked, base_e, jnp.array(0), None)
+        return stacked, base_e, carry, out
+
+    def test_static_tail_index(self):
+        from hamon.observers import ColdChainObserver
+
+        obs = ColdChainObserver()
+        stacked, base_e, carry, out = self._call(obs)
+        self.assertIsNone(carry)
+        self.assertFalse(obs.masking_safe)
+        self.assertEqual(out["energy"], base_e[-1])
+        for got, src in zip(out["states"], stacked):
+            self.assertEqual(got.shape, (1,) + src.shape[1:])
+            self.assertTrue(jnp.array_equal(got[0], src[-1]))
+
+    def test_traced_live_index_is_masking_safe(self):
+        from hamon.observers import ColdChainObserver
+
+        obs = ColdChainObserver(2)
+        stacked, base_e, _, out = self._call(obs)
+        self.assertTrue(obs.masking_safe)
+        self.assertEqual(out["energy"], base_e[2])
+        for got, src in zip(out["states"], stacked):
+            self.assertTrue(jnp.array_equal(got[0], src[2]))

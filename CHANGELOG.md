@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Ground-state-search support: fast β estimation, a post-draw advisor, and
+  continuable draws.** For users who sample to *minimize* energy rather than
+  integrate at a fixed temperature, three additions remove the guesswork
+  around how cold to go, how long to draw, and why a minimum stalled.
+
+  - `hamon.estimate_beta_max` / `hamon.ising_estimate_beta` /
+    `ising_sample(..., beta="auto")` pick the coldest useful β **before**
+    tuning, from an excitation-cost spectrum of the landscape (exact
+    `c_i = 2|J_i|` per bond on field-free forests, a greedy-descent probe
+    elsewhere) — host-side milliseconds, so the full NRPT config is tuned
+    once at the chosen range. The selection rule is an **equilibrium-excess
+    tolerance**: the smallest β whose predicted mean excess
+    `Σ c_i/(1+e^{β c_i})` is `≤ gap_tol·|E_GS|` (default `1e-3`). A
+    GS-occupancy target is deliberately avoided — near-zero soft-mode costs
+    push it to β → ∞ while contributing nothing to the energy gap, whereas
+    the excess is self-regularizing (`c·p ≤ c/2`). A companion closed form
+    `Λ(β) = ∫₀^β σ_E/√π db` estimates the resulting communication barrier;
+    it saturates in β, so overshooting β_max costs few extra chains.
+
+  - `hamon.diagnose_search` classifies a finished draw as `MIXING_LIMITED`,
+    `DRAW_LIMITED`, `BETA_LIMITED`, or `INCONCLUSIVE`. Mixing uses the
+    existing barrier/conveyor gates and their `efficiency_limiter` knob
+    attribution; the draw-vs-β split uses record statistics of the cold
+    chain's running minimum (`x = ln(T/(r_last+1))`, the records still
+    expected after the last one under the 1/t hazard — small `x` means draw
+    more, large `x` means the floor is real at this β). Tempered draws now
+    record the cold chain's base energy each round (`ColdChainObserver`,
+    masking-safe) and track round trips, so every `NRPTPlan.sample` attaches
+    a `SearchAdvice` to `report.search_advice` (and `ising_sample` to
+    `diagnostics["search_advice"]`). Confident MIXING/DRAW verdicts warn;
+    BETA is quiet unless raised from an explicit search path.
+
+  - `NRPTPlan.extend(key, n_more)` continues a tempered draw from its
+    retained final ladder — no re-autotune, no re-warmup, no retrace at a
+    repeated size — and `NRPTPlan.sample_until(...)` loops extensions until
+    the running minimum stops improving, the budget, or a `target_energy` is
+    reached. The plateau clock counts conveyor **deliveries** (round trips)
+    since the last record, not raw draws: at the cold β of a search the
+    conveyor freezes out and delivers slowly, so a draw-counted patience
+    would abandon a still-improving run — a dead-slow conveyor therefore runs
+    to `max_total`. Continuations are bit-identical under chain masking and
+    pool round-trip tallies exactly for the advisor's gates.
+
+  `AutotuneReport` gains `rejection_rates`, `search_advice`, and
+  `beta_estimate` (all defaulted; existing fields unchanged), and the
+  `ising_sample` diagnostics dict gains the `beta_estimate` and
+  `search_advice` keys.
+
 ## [0.10.0] — 2026-07-16
 
 ### Added
