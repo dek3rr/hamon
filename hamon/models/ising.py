@@ -563,21 +563,10 @@ def _ising_graph(n: int, edges_np: np.ndarray):
         for idx in range(n):
             color_groups[coloring[idx]].append(idx)
 
-        # Split each colour by degree into log2 buckets. The block-Gibbs
-        # conditional pads every node's neighbour gather to the block's MAX
-        # degree, so one high-degree hub in a colour forces the whole colour
-        # to that width (30x wasted work on scale-free graphs; a no-op on
-        # regular lattices, where a colour is already degree-uniform). Any
-        # subset of an independent set is still independent, so splitting is
-        # exact — it only changes the update order, not the target.
-        # Split each colour by degree into log2 buckets. The block-Gibbs
-        # conditional pads every node's neighbour gather to the block's MAX
-        # degree, so one high-degree hub forces the whole colour to that width
-        # (measured 30x wasted work / ~5x slower sampling on a scale-free Gset
-        # graph). log2 buckets bound the per-block padding to ~2x and are a
-        # no-op on degree-uniform lattices (one bucket per colour). Any subset
-        # of an independent set is still independent, so this only reorders the
-        # block updates, not the target distribution.
+        # Split each color by degree into log2 buckets: the block-Gibbs
+        # conditional pads every node's neighbor gather to the block's max
+        # degree, so one hub can force a whole color to that width (measured
+        # 30x wasted work on a scale-free graph). No-op on regular lattices.
         degree = (
             np.bincount(edges_np.reshape(-1), minlength=n)
             if edges_np.size
