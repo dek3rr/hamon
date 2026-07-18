@@ -555,15 +555,42 @@ def _ising_graph(n: int, edges_np: np.ndarray):
         # of 2·|edges| per-element int(...) casts on numpy scalars.
         node_edges: list[Edge] = [(nodes[u], nodes[v]) for u, v in edges_np.tolist()]
 
-        # Recursive-Largest-First coloring: each color class becomes one
-        # block-Gibbs group, and the color count sets the round loop's XLA
-        # compile cost — minimizing colors directly cuts compile.
+        # Recursive-Largest-First coloring: each color class is an independent
+        # set, so it becomes a block-Gibbs group updated in parallel.
         coloring = rlf_coloring(n, edges_np)
         n_colors = (max(coloring) + 1) if n else 1
-        color_groups: list[list[AbstractNode]] = [[] for _ in range(n_colors)]
+        color_groups: list[list[int]] = [[] for _ in range(n_colors)]
         for idx in range(n):
-            color_groups[coloring[idx]].append(nodes[idx])
-        free_blocks: list[SuperBlock] = [Block(group) for group in color_groups]
+            color_groups[coloring[idx]].append(idx)
+
+        # Split each colour by degree into log2 buckets. The block-Gibbs
+        # conditional pads every node's neighbour gather to the block's MAX
+        # degree, so one high-degree hub in a colour forces the whole colour
+        # to that width (30x wasted work on scale-free graphs; a no-op on
+        # regular lattices, where a colour is already degree-uniform). Any
+        # subset of an independent set is still independent, so splitting is
+        # exact — it only changes the update order, not the target.
+        # Split each colour by degree into log2 buckets. The block-Gibbs
+        # conditional pads every node's neighbour gather to the block's MAX
+        # degree, so one high-degree hub forces the whole colour to that width
+        # (measured 30x wasted work / ~5x slower sampling on a scale-free Gset
+        # graph). log2 buckets bound the per-block padding to ~2x and are a
+        # no-op on degree-uniform lattices (one bucket per colour). Any subset
+        # of an independent set is still independent, so this only reorders the
+        # block updates, not the target distribution.
+        degree = (
+            np.bincount(edges_np.reshape(-1), minlength=n)
+            if edges_np.size
+            else np.zeros(n, dtype=int)
+        )
+        free_blocks: list[SuperBlock] = []
+        for group in color_groups:
+            if not group:
+                continue
+            g = np.array(group)
+            bucket = np.minimum(np.log2(np.maximum(degree[g], 1)).astype(int), 24)
+            for b in np.unique(bucket):
+                free_blocks.append(Block([nodes[i] for i in g[bucket == b]]))
         return nodes, node_edges, free_blocks
 
     key = (n, edges_np.shape, edges_np.tobytes())

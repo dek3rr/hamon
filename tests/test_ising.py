@@ -457,3 +457,70 @@ class TestEnergyFastPath(unittest.TestCase):
         e_eager = model.energy(state, bs)
         e_jit = eqx.filter_jit(model.energy)(state, bs)
         self.assertTrue(jnp.allclose(e_eager, e_jit))
+
+
+class TestDegreeBucketedBlocks(unittest.TestCase):
+    """_ising_graph splits each colour into log2-degree buckets so a hub does
+    not force its whole colour to pad to the hub's degree. Splitting an
+    independent set into subsets keeps each block independent, so the target
+    distribution is unchanged."""
+
+    def test_hub_graph_is_split_and_samples_correctly(self):
+        import itertools
+
+        from hamon.models.ising import _ising_graph
+
+        # star hub (node 0 -> all) plus a few extra edges: heterogeneous degree
+        n = 10
+        edges = np.array(
+            sorted(
+                {
+                    tuple(sorted(e))
+                    for e in [(0, j) for j in range(1, n)]
+                    + [(1, 2), (3, 4), (5, 6), (2, 7)]
+                }
+            )
+        )
+        nodes_all, _, free_blocks = _ising_graph(n, edges)
+        # every block is an independent set (no internal edge) — correctness
+        eset = {tuple(e) for e in edges}
+        node_to_idx = {id(nd): i for i, nd in enumerate(nodes_all)}
+        for blk in free_blocks:
+            members = sorted(node_to_idx[id(nd)] for nd in blk.nodes)
+            for a, b in itertools.combinations(members, 2):
+                self.assertNotIn((a, b), eset)
+        # the hub graph must produce more blocks than colours (splitting happened)
+        self.assertGreater(len(free_blocks), 2)
+
+        # sampling matches the exact Boltzmann marginals
+        rng = np.random.default_rng(0)
+        w = rng.uniform(-1, 1, len(edges))
+        b = rng.uniform(-0.5, 0.5, n)
+        beta = 0.8
+        S = np.array(list(itertools.product((-1.0, 1.0), repeat=n)))
+        en = -(S @ b + (w[None, :] * S[:, edges[:, 0]] * S[:, edges[:, 1]]).sum(1))
+        p = np.exp(-beta * (en - en.min()))
+        p /= p.sum()
+        exact_mag = (S * p[:, None]).sum(0)
+        samples, _ = ising_sample(
+            jnp.asarray(b),
+            jnp.asarray(edges),
+            jnp.asarray(w),
+            key=jax.random.key(1),
+            beta=beta,
+            n_samples=30000,
+            n_warmup=2000,
+            device="cpu",
+        )
+        s = 2.0 * np.asarray(samples).astype(float) - 1.0
+        self.assertLess(float(np.abs(exact_mag - s.mean(0)).max()), 0.03)
+
+    def test_regular_graph_is_a_no_op(self):
+        # a degree-uniform ring: each colour is one bucket (no extra splitting)
+        from hamon.models.ising import _ising_graph
+
+        n = 12
+        edges = np.array([(i, (i + 1) % n) for i in range(n)])
+        _, _, free_blocks = _ising_graph(n, edges)
+        # ring is 2-colourable and degree-uniform -> exactly 2 blocks
+        self.assertEqual(len(free_blocks), 2)
