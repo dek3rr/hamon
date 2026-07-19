@@ -539,6 +539,12 @@ def estimate_kl_grad(
 # every jitted kernel (~3.5 s of XLA at 128²).
 _GRAPH_CACHE: dict = {}
 
+# Ceiling on the log2-degree bucket index used to split color classes (see
+# _ising_graph): nodes with degree >= 2**this share the top bucket. It only
+# bounds the block count on pathological degrees (2**24 ~ 16M) and is never
+# reached by real graphs.
+_MAX_DEGREE_BUCKET = 24
+
 
 def _ising_graph(n: int, edges_np: np.ndarray):
     """(nodes, node_edges, free_blocks) for a variable graph, memoized.
@@ -577,7 +583,9 @@ def _ising_graph(n: int, edges_np: np.ndarray):
             if not group:
                 continue
             g = np.array(group)
-            bucket = np.minimum(np.log2(np.maximum(degree[g], 1)).astype(int), 24)
+            bucket = np.minimum(
+                np.log2(np.maximum(degree[g], 1)).astype(int), _MAX_DEGREE_BUCKET
+            )
             for b in np.unique(bucket):
                 free_blocks.append(Block([nodes[i] for i in g[bucket == b]]))
         return nodes, node_edges, free_blocks
