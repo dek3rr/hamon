@@ -539,6 +539,12 @@ def estimate_kl_grad(
 # every jitted kernel (~3.5 s of XLA at 128²).
 _GRAPH_CACHE: dict = {}
 
+# Ceiling on the log2-degree bucket index used to split color classes (see
+# _ising_graph): nodes with degree >= 2**this share the top bucket. It only
+# bounds the block count on pathological degrees (2**24 ~ 16M) and is never
+# reached by real graphs.
+_MAX_DEGREE_BUCKET = 24
+
 
 def _ising_graph(n: int, edges_np: np.ndarray):
     """(nodes, node_edges, free_blocks) for a variable graph, memoized.
@@ -555,15 +561,33 @@ def _ising_graph(n: int, edges_np: np.ndarray):
         # of 2·|edges| per-element int(...) casts on numpy scalars.
         node_edges: list[Edge] = [(nodes[u], nodes[v]) for u, v in edges_np.tolist()]
 
-        # Recursive-Largest-First coloring: each color class becomes one
-        # block-Gibbs group, and the color count sets the round loop's XLA
-        # compile cost — minimizing colors directly cuts compile.
+        # Recursive-Largest-First coloring: each color class is an independent
+        # set, so it becomes a block-Gibbs group updated in parallel.
         coloring = rlf_coloring(n, edges_np)
         n_colors = (max(coloring) + 1) if n else 1
-        color_groups: list[list[AbstractNode]] = [[] for _ in range(n_colors)]
+        color_groups: list[list[int]] = [[] for _ in range(n_colors)]
         for idx in range(n):
-            color_groups[coloring[idx]].append(nodes[idx])
-        free_blocks: list[SuperBlock] = [Block(group) for group in color_groups]
+            color_groups[coloring[idx]].append(idx)
+
+        # Split each color by degree into log2 buckets: the block-Gibbs
+        # conditional pads every node's neighbor gather to the block's max
+        # degree, so one hub can force a whole color to that width (measured
+        # 30x wasted work on a scale-free graph). No-op on regular lattices.
+        degree = (
+            np.bincount(edges_np.reshape(-1), minlength=n)
+            if edges_np.size
+            else np.zeros(n, dtype=int)
+        )
+        free_blocks: list[SuperBlock] = []
+        for group in color_groups:
+            if not group:
+                continue
+            g = np.array(group)
+            bucket = np.minimum(
+                np.log2(np.maximum(degree[g], 1)).astype(int), _MAX_DEGREE_BUCKET
+            )
+            for b in np.unique(bucket):
+                free_blocks.append(Block([nodes[i] for i in g[bucket == b]]))
         return nodes, node_edges, free_blocks
 
     key = (n, edges_np.shape, edges_np.tobytes())

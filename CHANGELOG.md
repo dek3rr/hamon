@@ -57,6 +57,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ising_sample` diagnostics dict gains the `beta_estimate` and
   `search_advice` keys.
 
+### Performance
+
+- **Degree-bucketed block splitting for heterogeneous graphs.** The block-Gibbs
+  conditional pads every node's neighbor gather to its block's *maximum*
+  degree, so a single high-degree hub forces its whole color class to that
+  width — on a scale-free graph (e.g. a Gset Max-Cut instance with a degree-589
+  hub) this wasted ~30x the necessary work and made sampling ~5x slower than an
+  equally sized regular graph. `_ising_graph` now splits each color into
+  log2-degree buckets, bounding the per-block padding to ~2x. Measured ~5x
+  faster sampling and ~7x lower end-to-end wall on the 7000-node Gset G63, a
+  no-op on degree-uniform lattices (one bucket per color), and correctness-
+  preserving by construction — any subset of an independent set is still
+  independent, so only the block-update order changes, not the target
+  distribution. (A sparse `segment_sum`/BCOO field was evaluated and rejected:
+  it ties the bucketed dense gather up to ~degree-20 graphs and only wins at
+  extreme density, not worth the engine change.)
+
 ## [0.10.0] — 2026-07-16
 
 ### Added
