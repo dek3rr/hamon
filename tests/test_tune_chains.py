@@ -79,6 +79,38 @@ class TestDiscoverChainCount:
         assert jnp.allclose(jnp.asarray(energy["betas"]), jnp.asarray(pilot["betas"]))
         assert len(energy["history"]) <= len(pilot["history"])
 
+    @pytest.mark.parametrize("seed_from_energy", [False, True])
+    def test_stacked_init_factory_matches_per_chain(self, seed_from_energy):
+        # A factory returning the stacked (n_chains, ...) form with the same
+        # values as the per-chain form must give bit-identical discovery, on
+        # both the pilot route and the energy-seed route (which restacks
+        # per-chain inits itself).
+        def _stacked_factory(n_chains, ebms, programs):
+            per_chain = _init_factory(n_chains, ebms, programs)
+            nb = len(per_chain[0])
+            return [
+                jnp.stack([per_chain[c][b] for c in range(n_chains)]) for b in range(nb)
+            ]
+
+        ebm = IsingEBM(_NODES, _EDGES, _BIASES, _WEIGHTS, jnp.array(1.0))
+        program = IsingSamplingProgram(ebm, _FREE_BLOCKS, [])
+        kw = dict(
+            ebm=ebm,
+            program=program,
+            clamp_state=[],
+            beta_range=(0.0, 1.0),
+            gibbs_steps_per_round=1,
+            max_chains=16,
+            rounds_per_probe=60,
+            n_tune_per_probe=2,
+            seed_from_energy=seed_from_energy,
+        )
+        a = tune_chains(jax.random.key(7), init_factory=_init_factory, **kw)
+        b = tune_chains(jax.random.key(7), init_factory=_stacked_factory, **kw)
+        assert b["n_chains"] == a["n_chains"]
+        assert np.array_equal(np.asarray(b["betas"]), np.asarray(a["betas"]))
+        assert b["Lambda"] == a["Lambda"]
+
     def test_n_star_driven_by_running_max_lambda(self):
         # On a frustrated grid the per-probe Λ̂ is biased low at low N (a coarse
         # ladder can't resolve the barrier), so N* must be driven by the running

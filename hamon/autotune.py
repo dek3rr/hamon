@@ -584,7 +584,9 @@ def autotune(
     Pass either a single template ``ebm`` + ``program`` (temperature-linear mode)
     or per-chain ``ebm_factory`` + ``program_factory``, exactly as the individual
     tuners accept. ``init_factory(n_chains, ebms, programs) -> list`` builds one
-    initial state per chain at the discovered N.
+    initial state per chain at the discovered N; returning the stacked form
+    (one array per free block, leading ``(n_chains,)`` axis) avoids a restack
+    compile — see :func:`hamon.tuning.tune_chains`.
 
     Args:
         key: PRNG key.
