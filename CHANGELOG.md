@@ -125,6 +125,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`--xla_gpu_autotune_level=1/0` was also benchmarked and has no effect on
   this workload — per-fusion autotuning is not where the compile time goes.)
 
+- **Stacked init factories: `ising_sample` now initializes chains with one
+  fixed-width `hinton_init` draw sliced to the live count**, instead of a
+  per-chain Python loop over split keys. The per-chain form paid a ~0.3 s
+  restack compile plus a per-probe-N key-split compile; a direct
+  `(n_chains,)` batch would instead recompile `hinton_init` per probe width,
+  so the factory draws at the `max_chains` ceiling once and slices — one
+  shape-stable compile total. The energy-seed path now accepts stacked
+  factory returns too, and the `tune_chains`/`autotune` docs bless the
+  stacked form for user factories. Measured (RTX 5080, 22² reference):
+  discovery true-cold 15 → 13 compiles (1.82 s → 1.55 s), wall
+  3.02 s → 2.47 s; `ising_sample` end-to-end cold ~7.9 s → ~7.5 s with
+  identical discovered (N, Λ). The init RNG stream changes (batched draw vs
+  per-chain split keys), so `ising_sample` outputs differ bitwise from
+  0.10.0 — a deliberate behavior change; statistical behavior and all
+  marginal tests are unchanged. Also measured and rejected: right-sizing
+  `max_chains` for compile (`_nrpt_rounds` compile is width-invariant —
+  1.16/1.09/1.04 s at 32/64/128 — so a lower ceiling only trims ~0.1 s of
+  execution while risking a capped Λ̂).
+
 - **Degree-bucketed block splitting for heterogeneous graphs.** The block-Gibbs
   conditional pads every node's neighbor gather to its block's *maximum*
   degree, so a single high-degree hub forces its whole color class to that

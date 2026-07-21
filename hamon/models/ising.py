@@ -839,9 +839,12 @@ def ising_sample(
     key, k_init, k_auto = jax.random.split(key, 3)
 
     def _init_factory(n_chains, ebms, programs):
+        # One stacked draw at the max_chains ceiling, sliced to the live count:
+        # a per-chain loop pays a stack compile plus a per-N key split, and a
+        # direct (n_chains,) batch recompiles hinton_init per probe width.
         fb = programs[0].gibbs_spec.free_blocks
-        keys = jax.random.split(k_init, n_chains)
-        return [hinton_init(keys[c], ebms[0], fb, ()) for c in range(n_chains)]
+        full = hinton_init(k_init, ebms[0], fb, (max_chains,))
+        return [b[:n_chains] for b in full]
 
     samples, report = autosample(
         k_auto,

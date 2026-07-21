@@ -823,8 +823,13 @@ def _estimate_barrier_energy(
             ebms_R = source.ebms_for_init(betas_R)
             programs_R = source._make_programs(ebms_R)  # with_ebm — cheap, cached
         inits = init_factory(R, ebms_R, programs_R)  # R distinct random inits
-        for blk in range(nb):
-            init_cols[blk].append(jnp.stack([inits[c][blk] for c in range(R)]))
+        # Factories may return per-chain lists or the stacked (R, ...) form.
+        if inits and not isinstance(inits[0], (list, tuple)):
+            for blk in range(nb):
+                init_cols[blk].append(inits[blk])
+        else:
+            for blk in range(nb):
+                init_cols[blk].append(jnp.stack([inits[c][blk] for c in range(R)]))
         lane_pbi.extend([programs_R[0].per_block_interactions] * R)
     init_flat = [jnp.concatenate(cols) for cols in init_cols]
     stacked_pbi = [
@@ -1186,7 +1191,12 @@ def tune_chains(
         init_factory: (n_chains, list[EBM], list[Program]) → list[init_states].
             Receives EBMs and programs so it can extract the correct
             free_blocks for initialization (block nodes must be the same
-            objects as the EBMs' nodes).
+            objects as the EBMs' nodes). May instead return the **stacked**
+            form — one array per free block with a leading ``(n_chains,)``
+            axis, e.g. ``hinton_init(key, ebm, blocks, (n_chains,))`` — which
+            avoids a per-probe restack compile; drawing at a fixed width
+            (e.g. ``max_chains``) and slicing to ``n_chains`` also keeps the
+            init compile shape-stable across probes.
         clamp_state: clamped block states
         beta_range: (β_min, β_max) for the temperature range
         gibbs_steps_per_round: Gibbs sweeps between swap attempts
