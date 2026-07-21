@@ -210,6 +210,35 @@ class TestDiagnostics:
         rate = empirical_round_trip_rate(idx_state, 0)
         assert rate == 0.0
 
+    def test_host_summary_matches_jax_implementation(self):
+        """The compile-free tuning twin reproduces the public jitted summary."""
+        import numpy as np
+
+        from hamon.round_trips import _round_trip_summary_host
+
+        idx_state = init_index_state(4)
+        idx_state["round_trips"] = jnp.array([2, 0, 1, 3])
+        idx_state["restarts"] = jnp.array([3, 1, 1, 4])
+        cases = [
+            (jnp.array([0.1, 0.2, 0.3]), jnp.linspace(0.5, 2.0, 4), 100),
+            (jnp.zeros(3), jnp.linspace(0.0, 1.0, 4), 0),
+            (jnp.array([0.0, 1.0, 0.5]), jnp.array([0.0, 0.0, 0.5, 1.0]), 7),
+        ]
+        for rej, betas, n_rounds in cases:
+            expected = round_trip_summary(idx_state, rej, betas, n_rounds)
+            actual = _round_trip_summary_host(
+                {k: np.asarray(v) for k, v in idx_state.items()},
+                np.asarray(rej),
+                np.asarray(betas),
+                n_rounds,
+            )
+            assert set(actual) == set(expected)
+            for k in expected:
+                np.testing.assert_allclose(
+                    actual[k], np.asarray(expected[k]), rtol=1e-6, atol=0.0
+                )
+                assert np.asarray(actual[k]).dtype == np.asarray(expected[k]).dtype, k
+
     def test_recommend_n_chains(self):
         n = recommend_n_chains(2.0, target_acceptance=0.6)
         assert n == 5

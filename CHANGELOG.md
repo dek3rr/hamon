@@ -57,7 +57,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ising_sample` diagnostics dict gains the `beta_estimate` and
   `search_advice` keys.
 
+### Changed
+
+- **BREAKING: `autotune` no longer takes `seed_from_energy` or `pad_probes`
+  — it chooses the discovery route itself.** On an accelerator in template
+  mode the stage-1 probes are chain-masked (padded to `max_chains`, one
+  compiled round loop for every probe) and the `max_chains` pilot is used
+  directly; on CPU or the factory route probes run unpadded and the search is
+  seeded from the energy-variance barrier instead. Measured on GPU, the
+  energy seed under masking was a net **loss** (~+55% cold wall: it compiles
+  its own `_grid_sweep` executable family to save a probe whose marginal
+  compile cost masking had already driven to ~zero). Both CPU branches are
+  measured too (planted instances, L=12–22): padding costs real compute
+  there — +19–25% cold wall at identical (bit-identical) discovery, and the
+  penalty grows with model size while the compile it saves is only ~0.35 s
+  on CPU — and the energy seed **wins big on a mixing target** (−44%: its
+  ~88-lane grid at a few hundred adaptive sweeps replaces the 128-chain
+  pilot's much larger Gibbs work, which is real compute on CPU, plus the
+  second probe's recompile). On glassy targets the seed is a certain
+  double loss: measured on planted frustrated-loop instances (L=16–32), it
+  burns its adaptive warmup to the plateau exit, fails the R̂ gate, and runs
+  the identical pilot anyway — ~+85–95% cold wall at every size tested. On
+  mixing targets the two routes are key-aligned and discover bit-identical
+  schedules; a glassy fallback's probes consume one extra key split, so
+  there N can move by ±1 within its normal probe-to-probe variability
+  (pre-existing fallback semantics, not a new behavior). Both knobs remain
+  on `hamon.tuning.tune_chains` for direct callers.
+
+- **`tune_chains` now enables the persistent compile cache by default**
+  (`compile_cache=True`, same parameter and semantics as `autotune`).
+  Discovery is compile-dominated cold, and direct `tune_chains` callers
+  previously never got the cache: every fresh process paid the full XLA
+  compile. Measured: deployed cold (populated cache) 3.9 s → **1.5 s with
+  zero compiles**. Pass `compile_cache=False` to opt out (e.g. when
+  benchmarking true cold starts).
+
+- **Probe β ladders are built with host NumPy** (`np.linspace` at the
+  canonical float dtype) instead of `jnp.linspace`. A device linspace — and
+  the device iteration deriving per-chain EBMs from it — compiled a fresh
+  executable family per ladder length. Ladder values can differ from the old
+  device linspace in the last ulp at some lengths (float64-then-round vs
+  float32 arithmetic), which measurably does not move discovery: N, the
+  probe trajectory, and Λ̂ are unchanged across sizes and seed routes, with
+  the tuned schedule bit-identical at most sizes and off by ≤1 ulp otherwise.
+  Within-version determinism is unaffected; only bitwise reproducibility of
+  schedules *across hamon versions* can shift.
+
 ### Performance
+
+- **Chain-count discovery no longer compiles per-chain-count helpers — a
+  probe at a new N compiles (nearly) nothing.** The padded `_nrpt_rounds`
+  round loop was already shared across probes, but ~20 small shape-specialized
+  executables around it were not: schedule-tuning batches sliced padded
+  states back to the live prefix and re-padded them every batch (a
+  slice/pad kernel pair per live N), swap counters, the round-trip index
+  process, and the per-probe production diagnostics all compiled per ladder
+  length, and the β ladder was padded on device. Tuning batches now carry
+  the padded state stack straight through (`nrpt` accepts stacked inits
+  already at `pad_chains_to` rows), counters and the index process are
+  fetched once and sliced on host (exact: masked padding pairs never
+  attempt), probe production stats use host twins of `_swap_rate_stats` /
+  `round_trip_summary` (public JAX paths untouched; parity-tested), and the
+  ladder is padded in NumPy. Measured on the 22² reference workload
+  (RTX 5080): true-cold 43 → 15 compiles (2.55 s → 1.82 s compile), total
+  3.94 s → 3.02 s, and the second probe's compile cost 0.29 s → ~0. The live
+  prefix is bit-identical throughout; discovery results are unchanged.
+  (`--xla_gpu_autotune_level=1/0` was also benchmarked and has no effect on
+  this workload — per-fusion autotuning is not where the compile time goes.)
 
 - **Degree-bucketed block splitting for heterogeneous graphs.** The block-Gibbs
   conditional pads every node's neighbor gather to its block's *maximum*

@@ -159,9 +159,18 @@ def test_sample_until_delivery_patience_stops_on_plateau(plan_bw):
     assert samples.shape[0] < 3200
 
 
-def test_padded_and_unpadded_sessions_bit_identical():
-    p_pad, _, _ = _make_plan(seed=4, pad_probes=True)
-    p_raw, _, _ = _make_plan(seed=4, pad_probes=False)
+def test_padded_and_unpadded_sessions_bit_identical(monkeypatch):
+    # autotune no longer exposes pad_probes; pin the internal auto-rule to
+    # exercise both paths on the CPU test device. (importlib: the package
+    # attribute `hamon.autotune` is the function, shadowing the submodule.)
+    import importlib
+
+    autotune_mod = importlib.import_module("hamon.autotune")
+
+    monkeypatch.setattr(autotune_mod, "_auto_pad_probes", lambda *a: True)
+    p_pad, _, _ = _make_plan(seed=4)
+    monkeypatch.setattr(autotune_mod, "_auto_pad_probes", lambda *a: False)
+    p_raw, _, _ = _make_plan(seed=4)
     s_pad = p_pad.sample(jax.random.key(20), 40)
     s_raw = p_raw.sample(jax.random.key(20), 40)
     np.testing.assert_array_equal(np.asarray(s_pad), np.asarray(s_raw))

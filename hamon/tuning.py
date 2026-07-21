@@ -18,17 +18,17 @@ import jax.numpy as jnp
 import numpy as np
 
 from hamon.block_sampling import BlockSamplingProgram, SamplingSchedule
-from hamon.device import DeviceLike, resolve_entry_device
+from hamon.device import (
+    DeviceLike,
+    enable_persistent_compile_cache,
+    resolve_entry_device,
+)
 from hamon.models.ebm import AbstractEBM
 from hamon.observers import AbstractNRPTObserver
 from hamon.round_trips import barrier_is_identified, conveyor_is_alive
 from hamon.nrpt import (
     _ChainSource,
-    _phase_diagnostics,
-    _pooled_lambda,
-    _swap_rate_stats,
     nrpt,
-    optimize_schedule,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,102 @@ logger = logging.getLogger(__name__)
 # Default "settled" floor for max|Δβ| (β units): a well-tuned ladder keeps
 # jittering by about this much, so a tighter value would never be reached.
 _DEFAULT_TUNE_TOL = 0.02
+
+
+def _acceptance_rate_host(accepted, attempted, dtype) -> np.ndarray:
+    """Acceptance rates for the small, host-driven tuning control loop."""
+    accepted = np.asarray(accepted)
+    attempted = np.asarray(attempted)
+    return np.divide(
+        accepted.astype(dtype),
+        np.maximum(attempted, 1).astype(dtype),
+        out=np.zeros_like(accepted, dtype=dtype),
+        where=attempted > 0,
+    )
+
+
+def _pooled_lambda_host(accepted, attempted, dtype) -> float:
+    return float(
+        np.sum(
+            np.asarray(1, dtype=dtype)
+            - _acceptance_rate_host(accepted, attempted, dtype)
+        )
+    )
+
+
+def _pchip_slopes_host(h: np.ndarray, delta: np.ndarray) -> np.ndarray:
+    """NumPy counterpart of the private JAX PCHIP tangent calculation."""
+    h0, h1 = h[:-1], h[1:]
+    d0, d1 = delta[:-1], delta[1:]
+    w1 = 2.0 * h1 + h0
+    w2 = h1 + 2.0 * h0
+    same_sign = (d0 * d1) > 0
+    safe0 = np.where(d0 == 0, 1.0, d0)
+    safe1 = np.where(d1 == 0, 1.0, d1)
+    denom = w1 / safe0 + w2 / safe1
+    interior = np.where(same_sign, (w1 + w2) / np.where(same_sign, denom, 1.0), 0.0)
+
+    def edge(hh0, hh1, m0, m1):
+        d = ((2.0 * hh0 + hh1) * m0 - hh0 * m1) / (hh0 + hh1)
+        d = np.where(np.sign(d) != np.sign(m0), 0.0, d)
+        clamp = (np.sign(m0) != np.sign(m1)) & (np.abs(d) > 3.0 * np.abs(m0))
+        return np.where(clamp, 3.0 * m0, d)
+
+    left = edge(h[0], h[1], delta[0], delta[1]).astype(delta.dtype)
+    right = edge(h[-1], h[-2], delta[-1], delta[-2]).astype(delta.dtype)
+    return np.concatenate([left[None], interior.astype(delta.dtype), right[None]])
+
+
+def _pchip_interp_host(xq: np.ndarray, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    h = np.maximum(x[1:] - x[:-1], np.finfo(x.dtype).eps)
+    delta = (y[1:] - y[:-1]) / h
+    d = _pchip_slopes_host(h, delta)
+    n = x.shape[0]
+    idx = np.clip(np.searchsorted(x, xq, side="right") - 1, 0, n - 2)
+    hx = h[idx]
+    t = (xq - x[idx]) / hx
+    t2 = t * t
+    t3 = t2 * t
+    return (
+        (2.0 * t3 - 3.0 * t2 + 1.0) * y[idx]
+        + (t3 - 2.0 * t2 + t) * hx * d[idx]
+        + (-2.0 * t3 + 3.0 * t2) * y[idx + 1]
+        + (t3 - t2) * hx * d[idx + 1]
+    )
+
+
+def _optimize_schedule_host(rejection_rates, betas) -> np.ndarray:
+    """Host-only schedule update used by tuning's Python control loop.
+
+    This mirrors ``nrpt.optimize_schedule`` including endpoint pinning and its
+    monotone-cubic inverse.  Keeping it here avoids changing the traced public
+    helper while eliminating per-ladder XLA executables during chain discovery.
+    """
+    betas = np.asarray(betas)
+    rej = np.asarray(rejection_rates, dtype=betas.dtype)
+    cum = np.concatenate([np.zeros(1, dtype=betas.dtype), np.cumsum(rej)])
+    target = np.linspace(0.0, cum[-1], len(betas), dtype=betas.dtype)
+    if betas.shape[0] >= 3:
+        new = _pchip_interp_host(target, cum, betas)
+    else:
+        new = np.interp(target, cum, betas).astype(betas.dtype, copy=False)
+    new[0] = betas[0]
+    new[-1] = betas[-1]
+    return new
+
+
+def _phase_diagnostics_host(rej, old_betas, new_betas, acceptance_rate):
+    rej = np.asarray(rej)
+    old_betas = np.asarray(old_betas)
+    new_betas = np.asarray(new_betas)
+    acceptance_rate = np.asarray(acceptance_rate)
+    return (
+        float(np.std(rej)),
+        float(np.max(np.abs(new_betas - old_betas))),
+        float(np.sum(rej)),
+        float(np.mean(acceptance_rate)),
+        float(np.max(rej)),
+    )
 
 
 def _require_proper_beta_start(beta0: float, ebm) -> None:
@@ -102,7 +198,11 @@ def _tune_phase_adaptive_rounds(
     while True:
         key, subkey = jax.random.split(key)
         batch = min(round_batch, max_rounds - rounds_used)
-        states, stats = run_phase(subkey, betas, states, batch, return_stacked=True)
+        # Padded states stay padded across batches: re-slicing and re-padding
+        # every batch would compile a slice/pad kernel pair per live N.
+        states, stats = run_phase(
+            subkey, betas, states, batch, return_stacked=True, keep_padded_states=True
+        )
         acc_total = (
             stats["accepted"] if acc_total is None else acc_total + stats["accepted"]
         )
@@ -111,7 +211,7 @@ def _tune_phase_adaptive_rounds(
         )
         rounds_used += batch
 
-        lambda_cur = float(_pooled_lambda(acc_total, att_total, betas.dtype))
+        lambda_cur = _pooled_lambda_host(acc_total, att_total, betas.dtype)
         if rounds_used >= min_rounds and lambda_prev is not None:
             rel = abs(lambda_cur - lambda_prev) / max(lambda_cur, 1e-9)
             stable_count = stable_count + 1 if rel < lambda_rtol else 0
@@ -122,7 +222,14 @@ def _tune_phase_adaptive_rounds(
             break
 
     assert acc_total is not None and att_total is not None
-    pooled_stats = _swap_rate_stats(acc_total, att_total, betas)
+    acceptance_rate = _acceptance_rate_host(acc_total, att_total, betas.dtype)
+    pooled_stats = {
+        "accepted": acc_total,
+        "attempted": att_total,
+        "acceptance_rate": acceptance_rate,
+        "rejection_rates": np.asarray(1, dtype=betas.dtype) - acceptance_rate,
+        "betas": np.asarray(betas),
+    }
     return states, pooled_stats, rounds_used
 
 
@@ -134,7 +241,7 @@ def tune_schedule(
     clamp_state: list | None = None,
     n_rounds: int = 0,
     gibbs_steps_per_round: int = 0,
-    initial_betas: jax.Array | None = None,
+    initial_betas: jax.Array | np.ndarray | None = None,
     n_tune: int = 5,
     rounds_per_tune: int = 200,
     track_round_trips: bool = True,
@@ -155,6 +262,7 @@ def tune_schedule(
     saturation_tol: float = 0.99,
     device: DeviceLike = "auto",
     pad_chains_to: int | None = None,
+    _return_stacked: bool = False,
 ) -> tuple[list, dict]:
     """NRPT with iterative schedule optimization (Algorithm 4).
 
@@ -243,6 +351,7 @@ def tune_schedule(
         phase_observer=None,
         emit_diag=False,
         return_stacked=False,
+        keep_padded_states=False,
     ):
         # Tuning batches skip the eager round-trip summary and per-call unstack
         # they never read; only the production run pays for the public return.
@@ -262,6 +371,11 @@ def tune_schedule(
             pad_chains_to=pad_chains_to,
             _emit_diagnostics=emit_diag,
             _return_stacked=return_stacked,
+            # Discovery probes (`_return_stacked`, from tune_chains) consume
+            # even the production stats in Python, so those go host-side too;
+            # the public tune_schedule production stats stay JAX-native.
+            _host_stats=not emit_diag or _return_stacked,
+            _keep_padded_states=keep_padded_states,
         )
 
     # Commit betas to the device up front: jit keys on commitment, so phase 0's
@@ -303,16 +417,21 @@ def tune_schedule(
             )
         else:
             current_states, stats = _run_phase(
-                subkey, betas, current_states, rounds_per_tune, return_stacked=True
+                subkey,
+                betas,
+                current_states,
+                rounds_per_tune,
+                return_stacked=True,
+                keep_padded_states=True,
             )
             rounds_used = rounds_per_tune
 
         rej = stats["rejection_rates"]
         old_betas = betas
-        new_betas = optimize_schedule(rej, betas)
+        new_betas = _optimize_schedule_host(rej, betas)
         # rej_std depends only on the pre-update rates, so keep-best records
         # old_betas.
-        rej_std_a, shift_a, lambda_a, mean_acc_a, max_rej_a = _phase_diagnostics(
+        rej_std_a, shift_a, lambda_a, mean_acc_a, max_rej_a = _phase_diagnostics_host(
             rej, old_betas, new_betas, stats["acceptance_rate"]
         )
         quality = float(rej_std_a)
@@ -395,7 +514,14 @@ def tune_schedule(
     # them).
     key, subkey = jax.random.split(key)
     states, stats = _run_phase(
-        subkey, betas, current_states, n_rounds, phase_observer=observer, emit_diag=True
+        subkey,
+        betas,
+        current_states,
+        n_rounds,
+        phase_observer=observer,
+        emit_diag=True,
+        return_stacked=_return_stacked,
+        keep_padded_states=_return_stacked,
     )
     stats["tuning_history"] = tuning_history
 
@@ -1025,6 +1151,7 @@ def tune_chains(
     safety_margin: float = 0.05,
     device: DeviceLike = "auto",
     pad_probes: bool = False,
+    compile_cache: bool | str = True,
 ) -> dict:
     """Iteratively discover the right chain count for a given target acceptance.
 
@@ -1105,6 +1232,12 @@ def tune_chains(
             the sliced live prefix, but the probe RNG stream differs from an
             unpadded run, so discovered N can shift within its normal
             probe-to-probe variability.
+        compile_cache: ``True`` (default) enables the persistent compile cache
+            at the default path, a ``str`` enables it at that path, ``False``
+            leaves it untouched. Discovery is compile-dominated cold, so
+            without the cache every fresh process pays the full XLA compile;
+            same default as :func:`hamon.autotune`. See
+            :func:`hamon.enable_persistent_compile_cache`.
 
     Returns:
         dict with keys:
@@ -1126,6 +1259,10 @@ def tune_chains(
     if clamp_state is None:
         clamp_state = []
     _require_proper_beta_start(beta_range[0], ebm)
+    if compile_cache:
+        enable_persistent_compile_cache(
+            compile_cache if isinstance(compile_cache, str) else None
+        )
 
     r_target = max(1.0 - target_acceptance, 1e-3)
     min_chains = int(min_chains)
@@ -1138,7 +1275,7 @@ def tune_chains(
     # One device for all probes (avoids transfer thrash), scored at the pilot
     # chain count; the max_chains pilot itself is justified in the docstring.
     _pilot_n = initial_n if initial_n is not None else max_chains
-    _meta_betas = jnp.linspace(beta_range[0], beta_range[1], 1)
+    _meta_betas = np.linspace(beta_range[0], beta_range[1], 1)
     dev = resolve_entry_device(
         device,
         n_chains=_clamp(_pilot_n),
@@ -1155,7 +1292,12 @@ def tune_chains(
         n = _clamp(n)
         if n in probed:
             return probed[n]
-        betas0 = jnp.linspace(beta_range[0], beta_range[1], n)
+        betas0 = np.linspace(
+            beta_range[0],
+            beta_range[1],
+            n,
+            dtype=jax.dtypes.canonicalize_dtype(np.float64),
+        )
         # On the template route every entry is the template program, so no
         # per-chain programs are constructed for init.
         ebms = source.ebms_for_init(betas0)
@@ -1185,6 +1327,7 @@ def tune_chains(
             program=program,
             device=dev,
             pad_chains_to=max_chains if pad_probes else None,
+            _return_stacked=True,
         )
         rej = np.asarray(stats["rejection_rates"])
         out: dict[str, Any] = {
@@ -1215,7 +1358,12 @@ def tune_chains(
         n_final = _clamp(initial_n if initial_n is not None else min_chains)
         return {
             "n_chains": int(n_final),
-            "betas": np.asarray(jnp.linspace(beta_range[0], beta_range[1], n_final)),
+            "betas": np.linspace(
+                beta_range[0],
+                beta_range[1],
+                n_final,
+                dtype=jax.dtypes.canonicalize_dtype(np.float64),
+            ),
             "Lambda": 0.0,
             "Lambda_raw": 0.0,
             "target_acceptance": target_acceptance,
