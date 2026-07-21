@@ -1274,8 +1274,6 @@ def tune_chains(
 
     # One device for all probes (avoids transfer thrash), scored at the pilot
     # chain count; the max_chains pilot itself is justified in the docstring.
-    # Host linspace: this ladder only feeds metadata, never the sampler, and a
-    # device linspace compiles a one-off length-1 executable.
     _pilot_n = initial_n if initial_n is not None else max_chains
     _meta_betas = np.linspace(beta_range[0], beta_range[1], 1)
     dev = resolve_entry_device(
@@ -1294,10 +1292,6 @@ def tune_chains(
         n = _clamp(n)
         if n in probed:
             return probed[n]
-        # Host linspace at the canonical float dtype: a device linspace (and
-        # the device iteration deriving per-chain EBMs from it) compiles a
-        # fresh executable per ladder length. Values differ from jnp.linspace
-        # only in the last ulp; discovery is measurably insensitive to that.
         betas0 = np.linspace(
             beta_range[0],
             beta_range[1],

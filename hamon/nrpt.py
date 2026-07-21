@@ -1031,13 +1031,9 @@ def nrpt(
 
     with device_ctx:
         # When list-form states feed a masked ladder, pad the *list* before
-        # stacking it.  Otherwise each live N first compiles a separate eager
-        # ``jnp.stack`` and only then gets padded to the shared NRPT shape.
-        # Repeating the cold state here is equivalent to the former row-padding
-        # below: the live prefix is unchanged and padding lanes are decoupled.
-        # Stacked init states may also arrive *already padded* (leading axis
-        # pad_to — e.g. a ``_keep_padded_states`` carry from a previous tuning
-        # batch); the rows beyond the live count are decoupled padding.
+        # stacking it — otherwise each live N compiles a separate eager
+        # ``jnp.stack``. A stacked init may also arrive already padded (e.g.
+        # a ``_keep_padded_states`` carry from a previous tuning batch).
         states_pre_padded = False
         stack_rows = n_chains
         if pad_to is not None and pad_to > n_chains:
@@ -1068,10 +1064,8 @@ def nrpt(
             live_chains = jnp.asarray(n_chains, dtype=jnp.int32)
             pad = pad_to - n_chains
             if pad > 0:
-                # Pad the ladder on host (exact copies, no FP ops): a device
-                # pad would compile a tiny concatenate/broadcast pair per live
-                # N. The ladder was already fetched once for validation, so
-                # this adds no new sync.
+                # Pad on host (exact copies): a device pad would compile a
+                # concatenate/broadcast pair per live N.
                 betas_np = np.asarray(betas)
                 betas_padded = np.concatenate(
                     [betas_np, np.broadcast_to(betas_np[-1:], (pad,))]
@@ -1118,11 +1112,9 @@ def nrpt(
                 base_pbi_offset,
                 ebm_ref0,
             )
-            # Slice padded carries back to the live prefix so public returns
-            # are indistinguishable from an unpadded run at n_chains. The
-            # private host-stats path instead slices counters and the index
-            # process on host after one device fetch (each device slice here
-            # is a per-live-N XLA executable), and may retain padded states.
+            # Slice padded carries back to the live prefix. The private
+            # host-stats path instead slices counters and the index process
+            # on host (a device slice here is a per-live-N XLA executable).
             if pad_to is not None and pad_to > n_chains:
                 if _host_stats:
                     if not _keep_padded_states:
@@ -1174,10 +1166,8 @@ def nrpt(
     # so the compiled round loop is still shared with production.
     if track_round_trips and _emit_diagnostics:
         if _host_stats:
-            # Tuning consumes the summary in Python; computing it on host
-            # avoids one more per-ladder-length executable per probe. Padding
-            # machines never trip (they sit beyond the live top), so the host
-            # slice is exactly the unpadded index process.
+            # Host avoids one more per-ladder-length executable per probe;
+            # padding machines never trip, so the slice is exact.
             idx_state_host = {
                 k: v[:n_chains] for k, v in jax.device_get(final.idx_state).items()
             }

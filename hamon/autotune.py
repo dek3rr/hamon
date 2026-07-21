@@ -655,7 +655,6 @@ def autotune(
     # Resolve the device once, sized at the max_chains ceiling so the CPU/GPU
     # heuristic scores the same chain count the first probe runs.
     _pilot_n = initial_n if initial_n is not None else max_chains
-    # Host linspace: metadata only, never the sampler (see tune_chains).
     _meta_betas = np.linspace(beta_range[0], beta_range[1], 1)
     dev = resolve_entry_device(
         device,
@@ -697,12 +696,9 @@ def autotune(
         min_chains=min_chains,
         max_chains=max_chains,
         initial_n=initial_n,
-        # With masked probes the max_chains pilot's follow-up probe reuses the
-        # padded round loop (near-zero marginal compile), while the energy
-        # seed compiles its own _grid_sweep executable family — measured a net
-        # wall LOSS there (~+55% cold on GPU). Unpadded probes recompile the
-        # loop per N, which is exactly what the seed's single probe avoids.
-        # Discovery is identical either way (key-aligned seed / R̂ fallback).
+        # Masking already makes the pilot's follow-up probe near-free; the
+        # energy seed only pays off where probes recompile per N (unpadded).
+        # Measured net loss under masking (~+55% cold on GPU).
         seed_from_energy=not pad_probes,
         ebm=ebm,
         program=program,
