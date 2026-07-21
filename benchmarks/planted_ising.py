@@ -185,7 +185,10 @@ def main() -> int:
     )
 
     if args.compare_seed:
-        from hamon.autotune import autotune
+        # autotune now picks the seed-vs-pilot route itself, so the A/B lives
+        # at the tune_chains level (where the knob remains). Discovery is
+        # key-aligned to be identical across routes; only wall should differ.
+        from hamon.tuning import tune_chains
 
         ebm = IsingEBM(
             inst.nodes,
@@ -197,25 +200,26 @@ def main() -> int:
         program = IsingSamplingProgram(ebm, inst.free_blocks, [])
         for label, seed_energy in (("pilot ", False), ("energy", True)):
             t0 = time.perf_counter()
-            plan = autotune(
+            disc = tune_chains(
                 jax.random.key(1),
-                ebm=ebm,
-                program=program,
-                init_factory=_init_factory(inst),
-                clamp_state=[],
-                sample_nodes=inst.nodes,
+                None,
+                None,
+                _init_factory(inst),
+                [],
                 beta_range=(0.0, 1.0),
+                gibbs_steps_per_round=4,
                 max_chains=128,
                 seed_from_energy=seed_energy,
+                pad_probes=args.device != "cpu",
+                ebm=ebm,
+                program=program,
                 device=args.device,
             )
-            samples = plan.sample(jax.random.key(2), args.samples)
-            E = sample_energies(samples, inst.edges, inst.weights)
             wall = time.perf_counter() - t0
+            probes = [h["n"] for h in disc["history"]]
             print(
-                f"[{label}] N={plan.n_chains} n_expl={plan.gibbs_steps_per_round} "
-                f"Lambda={plan.Lambda:.2f} | E_min={E.min():.1f} gap={E.min() - inst.planted_energy:.1f} "
-                f"GS_hit={np.mean(np.abs(E - inst.planted_energy) < 1e-6):.3f} | {wall:.1f}s",
+                f"[{label}] N={disc['n_chains']} Lambda={disc['Lambda']:.2f} "
+                f"probes={probes} | {wall:.1f}s",
                 flush=True,
             )
         return 0

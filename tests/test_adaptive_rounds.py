@@ -9,8 +9,8 @@ import jax.numpy as jnp
 import numpy as np
 
 from hamon.models import hinton_init
-from hamon.nrpt import _nrpt_rounds_trace_count
-from hamon.tuning import tune_chains, tune_schedule
+from hamon.nrpt import _nrpt_rounds_trace_count, optimize_schedule
+from hamon.tuning import _optimize_schedule_host, tune_chains, tune_schedule
 
 from .utils import make_ising_grid
 
@@ -52,6 +52,23 @@ def test_legacy_mode_unchanged():
     h = stats["tuning_history"]
     assert len(h) == 3
     assert all(e["rounds_used"] == 20 for e in h)
+
+
+def test_host_schedule_update_matches_jax_implementation():
+    """The compile-free tuning update preserves the public PCHIP semantics."""
+    cases = [
+        (np.array([0.2, 0.5]), np.array([0.0, 0.5, 1.0])),
+        (np.array([0.0, 0.0, 0.0]), np.linspace(0.1, 1.0, 4)),
+        (np.array([0.3, 0.0, 0.7, 0.1]), np.linspace(0.0, 1.0, 5)),
+    ]
+    for rejection, betas in cases:
+        rejection = rejection.astype(np.float32)
+        betas = betas.astype(np.float32)
+        expected = np.asarray(
+            optimize_schedule(jnp.asarray(rejection), jnp.asarray(betas))
+        )
+        actual = _optimize_schedule_host(rejection, betas)
+        np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
 
 
 def test_adaptive_respects_round_caps():

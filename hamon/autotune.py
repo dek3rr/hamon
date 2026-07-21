@@ -502,6 +502,15 @@ def _obs_block(out_nodes: list):
     return _fifo_cache(_OBS_BLOCK_CACHE, 32, key, build)[1]
 
 
+def _auto_pad_probes(dev, ebm, program) -> bool:
+    """Chain-masking rule for discovery probes: on for accelerator + template
+    mode (padding Gibbs work is ~free there and masking needs the
+    temperature-linear β scaling); off on CPU (padding is real compute) and on
+    the factory route. Module-level so tests can pin either path."""
+    platform = getattr(dev, "platform", "cpu") if dev is not None else "cpu"
+    return bool(platform != "cpu" and ebm is not None and program is not None)
+
+
 def autotune(
     key: jax.Array,
     *,
@@ -517,7 +526,6 @@ def autotune(
     min_chains: int = 3,
     max_chains: int = 128,
     initial_n: int | None = None,
-    seed_from_energy: bool = True,
     gibbs_steps_per_round: int | None = None,
     search_exploration: bool = False,
     max_exploration_steps: int = 8,
@@ -529,7 +537,6 @@ def autotune(
     n_polish: int = 2,
     n_rounds: int = 1000,
     compile_cache: bool | str = True,
-    pad_probes: bool | None = None,
     search_context: dict | None = None,
     device: DeviceLike = "auto",
 ) -> NRPTPlan:
@@ -562,6 +569,18 @@ def autotune(
     default the **persistent compilation cache** is enabled (``compile_cache``)
     to amortize those compiles across probes and runs.
 
+    Two discovery mechanics are chosen automatically rather than exposed:
+    on an accelerator in template mode the stage-1 probes are **chain-masked**
+    (padded to ``max_chains`` so every probe shares one compiled round loop;
+    the padding Gibbs work is ~free there) and the ``max_chains`` pilot is
+    used directly; on CPU or the factory route probes run unpadded and the
+    chain-count search is instead **seeded from the energy-variance barrier**
+    (one probe instead of two, sparing a full per-N recompile; a Gelman–Rubin
+    R̂ gate falls back to the pilot on glassy targets). Both paths discover
+    the same N — the seed is key-aligned with the pilot — so this choice only
+    affects wall time. The low-level knobs remain on
+    :func:`hamon.tuning.tune_chains` (``pad_probes``, ``seed_from_energy``).
+
     Pass either a single template ``ebm`` + ``program`` (temperature-linear mode)
     or per-chain ``ebm_factory`` + ``program_factory``, exactly as the individual
     tuners accept. ``init_factory(n_chains, ebms, programs) -> list`` builds one
@@ -586,13 +605,6 @@ def autotune(
         max_chains: upper bound for the chain-count (N) search; also the pilot size.
         initial_n: starting chain count for the search; ``None`` runs a pilot at
             ``max_chains``.
-        seed_from_energy: seed the chain-count search from a cheap energy-variance
-            Λ̂ (no PT ladder) so it converges in one probe — but only when local
-            exploration mixes; a Gelman–Rubin R̂ check falls back to the robust
-            ``max_chains`` pilot on glassy targets, so it never under-provisions.
-            Same discovered N, fewer compiles when it applies. Default ``True``;
-            pass ``False`` to always run the pilot; see
-            :func:`hamon.tuning.tune_chains`.
         gibbs_steps_per_round: pin n_expl to this value, skipping both the device
             default and the search (step 2). For hardware you have already
             calibrated. ``None`` (default) uses the device default or the search.
@@ -623,13 +635,6 @@ def autotune(
             default path, a ``str`` enables it at that path, ``False`` leaves
             placement untouched. See
             :func:`hamon.enable_persistent_compile_cache`.
-        pad_probes: chain-mask the stage-1 probes — pad every probe's round
-            loop to ``max_chains`` so all probes share ONE compiled loop
-            instead of recompiling per chain count (see
-            :func:`hamon.tuning.tune_chains`). ``None`` (default) enables it
-            on an accelerator in template mode (where the padding Gibbs work
-            is ~free) and disables it on CPU or the factory route. Stages 2-3
-            and the production draw always run unpadded.
         device: where to run; resolved once and reused across every stage.
 
     Returns:
@@ -650,7 +655,8 @@ def autotune(
     # Resolve the device once, sized at the max_chains ceiling so the CPU/GPU
     # heuristic scores the same chain count the first probe runs.
     _pilot_n = initial_n if initial_n is not None else max_chains
-    _meta_betas = jnp.linspace(beta_range[0], beta_range[1], 1)
+    # Host linspace: metadata only, never the sampler (see tune_chains).
+    _meta_betas = np.linspace(beta_range[0], beta_range[1], 1)
     dev = resolve_entry_device(
         device,
         n_chains=max(min_chains, min(max_chains, _pilot_n)),
@@ -675,13 +681,7 @@ def autotune(
     else:
         probe_n_expl = _default_gibbs_steps(dev)
 
-    # Chain masking default: on for accelerator + template mode (padding Gibbs
-    # work is ~free there and masking needs temperature-linear β scaling); off
-    # on CPU (padding is real compute) and on the factory route.
-    if pad_probes is None:
-        platform = getattr(dev, "platform", "cpu") if dev is not None else "cpu"
-        pad_probes = bool(platform != "cpu" and ebm is not None and program is not None)
-    pad_probes = bool(pad_probes)
+    pad_probes = _auto_pad_probes(dev, ebm, program)
 
     disc = tune_chains(
         k_chains,
@@ -697,7 +697,13 @@ def autotune(
         min_chains=min_chains,
         max_chains=max_chains,
         initial_n=initial_n,
-        seed_from_energy=seed_from_energy,
+        # With masked probes the max_chains pilot's follow-up probe reuses the
+        # padded round loop (near-zero marginal compile), while the energy
+        # seed compiles its own _grid_sweep executable family — measured a net
+        # wall LOSS there (~+55% cold on GPU). Unpadded probes recompile the
+        # loop per N, which is exactly what the seed's single probe avoids.
+        # Discovery is identical either way (key-aligned seed / R̂ fallback).
+        seed_from_energy=not pad_probes,
         ebm=ebm,
         program=program,
         device=dev,

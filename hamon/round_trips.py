@@ -260,6 +260,40 @@ def round_trip_summary(
     }
 
 
+def _round_trip_summary_host(
+    index_state: dict,
+    rejection_rates: np.ndarray,
+    betas: np.ndarray,
+    n_rounds: int,
+) -> dict:
+    """Host twin of :func:`round_trip_summary` for tuning orchestration.
+
+    Same fields, computed with NumPy from already-fetched arrays, so per-probe
+    diagnostics do not compile a per-ladder-length XLA executable during chain
+    discovery (see ``hamon.nrpt._swap_rate_stats_host`` for the rationale).
+    The public jitted :func:`round_trip_summary` remains the production path.
+    """
+    betas = np.asarray(betas)
+    dtype = betas.dtype
+    rej = np.asarray(rejection_rates, dtype=dtype)
+    rts = np.asarray(index_state["round_trips"])
+    Lambda = np.sum(rej, dtype=dtype)
+    tau_pred = np.asarray(1.0, dtype=dtype) / (
+        np.asarray(2.0, dtype=dtype) + np.asarray(2.0, dtype=dtype) * Lambda
+    )
+    tau_obs = np.asarray(int(np.sum(rts)) / max(int(n_rounds), 1), dtype=dtype)
+    safe_dbeta = np.maximum(np.abs(np.diff(betas)), np.asarray(1e-10, dtype=dtype))
+    return {
+        "Lambda": Lambda,
+        "tau_predicted": tau_pred,
+        "tau_observed": tau_obs,
+        "efficiency": tau_obs / np.maximum(tau_pred, np.asarray(1e-10, dtype=dtype)),
+        "lambda_profile": rej / safe_dbeta,
+        "round_trips_per_chain": rts,
+        "restarts_per_chain": np.asarray(index_state["restarts"]),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Normalizing constant (thermodynamic integration)
 # ---------------------------------------------------------------------------

@@ -38,6 +38,7 @@ from hamon.device import (
 from hamon.models.ebm import AbstractEBM
 from hamon.observers import AbstractNRPTObserver
 from hamon.round_trips import (
+    _round_trip_summary_host,
     init_index_state,
     round_trip_summary,
 )
@@ -550,6 +551,45 @@ def _swap_rate_stats(
     }
 
 
+def _swap_rate_stats_host(
+    accepted: jax.Array,
+    attempted: jax.Array,
+    betas: jax.Array,
+    n_pairs: int | None = None,
+) -> dict[str, Any]:
+    """Host equivalent of :func:`_swap_rate_stats` for tuning orchestration.
+
+    Schedule tuning consumes these tiny counters in Python immediately.  Running
+    their reductions through XLA would compile a distinct executable for every
+    live ladder length, even when the padded NRPT round loop is shared.  This is
+    deliberately private: the public production path remains JAX-native.
+
+    ``n_pairs`` slices padded swap counters to the live prefix *after* the
+    device fetch — masked padding pairs never attempt, so the sliced values are
+    exactly the unpadded ones, and no per-live-N slice kernel is compiled.
+    """
+    accepted_np, attempted_np, betas_np = (
+        np.asarray(x) for x in jax.device_get((accepted, attempted, betas))
+    )
+    if n_pairs is not None:
+        accepted_np = accepted_np[:n_pairs]
+        attempted_np = attempted_np[:n_pairs]
+    dtype = betas_np.dtype
+    acceptance_rate = np.divide(
+        accepted_np.astype(dtype),
+        np.maximum(attempted_np, 1).astype(dtype),
+        out=np.zeros_like(accepted_np, dtype=dtype),
+        where=attempted_np > 0,
+    )
+    return {
+        "accepted": accepted_np,
+        "attempted": attempted_np,
+        "acceptance_rate": acceptance_rate,
+        "rejection_rates": np.asarray(1, dtype=dtype) - acceptance_rate,
+        "betas": betas_np,
+    }
+
+
 @jax.jit
 def _phase_diagnostics(
     rej: jax.Array,
@@ -801,6 +841,8 @@ def nrpt(
     pad_chains_to: int | None = None,
     _emit_diagnostics: bool = True,
     _return_stacked: bool = False,
+    _host_stats: bool = False,
+    _keep_padded_states: bool = False,
 ) -> tuple[list, dict]:
     """Non-Reversible Parallel Tempering with vectorized swaps.
 
@@ -843,7 +885,10 @@ def nrpt(
     lists, or a single block-state list whose arrays carry a leading
     ``(n_chains, ...)`` axis — e.g. straight from
     ``hinton_init(key, model, blocks, (n_chains,))`` — avoiding the
-    per-chain list/restack dance.
+    per-chain list/restack dance. With ``pad_chains_to``, a stacked init may
+    instead carry the padded ``(pad_chains_to, ...)`` leading axis (rows past
+    the live count are decoupled padding, e.g. the retained carry of a
+    previous masked run).
     A hottest chain at exactly β = 0 (sampling the reference distribution)
     is supported; base energies are computed from a β = 1 copy of the EBM
     when ``with_beta()`` is available, falling back to the coldest chain.
@@ -985,8 +1030,32 @@ def nrpt(
     )
 
     with device_ctx:
+        # When list-form states feed a masked ladder, pad the *list* before
+        # stacking it.  Otherwise each live N first compiles a separate eager
+        # ``jnp.stack`` and only then gets padded to the shared NRPT shape.
+        # Repeating the cold state here is equivalent to the former row-padding
+        # below: the live prefix is unchanged and padding lanes are decoupled.
+        # Stacked init states may also arrive *already padded* (leading axis
+        # pad_to — e.g. a ``_keep_padded_states`` carry from a previous tuning
+        # batch); the rows beyond the live count are decoupled padding.
+        states_pre_padded = False
+        stack_rows = n_chains
+        if pad_to is not None and pad_to > n_chains:
+            if not stacked_init:
+                init_states = [
+                    *init_states,
+                    *([init_states[-1]] * (pad_to - n_chains)),
+                ]
+                states_pre_padded = True
+                stack_rows = pad_to
+            elif jax.tree.leaves(list(init_states))[0].shape[0] == pad_to:
+                states_pre_padded = True
+                stack_rows = pad_to
         stacked_states = _stack_init_states(
-            init_states, stacked_init, n_chains, n_free_blocks
+            init_states,
+            stacked_init,
+            stack_rows,
+            n_free_blocks,
         )
 
         # Chain masking: pad the ladder to pad_to with copies of the coldest
@@ -999,15 +1068,28 @@ def nrpt(
             live_chains = jnp.asarray(n_chains, dtype=jnp.int32)
             pad = pad_to - n_chains
             if pad > 0:
-
-                def _pad_rows(x):
-                    return jnp.concatenate(
-                        [x, jnp.broadcast_to(x[-1:], (pad, *x.shape[1:]))]
-                    )
-
-                betas_run = _pad_rows(betas)
+                # Pad the ladder on host (exact copies, no FP ops): a device
+                # pad would compile a tiny concatenate/broadcast pair per live
+                # N. The ladder was already fetched once for validation, so
+                # this adds no new sync.
+                betas_np = np.asarray(betas)
+                betas_padded = np.concatenate(
+                    [betas_np, np.broadcast_to(betas_np[-1:], (pad,))]
+                )
+                betas_run = (
+                    jax.device_put(betas_padded, dev)
+                    if dev is not None
+                    else jnp.asarray(betas_padded)
+                )
                 chain_data_run = betas_run
-                stacked_states = [_pad_rows(st) for st in stacked_states]
+                if not states_pre_padded:
+
+                    def _pad_rows(x):
+                        return jnp.concatenate(
+                            [x, jnp.broadcast_to(x[-1:], (pad, *x.shape[1:]))]
+                        )
+
+                    stacked_states = [_pad_rows(st) for st in stacked_states]
 
         # --- Run --------------------------------------------------------------
         n_pairs = n_chains - 1
@@ -1036,16 +1118,29 @@ def nrpt(
                 base_pbi_offset,
                 ebm_ref0,
             )
-            # Slice padded carries back to the live prefix so the return is
-            # indistinguishable from an unpadded run at n_chains.
+            # Slice padded carries back to the live prefix so public returns
+            # are indistinguishable from an unpadded run at n_chains. The
+            # private host-stats path instead slices counters and the index
+            # process on host after one device fetch (each device slice here
+            # is a per-live-N XLA executable), and may retain padded states.
             if pad_to is not None and pad_to > n_chains:
-                final = final._replace(
-                    states=[st[:n_chains] for st in final.states],
-                    accepted=final.accepted[: n_chains - 1],
-                    attempted=final.attempted[: n_chains - 1],
-                    idx_state={k: v[:n_chains] for k, v in final.idx_state.items()},
-                    base_E=final.base_E[:n_chains],
-                )
+                if _host_stats:
+                    if not _keep_padded_states:
+                        final = final._replace(
+                            states=[st[:n_chains] for st in final.states]
+                        )
+                else:
+                    final = final._replace(
+                        states=(
+                            final.states
+                            if _keep_padded_states
+                            else [st[:n_chains] for st in final.states]
+                        ),
+                        accepted=final.accepted[: n_chains - 1],
+                        attempted=final.attempted[: n_chains - 1],
+                        idx_state={k: v[:n_chains] for k, v in final.idx_state.items()},
+                        base_E=final.base_E[:n_chains],
+                    )
         else:
             final = NRPTCarry(
                 key=key,
@@ -1067,20 +1162,40 @@ def nrpt(
         states_out = [
             [final.states[b][c] for b in range(n_free_blocks)] for c in range(n_chains)
         ]
-    stats: dict[str, Any] = _swap_rate_stats(final.accepted, final.attempted, betas)
+    stats: dict[str, Any] = (
+        _swap_rate_stats_host(final.accepted, final.attempted, betas, n_chains - 1)
+        if _host_stats
+        else _swap_rate_stats(final.accepted, final.attempted, betas)
+    )
     rejection_rates = stats["rejection_rates"]
 
     # ``_emit_diagnostics=False`` (tuning batches) skips these host-dispatched
     # reductions tuning never reads; in-loop round-trip tracking stays jitted
     # so the compiled round loop is still shared with production.
     if track_round_trips and _emit_diagnostics:
-        stats["round_trip_diagnostics"] = round_trip_summary(
-            final.idx_state,
-            rejection_rates,
-            betas,
-            n_rounds,
-        )
-        stats["index_state"] = final.idx_state
+        if _host_stats:
+            # Tuning consumes the summary in Python; computing it on host
+            # avoids one more per-ladder-length executable per probe. Padding
+            # machines never trip (they sit beyond the live top), so the host
+            # slice is exactly the unpadded index process.
+            idx_state_host = {
+                k: v[:n_chains] for k, v in jax.device_get(final.idx_state).items()
+            }
+            stats["round_trip_diagnostics"] = _round_trip_summary_host(
+                idx_state_host,
+                rejection_rates,
+                stats["betas"],
+                n_rounds,
+            )
+            stats["index_state"] = idx_state_host
+        else:
+            stats["round_trip_diagnostics"] = round_trip_summary(
+                final.idx_state,
+                rejection_rates,
+                betas,
+                n_rounds,
+            )
+            stats["index_state"] = final.idx_state
 
     if observer is not None and n_rounds > 0:
         stats["observations"] = observations
