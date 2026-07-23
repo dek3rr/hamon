@@ -123,6 +123,39 @@ def _tree_slice(x, sl):
     return x
 
 
+def _bind_one_interaction(interaction, interaction_slices, active_arr):
+    """Gather an interaction group's tensor for one free block and zero its pad."""
+    sliced = jax.tree.map(lambda x: _tree_slice(x, interaction_slices), interaction)
+
+    def _premask(x):
+        if eqx.is_array(x):
+            mask = active_arr.astype(x.dtype)
+            return x * mask.reshape(mask.shape + (1,) * (x.ndim - 2))
+        return x
+
+    return jax.tree.map(_premask, sliced)
+
+
+@eqx.filter_jit
+def _bind_weight_recipe(interactions, slices, masks):
+    """Bind every (block, group) weight tensor in one traced pass.
+
+    The per-block gathers and pad-masks are all different shapes, so run eagerly
+    they each pay a first-shape XLA compile — dozens of them per construction,
+    and again on every ``with_ebm``. Fused under one jit they become a single
+    executable that a repeat ``with_ebm`` (same graph, re-scaled weights) reuses.
+    ``interactions`` is the recipe-ordered nesting of interaction pytrees;
+    ``slices`` and ``masks`` are the parallel cached index / active-mask arrays.
+    """
+    return [
+        [
+            _bind_one_interaction(inter, sl, mask)
+            for inter, sl, mask in zip(block_inter, block_sl, block_mask)
+        ]
+        for block_inter, block_sl, block_mask in zip(interactions, slices, masks)
+    ]
+
+
 def _build_output_sd(block: Block, template_sd: PyTree) -> PyTree:
     """Resize a template ShapeDtypeStruct pytree for *block*'s node count."""
 
@@ -269,13 +302,16 @@ def _build_block_structure(
                         global_inds[k] = gibbs_spec.node_global_location_map[
                             tail_block.nodes[0]
                         ][0]
+                # device_put, not jnp.array: these are concrete host arrays, so
+                # a plain transfer avoids the first-shape XLA "stage" compile
+                # that jnp.array pays once per distinct block shape.
                 block_recipe.append(
                     (
                         g_idx,
-                        jnp.array(interaction_slices),
-                        jnp.array(active),
+                        jax.device_put(interaction_slices),
+                        jax.device_put(active),
                         global_inds,
-                        [jnp.array(x) for x in global_slices],
+                        [jax.device_put(x) for x in global_slices],
                     )
                 )
         weight_recipe.append(block_recipe)
@@ -288,7 +324,7 @@ def _build_block_structure(
     for block in gibbs_spec.free_blocks:
         sd_ind, start, locs = _block_layout(block, gibbs_spec)
         block_sd_inds.append(sd_ind)
-        block_positions.append(jnp.array(locs))
+        block_positions.append(jax.device_put(locs))
         block_slice_starts.append(start)
         block_owns_slot.append(len(gibbs_spec.block_to_global_slice_spec[sd_ind]) == 1)
         template_sd = gibbs_spec.node_shape_struct[block.node_type]
@@ -404,45 +440,34 @@ class BlockSamplingProgram(eqx.Module):
 
         self.gibbs_spec = struct.gibbs_spec
 
-        # Bind the weights: slice each group's tensor by the cached indices
-        # and pre-zero padded entries with the cached active mask.
-        per_block_interactions = []
-        per_block_interaction_active = []
-        per_block_interaction_global_inds = []
-        per_block_interaction_global_slices = []
-        for block_recipe in struct.weight_recipe:
-            this_block_interactions = []
-            this_block_active = []
-            this_block_global_inds = []
-            this_block_global_slices = []
-            for (
-                g_idx,
-                interaction_slices,
-                active_arr,
-                global_inds,
-                global_slices,
-            ) in block_recipe:
-                sliced_interaction = jax.tree.map(
-                    lambda x, _sl=interaction_slices: _tree_slice(x, _sl),
-                    interaction_groups[g_idx].interaction,
-                )
-
-                def _premask(x, _mask=active_arr):
-                    if eqx.is_array(x):
-                        mask = _mask.astype(x.dtype)
-                        return x * mask.reshape(mask.shape + (1,) * (x.ndim - 2))
-                    return x
-
-                sliced_interaction = jax.tree.map(_premask, sliced_interaction)
-
-                this_block_interactions.append(sliced_interaction)
-                this_block_active.append(active_arr)
-                this_block_global_inds.append(global_inds)
-                this_block_global_slices.append(global_slices)
-            per_block_interactions.append(this_block_interactions)
-            per_block_interaction_active.append(this_block_active)
-            per_block_interaction_global_inds.append(this_block_global_inds)
-            per_block_interaction_global_slices.append(this_block_global_slices)
+        # Bind the weights: slice each group's tensor by the cached indices and
+        # pre-zero padded entries with the cached active mask. The gather+mask
+        # runs under one fused jit (see _bind_weight_recipe); the active masks
+        # and global slice indices are weight-independent, so they are copied
+        # straight from the cached recipe with no device work.
+        recipe_interactions = [
+            [interaction_groups[g_idx].interaction for g_idx, *_ in block_recipe]
+            for block_recipe in struct.weight_recipe
+        ]
+        recipe_slices = [
+            [interaction_slices for _g, interaction_slices, *_ in block_recipe]
+            for block_recipe in struct.weight_recipe
+        ]
+        per_block_interaction_active = [
+            [active_arr for _g, _sl, active_arr, *_ in block_recipe]
+            for block_recipe in struct.weight_recipe
+        ]
+        per_block_interaction_global_inds = [
+            [global_inds for *_, global_inds, _gs in block_recipe]
+            for block_recipe in struct.weight_recipe
+        ]
+        per_block_interaction_global_slices = [
+            [global_slices for *_, global_slices in block_recipe]
+            for block_recipe in struct.weight_recipe
+        ]
+        per_block_interactions = _bind_weight_recipe(
+            recipe_interactions, recipe_slices, per_block_interaction_active
+        )
 
         self.per_block_interactions = per_block_interactions
         self.per_block_interaction_active = per_block_interaction_active
