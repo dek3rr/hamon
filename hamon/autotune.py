@@ -300,6 +300,10 @@ class NRPTPlan:
             prev is None
             or prev.verdict != advice.verdict
             or prev.confidence != advice.confidence
+            # A first escalation to warning level is news even at an unchanged
+            # verdict: sample() files BETA at info, and extend()/sample_until
+            # declare the search intent that makes it worth warning about.
+            or (advice.should_warn and not prev.should_warn)
         )
         if changed:
             (logger.warning if advice.should_warn else logger.info)(advice.summary())

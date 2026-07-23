@@ -202,7 +202,16 @@ class SearchAdvice:
     conveyor_alive: bool | None = None
     efficiency: float | None = None
     total_round_trips: int | None = None
+    # Which branch produced MIXING_LIMITED: "saturated_ladder" is structural
+    # (a rejection rate pins near 1, so Λ̂ is cap-limited), "dead_conveyor" is
+    # dynamical (resolved ladder, untraversed). Different knobs, so they must
+    # not print the same message.
+    mixing_cause: str | None = None
     recommended_beta: float | None = None
+    # The unclamped two-level estimate behind ``recommended_beta``; they differ
+    # whenever the clamp binds, and the advice says which of the two it printed
+    # rather than passing a clamp floor off as a measurement.
+    beta_estimate: float | None = None
     recommended_n_more: int | None = None
     recommended_n_chains: int | None = None
     recommended_gibbs_steps: int | None = None
@@ -225,11 +234,20 @@ class SearchAdvice:
                 f"sample_until)"
             )
         if self.verdict is SearchVerdict.BETA_LIMITED:
-            tgt = (
-                f" (try beta~{self.recommended_beta:.3g})"
-                if self.recommended_beta
-                else ""
-            )
+            tgt = ""
+            if self.recommended_beta:
+                tgt = f" (try beta~{self.recommended_beta:.3g}"
+                # Distinguish a measured target from the clamp band's floor:
+                # with closely spaced energy levels the two-level estimate is
+                # a small step and the 1.5x floor is what gets printed.
+                if self.beta_estimate is not None and not np.isclose(
+                    self.beta_estimate, self.recommended_beta, rtol=1e-3
+                ):
+                    tgt += (
+                        f" — the floor of the 1.5x band; the level statistics "
+                        f"alone only ask for ~{self.beta_estimate:.3g}"
+                    )
+                tgt += ")"
             if self.fraction_at_min >= 0.5:
                 lines.append(
                     f"  -> converged at beta={self.cold_beta}: the trace sits on "
@@ -249,10 +267,21 @@ class SearchAdvice:
                 knob.append(f"max_chains -> ~{self.recommended_n_chains}")
             if self.recommended_gibbs_steps:
                 knob.append(f"gibbs_steps_per_round -> {self.recommended_gibbs_steps}")
+            knobs = "; ".join(knob) if knob else "raise chains/exploration"
+            if self.mixing_cause == "saturated_ladder":
+                cause = (
+                    "the ladder saturates — a rejection rate pins near 1, so no "
+                    f"state crosses that pair and Lambda is a cap-limited "
+                    f"underestimate ({knobs})"
+                )
+            else:
+                cause = (
+                    "the tempering conveyor is not delivering independent "
+                    f"states ({knobs})"
+                )
             lines.append(
-                "  -> the tempering conveyor is not delivering independent "
-                f"states ({'; '.join(knob) if knob else 'raise chains/exploration'}); "
-                "results at ALL betas are untrustworthy until this is fixed"
+                f"  -> {cause}; results at ALL betas are untrustworthy until "
+                "this is fixed"
             )
         for n in self.notes:
             lines.append(f"  note: {n}")
@@ -443,11 +472,14 @@ def diagnose_search(
             (logger.warning if adv.should_warn else logger.info)(adv.summary())
         return adv
 
-    # 1. saturated ladder: structural failure, absolute
+    # 1. saturated ladder: structural failure, absolute. Budget-independent —
+    # it reads the ladder's own rejection rates — so it is stated at high
+    # confidence however thin the energy trace is.
     if barrier is False:
         return _advice(
             SearchVerdict.MIXING_LIMITED,
             "high",
+            mixing_cause="saturated_ladder",
             recommended_n_chains=rec_chains,
         )
 
@@ -477,12 +509,27 @@ def diagnose_search(
     # falls through to a BETA verdict with a note.
     if conveyor is False:
         if frac_min < 0.25:
-            return _advice(
+            # Stays "high": conveyor_is_alive returns False only once the
+            # window afforded enough expected trips to tell, so this rests on
+            # a powered measurement, not on the depth of the silent tail.
+            adv = _advice(
                 SearchVerdict.MIXING_LIMITED,
                 "high",
+                mixing_cause="dead_conveyor",
                 recommended_n_chains=rec_chains,
                 recommended_gibbs_steps=rec_gibbs,
             )
+            if x < 2.0 * draw_evidence:
+                # The tail only just cleared the DRAW gate, so both readings
+                # hold at once: the conveyor is broken *and* draws are still
+                # buying records. Re-tune without discarding the budget.
+                adv.notes.append(
+                    f"records were still arriving until draw {r_last} of {T} "
+                    f"(x={x:.2f}, just past the {draw_evidence:g} plateau gate) — "
+                    "fix the conveyor, but more draws are still lowering the "
+                    "minimum meanwhile"
+                )
+            return adv
     elif trips is not None:
         # otherwise a silent tail only establishes a plateau if it plausibly
         # contained independent visits (deliveries arrive per round trip)
@@ -505,6 +552,7 @@ def diagnose_search(
 
     confidence = "high" if x >= plateau_evidence else ("medium" if x >= 2.0 else "low")
     rec_beta = estimator_beta if floor_high else None
+    beta_est = None
     if (
         rec_beta is None
         and cold_beta is not None
@@ -514,9 +562,18 @@ def diagnose_search(
     ):
         # two-level Boltzmann estimate: β at which the floor level reaches
         # even odds against the next observed level, clamped to a sane band.
-        est = cold_beta + float(np.log((1.0 - frac_min) / max(frac_min, 1e-12))) / gap
-        rec_beta = float(np.clip(est, 1.5 * cold_beta, 10.0 * cold_beta))
-    adv = _advice(SearchVerdict.BETA_LIMITED, confidence, recommended_beta=rec_beta)
+        # `gap` is the smallest *observed* level spacing, so closely spaced
+        # levels make the step small and the clamp floor is what survives.
+        beta_est = (
+            cold_beta + float(np.log((1.0 - frac_min) / max(frac_min, 1e-12))) / gap
+        )
+        rec_beta = float(np.clip(beta_est, 1.5 * cold_beta, 10.0 * cold_beta))
+    adv = _advice(
+        SearchVerdict.BETA_LIMITED,
+        confidence,
+        recommended_beta=rec_beta,
+        beta_estimate=beta_est,
+    )
     if conveyor is False:
         knob = (
             f"gibbs_steps_per_round -> {rec_gibbs}"
