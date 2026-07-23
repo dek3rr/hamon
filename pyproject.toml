@@ -40,6 +40,9 @@ dependencies = [
     "jax>=0.10.0",
     "equinox>=0.11.2",
     "jaxtyping>=0.3.10",
+    # Already required by jax and jaxlib; declared because hamon imports it
+    # directly (sparse coupling matrix in the beta="auto" descent probe).
+    "scipy>=1.14",
 ]
 
 [project.urls]
