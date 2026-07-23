@@ -343,6 +343,91 @@ def test_recommended_beta_two_level_formula():
     adv = diagnose_search(e, stats=_healthy_stats(), cold_beta=5.0, log=False)
     assert adv.verdict is SearchVerdict.BETA_LIMITED
     assert np.isclose(adv.recommended_beta, 7.5)
+    # the unclamped estimate is kept so the summary can say which it printed
+    f = adv.fraction_at_min
+    assert np.isclose(adv.beta_estimate, 5.0 + np.log((1 - f) / f), atol=1e-9)
+    assert adv.beta_estimate < adv.recommended_beta  # the clamp is binding
+    assert "floor of the 1.5x band" in adv.summary()
+    assert f"only ask for ~{adv.beta_estimate:.3g}" in adv.summary()
+
+
+def test_recommended_beta_reports_an_interior_estimate_plainly():
+    # A thin floor (10% of the tail) makes the two-level step large enough to
+    # clear the 1.5x floor without hitting the 10x ceiling, so the printed
+    # target IS the measurement and must not be annotated as a clamp.
+    e = np.array([0.0] * 100 + [1.0] * 900)
+    rng = np.random.default_rng(11)
+    rng.shuffle(e)
+    e[0] = 1.0
+    e[1] = 0.0
+    adv = diagnose_search(e, stats=_healthy_stats(), cold_beta=1.0, log=False)
+    assert adv.verdict is SearchVerdict.BETA_LIMITED
+    assert 1.5 < adv.recommended_beta < 10.0  # strictly inside the clamp band
+    assert np.isclose(adv.recommended_beta, adv.beta_estimate)
+    assert "floor of the 1.5x band" not in adv.summary()
+
+
+def test_mixing_causes_are_distinguished_in_the_summary():
+    # The two MIXING branches recommend different knobs, so they must not
+    # print the same sentence — both occur routinely in real runs.
+    rng = np.random.default_rng(12)
+    stats = _healthy_stats()
+    stats["rejection_rates"] = np.array([0.2, 0.95, 0.3])
+    structural = diagnose_search(_noise(rng, 1000), stats=stats, log=False)
+    assert structural.mixing_cause == "saturated_ladder"
+    assert "the ladder saturates" in structural.summary()
+
+    dynamical = diagnose_search(
+        _plateaued(np.random.default_rng(13), 2000),
+        stats={
+            "rejection_rates": np.full(3, 0.3),
+            "n_rounds": 5000,
+            "total_round_trips": 1,
+        },
+        report=SimpleNamespace(gibbs_steps_per_round=3),
+        log=False,
+    )
+    assert dynamical.mixing_cause == "dead_conveyor"
+    assert "not delivering independent states" in dynamical.summary()
+    assert "the ladder saturates" not in dynamical.summary()
+
+
+def test_dead_conveyor_just_past_the_draw_gate_flags_recent_records():
+    # x barely clears draw_evidence=1.0: the conveyor really is dead, but
+    # records were arriving until moments ago, so drawing on still pays — the
+    # commonest band for a dead-conveyor verdict in practice.
+    T = 2000
+    r_last = 700  # x = ln(2000/701) = 1.05, a hair past the plateau gate
+    e = np.full(T, 3.0)
+    e[:r_last] = 5.0
+    e[r_last] = 1.0  # unique min, found just past the gate
+    stats = {
+        "rejection_rates": np.full(3, 0.3),
+        "n_rounds": 5000,
+        "total_round_trips": 1,
+    }
+    adv = diagnose_search(e, stats=stats, log=False)
+    assert adv.verdict is SearchVerdict.MIXING_LIMITED
+    assert adv.mixing_cause == "dead_conveyor"
+    assert 1.0 < adv.expected_tail_records < 2.0
+    assert adv.confidence == "high"  # the conveyor measurement is power-gated
+    assert any("still lowering the minimum" in n for n in adv.notes)
+
+
+def test_deep_plateau_mixing_has_no_recent_record_note():
+    rng = np.random.default_rng(14)
+    adv = diagnose_search(
+        _plateaued(rng, 20000),  # record at draw 3 -> x ~ 8.5
+        stats={
+            "rejection_rates": np.full(3, 0.3),
+            "n_rounds": 5000,
+            "total_round_trips": 1,
+        },
+        log=False,
+    )
+    assert adv.verdict is SearchVerdict.MIXING_LIMITED
+    assert adv.expected_tail_records > 3.0
+    assert not any("still lowering the minimum" in n for n in adv.notes)
 
 
 def test_pool_windows_exact_totals():

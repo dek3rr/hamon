@@ -20,8 +20,13 @@ simultaneously from the same global-state snapshot.
 Fewer color groups → fewer sequential write-back barriers per scan step →
 faster wall-clock time.  The greedy algorithm used here gives the *chromatic
 number* for bipartite graphs (the most common case in practice) and produces a
-good coloring for general graphs, though it is not globally optimal for all
-graph topologies.
+good coloring for general graphs, though it is not globally optimal — graph
+coloring is NP-hard.
+
+The 4-color theorem does not apply: interaction graphs are rarely planar (one
+on ``n`` nodes with more than ``3n - 6`` edges cannot be).  The bounds that do
+apply are ``χ ≤ Δ + 1`` (Brooks) and the usually much tighter
+``χ ≤ degeneracy + 1``.
 """
 
 from collections import defaultdict
@@ -52,6 +57,10 @@ def rlf_coloring(n_nodes: int, edges: Iterable[tuple[int, int]]) -> list[int]:
     in hamon the color count is the number of sequential block-Gibbs groups,
     which sets the NRPT round-loop XLA compile cost. Deterministic (index
     tie-breaking) so colorings are reproducible.
+
+    Carries no worst-case bound and can exceed ``degeneracy + 1``, though
+    rarely enough on real interaction graphs that a smallest-last fallback
+    was measured and did not earn its keep.
 
     The selection rule is evaluated with incrementally maintained neighbor
     counters over a CSR adjacency and a vectorized argmax, so the cost is

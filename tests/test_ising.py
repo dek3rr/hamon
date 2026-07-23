@@ -523,3 +523,101 @@ class TestDegreeBucketedBlocks(unittest.TestCase):
         _, _, free_blocks = _ising_graph(n, edges)
         # ring is 2-colorable and degree-uniform -> exactly 2 blocks
         self.assertEqual(len(free_blocks), 2)
+
+    @staticmethod
+    def _gather_work(nodes_all, free_blocks, degree):
+        """Padded-gather cost: each block gathers at its own max degree."""
+        pos = {id(nd): i for i, nd in enumerate(nodes_all)}
+        total = 0
+        for blk in free_blocks:
+            idx = [pos[id(nd)] for nd in blk.nodes]
+            total += len(idx) * int(max(degree[i] for i in idx))
+        return total
+
+    def test_near_regular_class_is_not_split(self):
+        # A periodic 8x8 lattice with two bonds removed: two color classes of
+        # 32, almost all degree 4 with a couple of degree-3 stragglers. The
+        # split would cross a log2 bucket boundary but save ~1.5% of the
+        # gather while costing a sequential Gibbs group, so the gate declines.
+        from hamon.models.ising import _ising_graph
+
+        L = 8
+        n = L * L
+        edges = set()
+        for i in range(L):
+            for j in range(L):
+                v = i * L + j
+                edges.add(tuple(sorted((v, i * L + (j + 1) % L))))
+                edges.add(tuple(sorted((v, ((i + 1) % L) * L + j))))
+        edges.discard(tuple(sorted((0, 1))))
+        edges.discard(tuple(sorted((2, 3))))
+        edges_np = np.array(sorted(edges))
+        degree = np.bincount(edges_np.reshape(-1), minlength=n)
+        self.assertEqual(sorted(set(degree.tolist())), [3, 4])  # spans buckets
+
+        _, _, free_blocks = _ising_graph(n, edges_np)
+        self.assertEqual(len(free_blocks), 2, "near-regular classes stay whole")
+
+    def test_hub_class_is_still_split_after_the_gate(self):
+        # Scale-free-ish: one hub plus a low-degree periphery in the same
+        # color class. Here the split removes nearly all the padding, so the
+        # gate must keep it — this is the case the bucketing exists for.
+        from hamon.models.ising import _ising_graph
+
+        n = 200
+        rng = np.random.default_rng(0)
+        edges = {(0, j) for j in range(1, n)}  # hub touches everything
+        for _ in range(150):  # sparse periphery structure
+            a, b = rng.integers(1, n, 2)
+            if a != b:
+                edges.add((int(min(a, b)), int(max(a, b))))
+        edges_np = np.array(sorted(edges))
+        degree = np.bincount(edges_np.reshape(-1), minlength=n)
+        self.assertGreater(degree.max(), 8 * np.median(degree))
+
+        from hamon.graph_utils import rlf_coloring
+
+        nodes_all, _, free_blocks = _ising_graph(n, edges_np)
+        n_colors = max(rlf_coloring(n, edges_np)) + 1
+        self.assertGreater(len(free_blocks), n_colors, "hub class must split")
+        work = self._gather_work(nodes_all, free_blocks, degree)
+        self.assertLess(work, 0.5 * n * int(degree.max()))
+
+    def test_gate_bounds_the_extra_gather_work(self):
+        # Contract: declining a split costs at most 1/_MIN_SPLIT_SAVING - 1
+        # of a class's padded gather, so the gated blocking is never worse
+        # than the unconditional one by more than that factor.
+        from hamon.graph_utils import rlf_coloring
+        from hamon.models.ising import _MIN_SPLIT_SAVING, _ising_graph
+
+        rng = np.random.default_rng(3)
+        for trial in range(8):
+            n = int(rng.integers(30, 120))
+            m = int(rng.integers(n, 4 * n))
+            e = {
+                (int(min(a, b)), int(max(a, b)))
+                for a, b in rng.integers(0, n, (m, 2))
+                if a != b
+            }
+            edges_np = np.array(sorted(e))
+            if not len(edges_np):
+                continue
+            degree = np.bincount(edges_np.reshape(-1), minlength=n)
+            nodes_all, _, free_blocks = _ising_graph(n, edges_np)
+
+            # unconditional split, as a reference cost
+            coloring = np.asarray(rlf_coloring(n, edges_np))
+            ref = 0
+            for c in range(coloring.max() + 1):
+                g = np.flatnonzero(coloring == c)
+                if not g.size:
+                    continue
+                b = np.minimum(np.log2(np.maximum(degree[g], 1)).astype(int), 24)
+                ref += sum(
+                    int((b == u).sum()) * int(degree[g[b == u]].max())
+                    for u in np.unique(b)
+                )
+            got = self._gather_work(nodes_all, free_blocks, degree)
+            self.assertLessEqual(got, ref / _MIN_SPLIT_SAVING + 1e-9, f"trial {trial}")
+            # and blocks never increase relative to the unconditional split
+            self.assertGreaterEqual(len(free_blocks), coloring.max() + 1)

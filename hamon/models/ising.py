@@ -545,6 +545,13 @@ _GRAPH_CACHE: dict = {}
 # reached by real graphs.
 _MAX_DEGREE_BUCKET = 24
 
+# A degree-bucket split of a color class is kept only when it cuts that class's
+# padded-gather work to <= this fraction of the unsplit cost: each extra block
+# is a sequential Gibbs group (a write-back barrier and its own kernel), so a
+# split that saves little is a loss. Declining one costs at most
+# 1/_MIN_SPLIT_SAVING - 1 of a class's gather, and so of the graph's.
+_MIN_SPLIT_SAVING = 0.9
+
 
 def _ising_graph(n: int, edges_np: np.ndarray):
     """(nodes, node_edges, free_blocks) for a variable graph, memoized.
@@ -586,8 +593,23 @@ def _ising_graph(n: int, edges_np: np.ndarray):
             bucket = np.minimum(
                 np.log2(np.maximum(degree[g], 1)).astype(int), _MAX_DEGREE_BUCKET
             )
-            for b in np.unique(bucket):
-                free_blocks.append(Block([nodes[i] for i in g[bucket == b]]))
+            buckets = np.unique(bucket)
+            if buckets.size > 1:
+                # Only pay the extra sequential groups when the padding they
+                # remove is worth it: a near-regular class saves almost
+                # nothing, a hub class saves almost everything.
+                whole = g.size * int(degree[g].max())
+                split = sum(
+                    int((bucket == b).sum()) * int(degree[g[bucket == b]].max())
+                    for b in buckets
+                )
+                if split > _MIN_SPLIT_SAVING * whole:
+                    buckets = buckets[:0]
+            if buckets.size:
+                for b in buckets:
+                    free_blocks.append(Block([nodes[i] for i in g[bucket == b]]))
+            else:
+                free_blocks.append(Block([nodes[i] for i in g]))
         return nodes, node_edges, free_blocks
 
     key = (n, edges_np.shape, edges_np.tobytes())

@@ -182,6 +182,82 @@ def test_padded_and_unpadded_sessions_bit_identical(monkeypatch):
     )
 
 
+def _advice_stub(trace):
+    """Minimal stand-in carrying just what _compute_advice reads."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        _energy_chunks=[jnp.asarray(trace)],
+        _window_stats=[
+            {
+                "rejection_rates": np.full(3, 0.3),
+                "n_rounds": 5000,
+                "total_round_trips": 200,  # healthy conveyor
+            }
+        ],
+        report=None,
+        betas=np.array([0.0, 1.5]),
+        search_context=None,
+        last_advice=None,
+    )
+
+
+def test_extend_escalates_an_unchanged_beta_verdict_to_a_warning(caplog):
+    """sample() files BETA at info; the first extend() must still warn.
+
+    Regression: the emit-on-change key was (verdict, confidence) only, so a
+    plan that was BETA_LIMITED from its very first draw never warned at all,
+    even though extend()/sample_until() declare the search intent that makes
+    the verdict worth escalating.
+    """
+    import logging
+
+    from hamon.advisor import SearchVerdict
+    from hamon.autotune import NRPTPlan
+
+    rng = np.random.default_rng(21)
+    trace = np.where(rng.random(2000) < 0.5, -10.0, -9.0)
+    trace[1] = -10.0  # plateaued on a heavy floor -> BETA_LIMITED, high
+    stub = _advice_stub(trace)
+
+    with caplog.at_level(logging.DEBUG, logger="hamon.autotune"):
+        first = NRPTPlan._compute_advice(stub, warn_beta_limited=False)
+        assert first.verdict is SearchVerdict.BETA_LIMITED
+        assert not first.should_warn
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+        caplog.clear()
+        second = NRPTPlan._compute_advice(stub, warn_beta_limited=True)
+
+    assert second.verdict is first.verdict
+    assert second.confidence == first.confidence  # nothing about the trace moved
+    assert second.should_warn
+    warned = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warned, "the first escalation to warning level must be emitted"
+    assert "BETA_LIMITED" in warned[0].getMessage()
+
+
+def test_repeated_extend_at_the_same_verdict_stays_quiet(caplog):
+    """...but only the *first* escalation: an unchanged verdict is noise."""
+    import logging
+
+    from hamon.autotune import NRPTPlan
+
+    rng = np.random.default_rng(22)
+    trace = np.where(rng.random(2000) < 0.5, -10.0, -9.0)
+    trace[1] = -10.0
+    stub = _advice_stub(trace)
+
+    with caplog.at_level(logging.DEBUG, logger="hamon.autotune"):
+        NRPTPlan._compute_advice(stub, warn_beta_limited=False)
+        NRPTPlan._compute_advice(stub, warn_beta_limited=True)
+        caplog.clear()
+        for _ in range(3):
+            NRPTPlan._compute_advice(stub, warn_beta_limited=True)
+
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
 def test_ising_sample_diagnostics_backward_compatible():
     from hamon.models.ising import ising_sample
 

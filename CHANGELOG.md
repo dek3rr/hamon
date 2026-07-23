@@ -103,7 +103,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Within-version determinism is unaffected; only bitwise reproducibility of
   schedules *across hamon versions* can shift.
 
+### Fixed
+
+- **A search verdict that never changed was never escalated.** `NRPTPlan`
+  emits search advice once per verdict *change* to keep `sample_until` from
+  repeating itself, but the change key was `(verdict, confidence)` alone.
+  `sample()` files a `BETA_LIMITED` verdict at info level and it is
+  `extend()`/`sample_until()` that set `warn_beta_limited` — so a plan that
+  was `BETA_LIMITED` from its very first draw stayed silent through every
+  subsequent extension, contradicting the documented escalation. The key now
+  also fires on the first transition to warning level (later extensions at an
+  unchanged verdict remain quiet).
+
+- **`try beta~X` no longer passes the clamp floor off as a measurement.** The
+  `BETA_LIMITED` target is a two-level Boltzmann estimate clipped to
+  `[1.5·β, 10·β]`, and `gap` is the smallest *observed* level spacing — so a
+  landscape with closely spaced levels (an integer-energy objective, say)
+  yields a small step, the clamp binds, and what got printed was the floor
+  rather than anything measured. Roughly half the recommendations across a
+  benchmark sweep were in that regime. `SearchAdvice.beta_estimate` now
+  carries the unclamped value and the summary names which of the two it
+  printed.
+
+- **The two `MIXING_LIMITED` causes print different sentences.** A saturated
+  ladder (structural: a rejection rate pins near 1, so `Λ̂` is cap-limited and
+  nothing crosses that pair) and a dead conveyor (dynamical: the ladder is
+  resolved but the index process is not traversing it) need different knobs
+  but produced near-identical text, and both occur about equally often.
+  `SearchAdvice.mixing_cause` now records which fired and the summary says so.
+  A dead-conveyor verdict raised just past the plateau gate (`x < 2`, the
+  commonest case) also notes that records were still arriving, so the budget
+  in hand keeps paying while the conveyor is fixed. Both keep high confidence:
+  the structural test is budget-independent, and `conveyor_is_alive` only
+  returns `False` once the window affords enough expected trips to tell.
+
 ### Performance
+
+- **Degree-bucket block splitting is now gated on the padding it actually
+  removes.** Each color class was split by log2 degree unconditionally, but
+  every extra block is a sequential Gibbs group — a write-back barrier and its
+  own kernel — so on a near-regular graph the split is a pure loss. A class is
+  now split only when doing so cuts its padded-gather work to ≤ 90% of the
+  unsplit cost, which bounds the extra gather work at `1/0.9 - 1 = 11%` per
+  class and therefore overall. Calibrated over a broad corpus of Max-Cut,
+  lattice, spin-glass, hardware-topology and fully-connected instances: dense
+  near-regular graphs shed a third to a half of their sequential Gibbs groups
+  for low single-digit percent extra gather, while every hub-heavy family the
+  bucketing exists for keeps its splits and its order-of-magnitude saving
+  untouched, as do regular lattices and cliques (which never split anyway).
+  Block structure — and so the sample stream — changes on graphs where the
+  gate fires; it is bit-identical elsewhere.
+
+  A smallest-last (Matula–Beck) coloring was evaluated alongside RLF over the
+  same corpus and **not** adopted: it carries the `degeneracy + 1` bound that
+  RLF lacks, but improved on RLF for a single instance out of hundreds while
+  RLF was strictly better on dozens — not worth a second algorithm.
 
 - **Chain-count discovery no longer compiles per-chain-count helpers — a
   probe at a new N compiles (nearly) nothing.** The padded `_nrpt_rounds`
