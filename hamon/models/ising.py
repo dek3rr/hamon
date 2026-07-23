@@ -634,6 +634,13 @@ def _is_forest(n: int, edges_np: np.ndarray) -> bool:
     return True
 
 
+# Sweeps the descent may spend without improving on the best energy found so
+# far before it gives up. The random half-flip mask descends on sparse graphs
+# but oscillates on dense ones, so the loop needs a progress test rather than
+# only a sweep ceiling.
+_DESCENT_PATIENCE = 32
+
+
 def _descent_probe(
     biases_np: np.ndarray,
     edges_np: np.ndarray,
@@ -641,32 +648,53 @@ def _descent_probe(
     *,
     n_replicas: int = 64,
     seed: int = 0,
+    patience: int = _DESCENT_PATIENCE,
 ) -> tuple[np.ndarray, float]:
     """Excitation costs from greedy descents: (per-site min 2|local field|, best E).
 
     Vectorized over replicas; sweep-style descent with a random half-mask per
     iteration (avoids two-spin flip oscillations), forcing the single best
-    flip for replicas the mask left empty. Host-side numpy — milliseconds,
-    no jit involvement.
+    flip for replicas the mask left empty. Stops when no replica can improve,
+    when the best energy has stalled for ``patience`` sweeps, or at a 10*n
+    backstop. Host-side numpy — no jit involvement.
     """
     rng = np.random.default_rng(seed)
     n = biases_np.shape[0]
     ea, eb = edges_np[:, 0], edges_np[:, 1]
     s = rng.choice([-1.0, 1.0], size=(n_replicas, n))
 
-    def local_field(s):
-        lf = np.tile(biases_np, (n_replicas, 1))
-        if len(weights_np):
-            np.add.at(lf.T, ea, (weights_np[None, :] * s[:, eb]).T)
-            np.add.at(lf.T, eb, (weights_np[None, :] * s[:, ea]).T)
-        return lf
+    # The local field is a scatter-add over the symmetric coupling graph, which
+    # as a sparse matmul is one C loop with no temporaries.
+    from scipy.sparse import coo_array
 
+    coupling = coo_array(
+        (
+            np.concatenate([weights_np, weights_np]),
+            (np.concatenate([ea, eb]), np.concatenate([eb, ea])),
+        ),
+        shape=(n, n),
+    ).tocsr()  # coo -> csr sums duplicate edges rather than dropping them
+
+    def local_field(s):
+        return biases_np[None, :] + (coupling @ s.T).T
+
+    best_e, stalled = np.inf, 0
     for _ in range(10 * n):
         lf = local_field(s)
         gains = -2.0 * s * lf
         improvable = gains > 1e-12
         if not improvable.any():
             break
+        # Progress test, from the local field already in hand: summing
+        # s_i·lf_i gives Σb·s + 2Σ_<ij>J s_i s_j, so E = -(Σb·s + Σs·lf)/2 —
+        # no second pass over the edge list.
+        e = float((-((s @ biases_np) + (s * lf).sum(1)) / 2.0).min())
+        if e < best_e - 1e-12:
+            best_e, stalled = e, 0
+        else:
+            stalled += 1
+            if stalled >= patience:
+                break
         mask = improvable & (rng.random((n_replicas, n)) < 0.5)
         empty = improvable.any(1) & ~mask.any(1)
         if empty.any():

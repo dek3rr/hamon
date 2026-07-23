@@ -133,6 +133,129 @@ def test_costs_probe_ferromagnet_sees_domain_walls():
     assert scale <= len(edges) + 1e-12  # best-found E can't beat the true GS
 
 
+def test_descent_probe_stops_when_the_energy_stalls():
+    # A dense random graph oscillates under the half-flip mask instead of
+    # descending, so without a progress test the probe spends its whole 10*n
+    # sweep budget on churn. It must stop early and still return the best
+    # energy the long run would have found.
+    from hamon.models.ising import _descent_probe
+
+    rng = np.random.default_rng(4)
+    n = 120
+    edges = np.array(
+        sorted(
+            {(i, j) for i in range(n) for j in range(i + 1, n) if rng.random() < 0.3}
+        )
+    )
+    w = rng.choice([-1.0, 1.0], size=len(edges))
+    zero = np.zeros(n)
+
+    _, e_short = _descent_probe(zero, edges, w, patience=16)
+    _, e_long = _descent_probe(zero, edges, w, patience=10**9)
+    # the patient run cannot do better than a fraction of a percent, and the
+    # short one must not be a wild miss
+    assert e_short <= e_long * 0.98 or e_short == pytest.approx(e_long, rel=0.02)
+
+
+def test_descent_probe_unaffected_on_graphs_that_converge():
+    # A sparse lattice descends to a local minimum in a handful of sweeps, so
+    # the stagnation break never fires and the result is bit-identical to an
+    # unbounded run.
+    from hamon.models.ising import _descent_probe
+
+    L = 12
+    edges = np.array(
+        [
+            e
+            for i in range(L)
+            for j in range(L)
+            for e in (
+                (i * L + j, i * L + (j + 1) % L),
+                (i * L + j, ((i + 1) % L) * L + j),
+            )
+        ]
+    )
+    rng = np.random.default_rng(5)
+    w = rng.choice([-1.0, 1.0], size=len(edges))
+    zero = np.zeros(L * L)
+
+    c1, e1 = _descent_probe(zero, edges, w, patience=32)
+    c2, e2 = _descent_probe(zero, edges, w, patience=10**9)
+    assert np.array_equal(c1, c2)
+    assert e1 == e2
+
+
+def _random_graph(rng, n, m):
+    return np.array(
+        sorted(
+            {
+                (int(min(a, b)), int(max(a, b)))
+                for a, b in rng.integers(0, n, (m, 2))
+                if a != b
+            }
+        )
+    )
+
+
+def test_descent_probe_local_field_matches_the_naive_scatter():
+    # The sparse-matmul local field must agree with a direct scatter: exactly
+    # when the couplings sum exactly (the +-J and integer models this path is
+    # overwhelmingly used on), to rounding otherwise, since CSR accumulates a
+    # row in column order rather than edge order.
+    from scipy.sparse import coo_array
+
+    rng = np.random.default_rng(7)
+    n = 60
+    edges = _random_graph(rng, n, 300)
+    ea, eb = edges[:, 0], edges[:, 1]
+    s = rng.choice([-1.0, 1.0], size=(8, n))
+
+    for w, exact in (
+        (rng.choice([-1.0, 1.0], len(edges)), True),
+        (rng.normal(0, 1.0, len(edges)), False),
+    ):
+        coupling = coo_array(
+            (
+                np.concatenate([w, w]),
+                (np.concatenate([ea, eb]), np.concatenate([eb, ea])),
+            ),
+            shape=(n, n),
+        ).tocsr()
+        for biases in (np.zeros(n), rng.normal(0, 0.5, n)):
+            naive = np.tile(biases, (8, 1))
+            np.add.at(naive.T, ea, (w[None, :] * s[:, eb]).T)
+            np.add.at(naive.T, eb, (w[None, :] * s[:, ea]).T)
+
+            got = biases[None, :] + (coupling @ s.T).T
+            if exact and not biases.any():
+                assert np.array_equal(got, naive)
+            else:
+                assert np.allclose(got, naive, rtol=0, atol=1e-12)
+
+
+def test_descent_probe_sums_duplicate_edges():
+    # A repeated edge must accumulate into one coupling of twice the weight; an
+    # assignment-based build would silently drop all but the last.
+    from hamon.models.ising import _descent_probe
+
+    dup = _descent_probe(np.zeros(3), np.array([(0, 1), (0, 1), (1, 2)]), np.ones(3))
+    merged = _descent_probe(
+        np.zeros(3), np.array([(0, 1), (1, 2)]), np.array([2.0, 1.0])
+    )
+    assert np.array_equal(dup[0], merged[0])
+    assert dup[1] == merged[1]
+
+
+def test_descent_probe_handles_an_edgeless_model():
+    from hamon.models.ising import _descent_probe
+
+    costs, e = _descent_probe(
+        np.array([0.5, -0.5]), np.empty((0, 2), dtype=np.int64), np.empty(0)
+    )
+    np.testing.assert_allclose(costs, [1.0, 1.0])  # 2|local field| = 2|bias|
+    assert e == -1.0  # both spins align with their bias
+
+
 def test_costs_fall_back_to_couplings_when_probe_degenerates(monkeypatch):
     # On highly regular graphs the descent probe minima can have a zero local
     # field at every site (all-zero costs); the fallback must still return a

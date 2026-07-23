@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The `beta="auto"` descent probe no longer thrashes on dense graphs.** The
+  greedy descent behind the excitation-cost spectrum flips a random half of
+  the improvable sites each sweep, which descends on sparse graphs but
+  *oscillates* once the mean degree is high: it stopped improving within a
+  few dozen sweeps and then spent the rest of its `10*n` budget churning, with
+  the count of improvable sites climbing rather than falling. The loop now
+  stops when the best energy across replicas has stalled for `_DESCENT_PATIENCE`
+  sweeps, keeping `10*n` only as a backstop.
+
+  This was the dominant cost of a dense-graph run — on a mean-degree-48
+  instance it was ~89% of end-to-end wall, dwarfing tuning, sampling and XLA
+  compile combined. Behaviour is **unchanged** on every graph whose descent
+  converges on its own (the break never fires, and the probe result is
+  bit-identical); on graphs where it was thrashing the returned costs come
+  from the stalled configuration rather than a churned one, which moves the
+  selected β by under 1%.
+
+### Performance
+
+- **The descent probe's local field is a sparse matmul, not `np.add.at`.** The
+  unbuffered `np.add.at` was ~98% of probe time even on graphs that converge
+  promptly. The field is a scatter-add over the symmetric coupling graph, so
+  it is now one `scipy.sparse` CSR matmul against a matrix built once — a
+  single C loop with no temporaries, ~10–30× faster, and with no per-replica
+  Python loop. Together with the stagnation fix a dense-graph probe drops by
+  three orders of magnitude, and end-to-end wall for such a model falls ~9×.
+
+  CSR accumulates each row in column order rather than edge order, so results
+  are bit-identical wherever the couplings sum exactly — the ±J and integer
+  models this path is overwhelmingly used on — and agree to rounding
+  otherwise. A dense BLAS `s @ A` was also measured and rejected: it is
+  faster still on small graphs but needs an `n`-dependent memory cutoff, which
+  would make the probe's answer depend on which side of that cutoff a model
+  landed.
+
+### Changed
+
+- `scipy>=1.14` is now a declared dependency. It was already required
+  transitively by both `jax` and `jaxlib`, so no environment gains an install;
+  hamon now imports it directly (`scipy.sparse`, in the `beta="auto"` descent
+  probe) and so declares it. The `sparray` API (`coo_array`/`csr_array`) is
+  used rather than the legacy `spmatrix` classes.
+
 ## [0.11.0] — 2026-07-23
 
 ### Added
