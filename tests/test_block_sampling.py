@@ -620,6 +620,86 @@ class TestPrecomputedOutputSDs(unittest.TestCase):
                     self.assertEqual(e, a)
 
 
+class TestFusedWeightBind(unittest.TestCase):
+    """The weight-binding gather+mask runs under one fused jit; it must produce
+    exactly what a per-block eager gather+mask would, and a with_ebm rebuild for
+    the same graph must reuse the structure and land bit-identical weights."""
+
+    def _ising(self, n=24, seed=0):
+        import numpy as _np
+
+        from hamon.models.ising import IsingEBM, IsingSamplingProgram, _ising_graph
+
+        rng = _np.random.default_rng(seed)
+        # heterogeneous degree so the blocks have several distinct shapes
+        edges = _np.array(
+            sorted(
+                {(0, j) for j in range(1, n)}
+                | {
+                    (int(min(a, b)), int(max(a, b)))
+                    for a, b in rng.integers(0, n, (n, 2))
+                    if a != b
+                }
+            )
+        )
+        nodes, node_edges, fb = _ising_graph(n, edges)
+        w = jnp.asarray(rng.normal(0, 1.0, len(edges)))
+        ebm = IsingEBM(nodes, node_edges, jnp.zeros(n), w, jnp.array(1.3))
+        return IsingSamplingProgram(ebm, fb, []), ebm, edges
+
+    def test_bound_weights_match_eager_gather_and_mask(self):
+        from hamon.block_sampling import (
+            _STRUCTURE_CACHE,
+            _structure_cache_key,
+            _tree_slice,
+        )
+
+        prog, ebm, _ = self._ising()
+        igs = [g for f in ebm.factors for g in f.to_interaction_groups()]
+        struct = _STRUCTURE_CACHE[_structure_cache_key(prog.gibbs_spec, igs)]
+
+        for b, block_recipe in enumerate(struct.weight_recipe):
+            for g_pos, (g_idx, isl, active, _gi, _gs) in enumerate(block_recipe):
+                sliced = jax.tree.map(
+                    lambda x, _s=isl: _tree_slice(x, _s), igs[g_idx].interaction
+                )
+
+                def _premask(x, _m=active):
+                    if eqx.is_array(x):
+                        m = _m.astype(x.dtype)
+                        return x * m.reshape(m.shape + (1,) * (x.ndim - 2))
+                    return x
+
+                expected = jax.tree.map(_premask, sliced)
+                got = prog.per_block_interactions[b][g_pos]
+                for e, a in zip(jax.tree.leaves(expected), jax.tree.leaves(got)):
+                    self.assertTrue(np.array_equal(np.asarray(e), np.asarray(a)))
+                    self.assertEqual(np.asarray(e).dtype, np.asarray(a).dtype)
+
+    def test_rescaled_ebm_rebuilds_identically(self):
+        # A fresh program for a beta-scaled ebm must produce the same bound
+        # weights as the original scaled by the same factor — the fused bind is
+        # a pure function of the interaction values.
+        prog, ebm, edges = self._ising()
+        from hamon.models.ising import IsingSamplingProgram
+
+        scaled = ebm.with_beta(ebm.beta * 2.0)
+        prog2 = IsingSamplingProgram(scaled, prog.gibbs_spec.free_blocks, [])
+        scaled_any = False
+        for blk1, blk2 in zip(
+            prog.per_block_interactions, prog2.per_block_interactions
+        ):
+            for g1, g2 in zip(blk1, blk2):
+                for a, b in zip(jax.tree.leaves(g1), jax.tree.leaves(g2)):
+                    a, b = np.asarray(a), np.asarray(b)
+                    if np.issubdtype(a.dtype, np.floating):
+                        np.testing.assert_allclose(2.0 * a, b, rtol=1e-6, atol=1e-6)
+                        scaled_any = scaled_any or bool(a.any())
+                    else:
+                        np.testing.assert_array_equal(a, b)  # metadata, unscaled
+        self.assertTrue(scaled_any, "expected at least one weight leaf to scale")
+
+
 class TestBlockGibbsSpecSuperblocks(unittest.TestCase):
     def test_sequential_order(self):
         sd = {SpinNode: jax.ShapeDtypeStruct((), jnp.bool_)}

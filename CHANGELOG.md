@@ -44,6 +44,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   would make the probe's answer depend on which side of that cutoff a model
   landed.
 
+- **Building a `BlockSamplingProgram` compiles a handful of executables, not
+  dozens.** The weight-binding step gathers and pad-masks each free block's
+  interaction tensor, all at different shapes — run eagerly they each paid a
+  first-shape XLA compile, so a single construction fired dozens of tiny
+  compiles and every `with_ebm` rebuild fired them again. The gather+mask now
+  runs under one fused `jit`, so a construction pays one executable that
+  repeat `with_ebm` calls (same graph, re-scaled weights) reuse. Separately,
+  the cached structure's index arrays are built with `jax.device_put` instead
+  of `jnp.array`, since a plain host→device transfer skips the per-shape
+  `stage` compile that `jnp.array` pays. On a 800-node Max-Cut instance one
+  program construction goes from 146 compiles / 2.9 s to 5 / 0.5 s, a full
+  autotuned `ising_sample` from 302 compiles to 161, and its end-to-end wall
+  falls ~2.3 s. Bit-identical: the NRPT sample-stream checksums are unchanged.
+
 ### Changed
 
 - `scipy>=1.14` is now a declared dependency. It was already required
