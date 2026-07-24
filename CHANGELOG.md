@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- **The tempered draw's post-processing no longer compiles per free block.**
+  Stacking the cold-chain observer output into a flat sample array
+  (`_cold_trace_from_observations`) reshaped each block separately, and padding
+  the init ladder to the masked chain count (`_pad_stacked_states`)
+  concatenate-broadcast each block separately — both eager, so every ragged
+  block paid its own first-shape XLA compile on the first draw. Each is now one
+  fused jit. On a Max-Cut instance the draw's compile count drops from ~77 to 9
+  at 15 blocks and, more to the point, stops growing with the graph: a 46-block
+  instance went from ~76 compiles to 5 (fewer than the small graph, both now at
+  the `_nrpt_rounds` kernel floor). Bit-identical — the fusion only changes when
+  the ops compile, not what they compute.
+
 ### Changed
 
 - **`hinton_init`, `gaussian_init` and `double_well_init` draw every site in one

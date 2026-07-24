@@ -820,6 +820,20 @@ def _stack_init_states(
     ]
 
 
+@partial(jax.jit, static_argnums=1)
+def _pad_stacked_states(stacked_states: list, pad: int) -> list:
+    """Extend every free block's chain axis by ``pad`` copies of its last chain.
+
+    Fused under one jit so the per-block concatenate/broadcast pair compiles
+    once, not once per ragged block: the padding rows are decoupled masked
+    chains, so which state they copy is irrelevant.
+    """
+    return [
+        jnp.concatenate([x, jnp.broadcast_to(x[-1:], (pad, *x.shape[1:]))])
+        for x in stacked_states
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -1077,13 +1091,7 @@ def nrpt(
                 )
                 chain_data_run = betas_run
                 if not states_pre_padded:
-
-                    def _pad_rows(x):
-                        return jnp.concatenate(
-                            [x, jnp.broadcast_to(x[-1:], (pad, *x.shape[1:]))]
-                        )
-
-                    stacked_states = [_pad_rows(st) for st in stacked_states]
+                    stacked_states = _pad_stacked_states(stacked_states, pad)
 
         # --- Run --------------------------------------------------------------
         n_pairs = n_chains - 1
