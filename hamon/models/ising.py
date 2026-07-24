@@ -200,7 +200,7 @@ def hinton_init(
     where $h_i$ is the bias of unit *i* and $\beta$ is the
     inverse-temperature scaling factor. See Hinton (2012) for a discussion of this initialization heuristic.
 
-    Each block is sampled with its own Bernoulli draw; blocks may have
+    Units are drawn independently across all blocks at once; blocks may have
     different sizes.
 
     Arguments:
@@ -213,19 +213,21 @@ def hinton_init(
         the initialized blocks as a list of bool arrays, one per block
     """
     node_map = {node: i for i, node in enumerate(model.nodes)}
+    indices = jnp.array(
+        [node_map[n] for block in blocks for n in block], dtype=jnp.int32
+    )
+    n_units = sum(len(block) for block in blocks)
 
-    # Process each block independently to handle ragged block sizes correctly.
-    keys = jax.random.split(key, len(blocks))
+    probs = jax.nn.sigmoid(model.beta * model.biases[indices])
+    draw = jax.random.bernoulli(key, p=probs, shape=(*batch_shape, n_units)).astype(
+        jnp.bool_
+    )
 
     result = []
-    for block, k in zip(blocks, keys):
-        indices = jnp.array([node_map[n] for n in block], dtype=jnp.int32)
-        block_biases = model.biases[indices]  # (block_size,)
-        probs = jax.nn.sigmoid(model.beta * block_biases)
-        sample = jax.random.bernoulli(
-            k, p=probs, shape=(*batch_shape, len(block))
-        ).astype(jnp.bool_)
-        result.append(sample)
+    offset = 0
+    for block in blocks:
+        result.append(draw[..., offset : offset + len(block)])
+        offset += len(block)
 
     return result
 

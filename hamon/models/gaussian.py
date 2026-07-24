@@ -324,19 +324,23 @@ class GaussianSamplingProgram(ModelSamplingProgram):
 
 
 def _per_block_init(key, model, blocks, batch_shape, site_draw) -> list[Array]:
-    """Shared skeleton of the continuous per-site init functions: map each
-    block's nodes to model indices and draw each block independently via
+    """Shared skeleton of the continuous per-site init functions: map every
+    block's nodes to model indices and draw all sites at once via
     ``site_draw(key, idx, shape) -> float array``."""
     pos = {id(n): i for i, n in enumerate(model.nodes)}
-    keys = jax.random.split(key, max(len(blocks), 1))
-    return [
-        site_draw(
-            k,
-            jnp.asarray([pos[id(n)] for n in block.nodes], dtype=jnp.int32),
-            (*batch_shape, len(block.nodes)),
-        ).astype(jnp.float32)
-        for k, block in zip(keys, blocks)
-    ]
+    indices = jnp.asarray(
+        [pos[id(n)] for block in blocks for n in block.nodes], dtype=jnp.int32
+    )
+    n_sites = sum(len(block.nodes) for block in blocks)
+    draw = site_draw(key, indices, (*batch_shape, n_sites)).astype(jnp.float32)
+
+    out = []
+    offset = 0
+    for block in blocks:
+        out.append(draw[..., offset : offset + len(block.nodes)])
+        offset += len(block.nodes)
+
+    return out
 
 
 def gaussian_init(
