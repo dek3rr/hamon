@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`hinton_init`, `gaussian_init` and `double_well_init` draw every site in one
+  call, so their RNG streams change.** Each previously split the key per block
+  and drew each block separately; they now gather all blocks' sites, draw once,
+  and slice the result back into blocks. The distribution is identical — each
+  unit is still an independent draw from its own marginal — but a given seed
+  now yields a different starting state, and therefore a different sample
+  stream. Re-baseline any stored per-seed expectations.
+
+  The per-block form cost a Python loop that unrolled into the trace: for
+  `hinton_init` (jitted) the compile grew linearly with block count, and for the
+  continuous inits (not jitted) both compile *and* every warm call did. Measured
+  by block count: `hinton_init` 1.24 s → 0.18 s at 15 blocks and 3.83 s → 0.20 s
+  at 46; `gaussian_init` 15.2 s → 0.99 s cold and 149 ms → 27 ms warm at 46
+  blocks, 19.2 s → 1.11 s and 391 ms → 57 ms at 128.
+
 ### Fixed
 
 - **The `beta="auto"` descent probe no longer thrashes on dense graphs.** The
