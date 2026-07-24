@@ -127,6 +127,7 @@ class AutotuneReport:
         return "\n".join(lines)
 
 
+@jax.jit
 def _cold_trace_from_observations(observations: list, col_perm: jax.Array) -> jax.Array:
     """Stack a cold-chain ``NRPTStateObserver`` output into ``(T, n_nodes)``.
 
@@ -134,6 +135,10 @@ def _cold_trace_from_observations(observations: list, col_perm: jax.Array) -> ja
     — the leading axis is the round, the size-1 axis is the single observed
     (cold) chain. Concatenate the blocks in free-block order, then permute the
     columns into the caller's ``sample_nodes`` order via ``col_perm``.
+
+    Jitted so the per-block reshapes fuse into one executable: run eagerly each
+    ragged block reshape is a first-shape compile, one per free block on the
+    first draw of a given round count.
     """
     cols = [jnp.reshape(o[:, 0], (o.shape[0], -1)) for o in observations]
     flat = jnp.concatenate(cols, axis=1)
