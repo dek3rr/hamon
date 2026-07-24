@@ -11,6 +11,7 @@ import logging
 import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 
 import jax
@@ -125,6 +126,14 @@ class AutotuneReport:
         if self.search_advice is not None:
             lines.append("  " + self.search_advice.summary().replace("\n", "\n  "))
         return "\n".join(lines)
+
+
+@partial(jax.jit, static_argnums=1)
+def _cold_chain_from_stacked(stacked_ladder: list, chain_idx: int) -> list:
+    """Extract one chain's per-block state from a stacked ``[block]-of-(n_chains,
+    …)`` ladder. Fused so the per-block slices compile once, not once per block.
+    """
+    return [block[chain_idx] for block in stacked_ladder]
 
 
 @jax.jit
@@ -774,9 +783,16 @@ def autotune(
         program=program,
         device=dev,
         pad_chains_to=max_chains if pad_probes else None,
+        # Keep the warm ladder in nrpt's stacked (and, when masked, padded) form
+        # all the way to the draw: the draw re-ingests it without the per-block
+        # unstack-here / re-stack-there round trip. autotune reads the stats
+        # host-side, so the coupled host-stats path costs nothing.
+        _return_stacked=True,
     )
     betas = jnp.asarray(polish_stats["betas"])
-    warm_cold = warm_states[-1]  # cold chain = highest β
+    # warm_states is now [block]-of-(n_chains|pad, …); the cold chain is the
+    # highest-β live chain at index n_chains - 1.
+    warm_cold = _cold_chain_from_stacked(warm_states, n_chains - 1)
 
     # Build the cold-β program for the production draw (real β_cold weights, not
     # the temperature-linear template).

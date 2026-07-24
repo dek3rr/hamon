@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
+- **The warm ladder stays in nrpt's stacked form from tuning through the draw.**
+  `autotune`'s schedule-polish production run unstacked its final states into a
+  per-chain, per-block list, which the first tempered draw then re-stacked —
+  each direction one eager op per free block, and on a masked ladder the
+  unstack ran a slice for every (chain, block) pair. The production run now
+  returns the stacked (and, when masked, padded) ladder directly, so the draw
+  re-ingests it with no marshalling; only the single cold chain is extracted,
+  under one fused jit. On a Max-Cut instance a full autotuned `ising_sample`
+  drops from 124 compiles to 31 at 46 blocks (and 104 → 69 at 15), and — since
+  the per-(chain, block) slices were real device work, not just compiles —
+  cold wall falls ~20% at 46 blocks / 128 chains and ~10% at 15 blocks / 57.
+  Bit-identical: the live cold chain is unchanged (the discarded padding rows
+  are decoupled masked chains), bench NRPT checksums hold.
+
 - **The tempered draw's post-processing no longer compiles per free block.**
   Stacking the cold-chain observer output into a flat sample array
   (`_cold_trace_from_observations`) reshaped each block separately, and padding
