@@ -1,6 +1,5 @@
 # Modified from the original thrml library (https://github.com/Extropic-AI/thrml)
 
-import contextlib
 import logging
 from collections.abc import Sequence
 from typing import Literal, overload
@@ -13,6 +12,7 @@ from jaxtyping import Array, Bool, Key, Shaped
 
 from hamon.device import (
     DeviceLike,
+    default_device_ctx,
     free_node_count,
     resolve_entry_device,
     tree_device_put,
@@ -457,9 +457,7 @@ def estimate_kl_grad(
             ),
             dev,
         )
-    device_ctx = (
-        jax.default_device(dev) if dev is not None else contextlib.nullcontext()
-    )
+    device_ctx = default_device_ctx(dev)
 
     with device_ctx:
         key_pos, key_neg = jax.random.split(key, 2)

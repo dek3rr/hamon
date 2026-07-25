@@ -11,7 +11,6 @@ rectangular block partitions.
 
 from __future__ import annotations
 
-import contextlib
 import logging
 from collections.abc import Sequence
 from functools import partial
@@ -31,6 +30,7 @@ from hamon.interaction import interaction_float_dtype as _interaction_float_dtyp
 from hamon.block_sampling import _run_blocks, BlockSamplingProgram
 from hamon.device import (
     DeviceLike,
+    default_device_ctx,
     free_node_count,
     resolve_entry_device,
     tree_device_put,
@@ -1007,9 +1007,7 @@ def nrpt(
                 # base_pbi aliases the program's interactions; re-derive it
                 # from the moved program so the kernel reads on-device tensors.
                 base_pbi = run_program.per_block_interactions
-    device_ctx = (
-        jax.default_device(dev) if dev is not None else contextlib.nullcontext()
-    )
+    device_ctx = default_device_ctx(dev)
 
     with device_ctx:
         # When list-form states feed a masked ladder, pad the *list* before

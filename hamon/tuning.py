@@ -20,6 +20,7 @@ import numpy as np
 from hamon.block_sampling import BlockSamplingProgram, SamplingSchedule
 from hamon.device import (
     DeviceLike,
+    default_device_ctx,
     enable_persistent_compile_cache,
     resolve_entry_device,
 )
@@ -781,8 +782,6 @@ def _estimate_barrier_energy(
 
     Returns ``(Λ̂, R̂_max)``.
     """
-    import contextlib
-
     from hamon._nrpt_energy import _make_reference_ebm
     from hamon.block_sampling import (
         SamplingSchedule,
@@ -846,9 +845,7 @@ def _estimate_barrier_energy(
         )
     else:
         clamp_dev = clamp_state
-    device_ctx = (
-        jax.default_device(dev) if dev is not None else contextlib.nullcontext()
-    )
+    device_ctx = default_device_ctx(dev)
 
     f_obs = StateObserver(spec.free_blocks)
     carry = f_obs.init()
@@ -1020,8 +1017,6 @@ def tune_sampling_schedule(
         ``n_warmup``, ``warmup_exit``, ``tau``, ``rhat_final`` (the window R̂
         at the stop), and ``steps_per_sample``.
     """
-    import contextlib
-
     from hamon._nrpt_energy import _make_reference_ebm
     from hamon.block_sampling import SamplingSchedule
     from hamon.device import free_node_count, tree_device_put
@@ -1048,9 +1043,7 @@ def tune_sampling_schedule(
         )
     else:
         clamp_dev = clamp_state
-    device_ctx = (
-        jax.default_device(dev) if dev is not None else contextlib.nullcontext()
-    )
+    device_ctx = default_device_ctx(dev)
 
     sched_batch = SamplingSchedule(_ENERGY_WARMUP_BATCH, 1, 1)
     sched_probe = SamplingSchedule(0, int(probe_samples), 1)
