@@ -147,6 +147,71 @@ def _tune_phase_adaptive_rounds(
     return states, pooled_stats, rounds_used
 
 
+def _finalize_schedule_stats(
+    stats: dict, betas: jax.Array | np.ndarray, n_rounds: int
+) -> None:
+    """Attach the two health verdicts to a finished ``tune_schedule`` run.
+
+    Post-hoc reporting only — reads the production stats and writes
+    ``barrier_identified`` and ``conveyor_alive`` back into ``stats`` in place.
+    Kept separate from the phase loop so "run the tuning" and "explain the
+    result" are not interleaved, and kept in this module so its log records
+    still carry the ``hamon.tuning`` logger name that callers capture on.
+
+    The two verdicts are independent: ``barrier_identified`` is structural (did
+    the ladder saturate?), ``conveyor_alive`` is dynamical (did the index
+    process actually round-trip?), and the latter is ``None`` when the window
+    was too short to tell — which must never be reported as a stall.
+    """
+    # Gate on the PRODUCTION run's rates (the kept ladder Lambda comes from) —
+    # the loop-local `rej` belongs to a schedule that may not have been kept.
+    prod_rej = stats["rejection_rates"]
+    resolved = barrier_is_identified(prod_rej)
+    stats["barrier_identified"] = resolved
+    if not resolved:
+        logger.warning(
+            "tune_schedule: barrier NOT resolved — the ladder saturates "
+            "(max rejection=%.3f), so Lambda=%.2f is capped by the chain count "
+            "(Lambda <= N-1 = %d) rather than measuring the barrier; it is an "
+            "underestimate. Add chains or equalize the ladder.",
+            float(np.asarray(prod_rej).max()),
+            float(np.asarray(prod_rej).sum()),
+            int(betas.shape[0]) - 1,
+        )
+
+    rtd = stats.get("round_trip_diagnostics")
+    if rtd is None:
+        return
+    n_rt = int(np.sum(np.asarray(rtd["round_trips_per_chain"])))
+    alive = conveyor_is_alive(
+        float(rtd["tau_observed"]), float(rtd["tau_predicted"]), n_rounds
+    )
+    stats["conveyor_alive"] = alive
+    if alive is None:
+        logger.info(
+            "tune_schedule: round-trip rate not measured — n_rounds=%d "
+            "affords only %.1f expected trips at the optimal rate "
+            "(tau_pred=%.4f), too few to distinguish a slow conveyor from an "
+            "unlucky window. Lambda=%.2f stands on its own (resolved=%s).",
+            n_rounds,
+            float(rtd["tau_predicted"]) * n_rounds,
+            float(rtd["tau_predicted"]),
+            float(rtd["Lambda"]),
+            resolved,
+        )
+    elif not alive:
+        logger.warning(
+            "tune_schedule: DEO conveyor is slow — %d round trips, "
+            "efficiency=%.3f of the optimal rate over %d rounds. Samples "
+            "decorrelate slowly even though Lambda=%.2f is resolved=%s.",
+            n_rt,
+            float(rtd["efficiency"]),
+            n_rounds,
+            float(rtd["Lambda"]),
+            resolved,
+        )
+
+
 def tune_schedule(
     key: jax.Array,
     ebm_factory: Callable | None = None,
@@ -439,54 +504,7 @@ def tune_schedule(
     )
     stats["tuning_history"] = tuning_history
 
-    # Gate on the PRODUCTION run's rates (the kept ladder Lambda comes from) —
-    # the loop-local `rej` belongs to a schedule that may not have been kept.
-    prod_rej = stats["rejection_rates"]
-    resolved = barrier_is_identified(prod_rej)
-    stats["barrier_identified"] = resolved
-    if not resolved:
-        logger.warning(
-            "tune_schedule: barrier NOT resolved — the ladder saturates "
-            "(max rejection=%.3f), so Lambda=%.2f is capped by the chain count "
-            "(Lambda <= N-1 = %d) rather than measuring the barrier; it is an "
-            "underestimate. Add chains or equalize the ladder.",
-            float(np.asarray(prod_rej).max()),
-            float(np.asarray(prod_rej).sum()),
-            int(betas.shape[0]) - 1,
-        )
-
-    # Conveyor health: a *separate*, dynamical diagnostic. None = the window was
-    # too short to tell, which must not be reported as a stall.
-    rtd = stats.get("round_trip_diagnostics")
-    if rtd is not None:
-        n_rt = int(np.sum(np.asarray(rtd["round_trips_per_chain"])))
-        alive = conveyor_is_alive(
-            float(rtd["tau_observed"]), float(rtd["tau_predicted"]), n_rounds
-        )
-        stats["conveyor_alive"] = alive
-        if alive is None:
-            logger.info(
-                "tune_schedule: round-trip rate not measured — n_rounds=%d "
-                "affords only %.1f expected trips at the optimal rate "
-                "(tau_pred=%.4f), too few to distinguish a slow conveyor from an "
-                "unlucky window. Lambda=%.2f stands on its own (resolved=%s).",
-                n_rounds,
-                float(rtd["tau_predicted"]) * n_rounds,
-                float(rtd["tau_predicted"]),
-                float(rtd["Lambda"]),
-                resolved,
-            )
-        elif not alive:
-            logger.warning(
-                "tune_schedule: DEO conveyor is slow — %d round trips, "
-                "efficiency=%.3f of the optimal rate over %d rounds. Samples "
-                "decorrelate slowly even though Lambda=%.2f is resolved=%s.",
-                n_rt,
-                float(rtd["efficiency"]),
-                n_rounds,
-                float(rtd["Lambda"]),
-                resolved,
-            )
+    _finalize_schedule_stats(stats, betas, n_rounds)
     return states, stats
 
 
@@ -1591,6 +1609,66 @@ def _select_gibbs_steps_ele(
     return best, history
 
 
+def _select_gibbs_steps_cost(
+    probe: Callable[[int], dict],
+    start_steps: int,
+    max_steps: int,
+    improve_tol: float,
+    rounds_per_probe: int,
+) -> tuple[dict, list[dict]]:
+    """Pick n_expl by ESS-driven doubling, scored against one fitted cost line.
+
+    The reuse-timing strategy: because every probe reuses the same schedule, the
+    doubling is driven by **ESS** alone (a deterministic probe set), and wall
+    time enters only afterwards through a single least-squares cost line
+    ``t_round ≈ c₀ + c_s·n_expl`` fitted across all probes. Scoring every record
+    against that fitted line rather than its own measured time is what keeps the
+    near-flat peak from flipping between counts on timing noise; requiring a
+    ``> improve_tol`` gain to climb resolves it to the cheaper count.
+
+    Note the ``history`` records are rewritten in place: ``t_round`` is replaced
+    by its fitted value and ``objective`` is filled in. Callers surface that same
+    list, so the fitted numbers are what users see.
+
+    Sibling of :func:`_select_gibbs_steps` and :func:`_select_gibbs_steps_ele`.
+    The three share a doubling skeleton but differ in their stopping metric
+    (fitted objective / round-trip efficiency / raw ESS), the order their breaks
+    are tested, and how the winner is chosen (running best / cheapest within tol
+    of the plateau / post-hoc argmax over the rescored history). They are kept
+    separate deliberately: the probe count drives ``jax.random.split`` in
+    ``tune_exploration``, so merging them behind a shared predicate list would
+    risk silently reordering a break and re-baselining the sample stream.
+
+    Pure control logic (no JAX), unit-testable with a synthetic ``probe``.
+    """
+    history: list[dict] = []
+    n = start_steps
+    while True:
+        rec = probe(n)
+        history.append(rec)
+        if rec.get("efficiency_limiter") == "schedule":
+            break  # schedule-limited: more local exploration cannot help
+        if n >= max_steps:
+            break
+        if len(history) >= 2 and rec["ess_median"] <= history[-2]["ess_median"] * (
+            1.0 + improve_tol
+        ):
+            break  # ESS saturated: extra sweeps no longer decorrelate
+        n *= 2
+    c0, cs = _fit_cost_line(
+        [r["n_expl"] for r in history], [r["t_round"] for r in history]
+    )
+    for r in history:
+        tr = c0 + r["n_expl"] * cs
+        r["t_round"] = tr
+        r["objective"] = r["ess_median"] / (rounds_per_probe * tr) if tr > 0 else 0.0
+    best = history[0]
+    for r in history[1:]:
+        if r["objective"] > best["objective"] * (1.0 + improve_tol):
+            best = r
+    return best, history
+
+
 def tune_exploration(
     key: jax.Array,
     ebm_factory: Callable | None = None,
@@ -1840,36 +1918,13 @@ def tune_exploration(
             float(target_efficiency),
         )
     elif use_reuse_timing:
-        # ESS-driven doubling (deterministic probe set), then one fitted cost
-        # line; requiring a >improve_tol gain to climb resolves the near-flat
-        # peak to the cheaper count instead of flipping on timing noise.
-        history = []
-        n = int(start_steps)
-        while True:
-            rec = probe(n)
-            history.append(rec)
-            if rec.get("efficiency_limiter") == "schedule":
-                break  # schedule-limited: more local exploration cannot help
-            if n >= int(max_steps):
-                break
-            if len(history) >= 2 and rec["ess_median"] <= history[-2]["ess_median"] * (
-                1.0 + float(improve_tol)
-            ):
-                break  # ESS saturated: extra sweeps no longer decorrelate
-            n *= 2
-        c0, cs = _fit_cost_line(
-            [r["n_expl"] for r in history], [r["t_round"] for r in history]
+        best, history = _select_gibbs_steps_cost(
+            probe,
+            int(start_steps),
+            int(max_steps),
+            float(improve_tol),
+            int(rounds_per_probe),
         )
-        for r in history:
-            tr = c0 + r["n_expl"] * cs
-            r["t_round"] = tr
-            r["objective"] = (
-                r["ess_median"] / (rounds_per_probe * tr) if tr > 0 else 0.0
-            )
-        best = history[0]
-        for r in history[1:]:
-            if r["objective"] > best["objective"] * (1.0 + float(improve_tol)):
-                best = r
     else:
         best, history = _select_gibbs_steps(
             probe, int(start_steps), int(max_steps), float(improve_tol)
