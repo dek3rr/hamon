@@ -15,8 +15,8 @@ JAX-native thermal sampling for discrete and continuous energy-based models.
 Hamon is a JAX library for sampling from probabilistic graphical models —
 discrete and continuous. It provides GPU-accelerated block Gibbs sampling,
 non-reversible parallel tempering with adaptive schedule optimization, and
-tools for building and training Ising models, RBMs, Gaussian Markov random
-fields, and continuous multimodal (φ⁴) lattice models.
+tools for building, training, and diagnosing Ising models, Gaussian Markov
+random fields, and continuous multimodal (φ⁴) lattice models.
 
 Built on [Extropic AI's thrml](https://github.com/Extropic-AI/thrml) foundation,
 Hamon diverges as an independent library with original algorithmic contributions
@@ -57,33 +57,6 @@ pip install -e ".[development,testing,examples]"
 
 Requires Python ≥ 3.12 and a JAX installation ([GPU setup guide](https://jax.readthedocs.io/en/latest/installation.html)).
 
-## Device routing
-
-With CUDA jax installed, JAX places everything on the GPU — including the
-small, dispatch-bound programs where a CPU finishes several times faster.
-hamon's entry points (`nrpt`, `tune_schedule`, `tune_chains`,
-`ising_sample`, `sample_states`, `sample_with_observation`, …) therefore take
-a `device` argument:
-
-- `"auto"` (default) — with no accelerator visible, placement is untouched.
-  Otherwise the work score `n_chains × free nodes` decides: small workloads
-  run on the CPU, large ones on the accelerator. The default threshold (4096,
-  the steady-state crossover measured on an RTX 5080) can be overridden with
-  `HAMON_DEVICE_THRESHOLD` (calibrate yours with
-  `python benchmarks/device_crossover.py`); `HAMON_DEVICE=cpu|gpu|none`
-  forces a choice without code changes. Very short one-shot flows are
-  compile-dominated and can favor the CPU regardless of size — pass
-  `device="cpu"` for those, or set `JAX_COMPILATION_CACHE_DIR` so repeated
-  runs skip GPU compilation entirely.
-- `"cpu"` / `"gpu"` — that platform, raising if it is not visible.
-- a concrete `jax.Device` — used as-is.
-- `None` — hamon never touches placement.
-
-Routing re-commits the entry arrays (program tensors, states, β ladder) to
-the chosen device and returns outputs committed there; pass `device=None` to
-keep full manual control of placement. Orchestrators resolve the device once
-and reuse it across all tuning phases, so jit caches stay warm.
-
 ## Quick example
 
 ```python
@@ -106,6 +79,10 @@ schedule = SamplingSchedule(n_warmup=100, n_samples=1000, steps_per_sample=2)
 
 samples = sample_states(k_samp, program, schedule, init_state, [], [Block(nodes)])
 ```
+
+For Ising models specifically, `ising_sample` collapses all of this — including
+tempering and its tuning — into one call from `(biases, edges, weights)` to
+samples. See [Ground-state search](#ground-state-search) below.
 
 ## Continuous models
 
@@ -217,9 +194,6 @@ plan = autotune(jax.random.key(1), ebm=ebm, program=program,
 more = plan.sample(jax.random.key(2), 5000)
 ```
 
-For Ising models, `ising_sample` wraps this in a one-liner (biases, edges,
-weights → samples) and autotunes everything automatically.
-
 Key design elements:
 
 - **Full autotuning**: `autotune` runs chain count → exploration count →
@@ -227,9 +201,10 @@ Key design elements:
   draws. Every default is chosen to be **reproducible**: identical inputs give
   identical tuning decisions and samples.
 - **Robust chain-count discovery**: `tune_chains` pilots at `max_chains` (an
-  over-resolved ladder gives an unbiased first Λ̂) and takes
-  `N* = 2Λ + 1`, the round-trip optimum at rejection r\* = ½ (Syed et al.).
-  The **running-max Λ̂** over probes keeps glassy targets — where a coarse
+  over-resolved ladder gives an unbiased first Λ̂) and iterates the fixed point
+  `N* = ⌈Λ̂ · margin / r*⌉ + 1` — at the default rejection target r\* = ½ and no
+  safety margin, the familiar `2Λ + 1` round-trip optimum (Syed et al.). The
+  **running-max Λ̂** over probes keeps glassy targets — where a coarse
   ladder under-resolves the barrier and biases Λ̂ low — from collapsing to a
   chain count that cannot mix. `seed_from_energy` skips the pilot using the
   closed-form energy-variance barrier (Theorem 2), gated by a Gelman–Rubin R̂
@@ -245,8 +220,8 @@ Key design elements:
   conveyor, making Λ̂ = Σ rej a within-basin artifact rather than a barrier
   estimate — and stops once Λ̂ plateaus rather than when a phase cap runs out.
   Chain-count discovery therefore consumes a stable Λ̂ even on glassy targets,
-  and its `N* = 2Λ + 1` fixed point converges in a couple of probes instead of
-  chasing tuning noise.
+  and its fixed point converges in a couple of probes instead of chasing
+  tuning noise.
 - **Trustworthy diagnostics**: a two-part round-trip trust gate.
   `barrier_identified` asks a *structural* question — does the ladder
   saturate? (max rejection < 0.75, a threshold calibrated across nine model
@@ -275,9 +250,15 @@ Key design elements:
 ### Log Z and effective sample size
 
 ```python
+import jax
 import jax.numpy as jnp
-from hamon import NRPTEnergyObserver, nrpt_log_normalizing_constant
-from hamon.nrpt import tune_schedule
+from hamon import (
+    NRPTEnergyObserver,
+    effective_sample_size,
+    nrpt_log_normalizing_constant,
+    report_nrpt_diagnostics,
+    tune_schedule,
+)
 
 obs = NRPTEnergyObserver(n_chains=8)
 states, stats = tune_schedule(
@@ -296,34 +277,175 @@ states, stats = tune_schedule(
 log_z = nrpt_log_normalizing_constant(stats, log_z0=len(nodes) * jnp.log(2.0))
 
 # Effective sample size of the cold-chain trace.
-from hamon import effective_sample_size, report_nrpt_diagnostics
-
 report = report_nrpt_diagnostics(stats, samples=my_cold_chain_samples)
 print(report.summary())  # includes ess(min)/ess(median)/ess_fraction
 ```
 
+## Ground-state search
+
+Sampling to *find* a minimum is a different problem from sampling to
+characterize a distribution, and it has its own failure modes: too hot and the
+cold chain never resolves the ground state, too cold and the conveyor freezes
+and stops delivering independent states. Hamon estimates the useful temperature
+from the model rather than making you guess, and then tells you which failure
+mode you are in.
+
+```python
+import jax
+from hamon import ising_sample
+
+# beta="auto" reads the coldest useful temperature off the model's own
+# excitation-cost spectrum instead of guessing a value.
+samples, diag = ising_sample(
+    biases, edges, weights, key=jax.random.key(0), beta="auto", n_samples=2000
+)
+
+est = diag["beta_estimate"]     # BetaEstimate
+print(est.summary())            # beta_max, predicted Λ and chain count, GS occupancy
+
+advice = diag["search_advice"]  # SearchAdvice
+print(advice.summary())
+```
+
+`SearchAdvice.verdict` is the actionable part — it separates the three reasons a
+search stops improving, each with a different fix:
+
+| Verdict | Meaning | Fix |
+| --- | --- | --- |
+| `MIXING_LIMITED` | the conveyor is not delivering independent states | more chains |
+| `DRAW_LIMITED` | still finding new minima when the budget ran out | more draws |
+| `BETA_LIMITED` | the cold chain is too hot to resolve the ground state | colder β |
+| `INCONCLUSIVE` | not enough evidence to tell | more draws first |
+
+The estimator is available on its own — `ising_estimate_beta` for a β from
+`(biases, edges, weights)`, `ising_excitation_costs` for the raw spectrum, and
+`estimate_beta_max` / `diagnose_search` for models built outside the Ising
+front door.
+
+With a tuned plan in hand, `sample_until` drives the search directly: it keeps
+drawing in fixed-size chunks (so every chunk reuses one compiled round loop)
+until the running minimum stops improving, measured in **round trips delivered**
+rather than raw draws — at the cold β a ground-state search needs, the conveyor
+is slow, and counting draws would abandon a still-improving search.
+
+```python
+from hamon import autotune
+
+plan = autotune(jax.random.key(1), ebm=ebm, program=program,
+                init_factory=init_factory, clamp_state=[])
+samples, advice = plan.sample_until(jax.random.key(2), chunk=512, max_total=8192)
+print(advice.summary())
+
+more = plan.extend(jax.random.key(3), 2000)  # continue from the warm state
+```
+
+## Training
+
+`estimate_kl_grad` computes the contrastive-divergence gradient of the KL
+objective — the positive phase clamped to data, the negative phase free — for
+an `IsingTrainingSpec` that pairs the model with its two sampling programs:
+
+```python
+from hamon.models import IsingTrainingSpec, estimate_kl_grad
+
+spec = IsingTrainingSpec(
+    ebm=model,
+    data_blocks=data_blocks,
+    conditioning_blocks=[],
+    positive_sampling_blocks=positive_blocks,   # hidden units, data clamped
+    negative_sampling_blocks=negative_blocks,   # everything free
+    schedule_positive=schedule_positive,
+    schedule_negative=schedule_negative,
+)
+
+grad_w, grad_b, moments_pos, moments_neg = estimate_kl_grad(
+    key, spec, model.nodes, model.edges,
+    data=[batch], conditioning_values=[],
+    init_state_positive=init_pos, init_state_negative=init_neg,
+)
+```
+
+Pass `return_negative_state=True` to get the final negative-chain state back as
+a fifth return value and feed it into the next step — that is persistent
+contrastive divergence, and it is why the negative schedule can carry no warmup.
+
+**Calibrate the schedules instead of guessing them.** `tune_sampling_schedule`
+answers "what warmup, thinning, and sample count does *this* model at *these*
+parameters need?" by running independent replicas, stopping warmup on a
+cross-replica Gelman–Rubin R̂, and measuring the integrated autocorrelation
+time:
+
+```python
+from hamon import tune_sampling_schedule
+from hamon.models import hinton_init
+
+replicas = hinton_init(key, model, program.gibbs_spec.free_blocks, (8,))
+schedule, info = tune_sampling_schedule(key, model, program, replicas,
+                                        target_ess=64)
+print(info["n_warmup"], info["tau"], info["warmup_exit"])
+```
+
+The returned schedule is static, so a jitted training epoch stays one compiled
+scan. Because it is calibrated *at the current θ*, recalibrate periodically
+during training — a schedule fitted to an untrained model under-thins once the
+model sharpens. `benchmarks/train_mnist.py` is a worked end-to-end example.
+
+## Device routing
+
+With CUDA jax installed, JAX places everything on the GPU — including the
+small, dispatch-bound programs where a CPU finishes several times faster.
+hamon's entry points (`nrpt`, `tune_schedule`, `tune_chains`,
+`ising_sample`, `sample_states`, `sample_with_observation`, …) therefore take
+a `device` argument:
+
+- `"auto"` (default) — with no accelerator visible, placement is untouched.
+  Otherwise the work score `n_chains × free nodes` decides: small workloads
+  run on the CPU, large ones on the accelerator. The default threshold (4096,
+  the steady-state crossover measured on an RTX 5080) can be overridden with
+  `HAMON_DEVICE_THRESHOLD` (calibrate yours with
+  `python benchmarks/device_crossover.py`); `HAMON_DEVICE=cpu|gpu|none`
+  forces a choice without code changes. Very short one-shot flows are
+  compile-dominated and can favor the CPU regardless of size — pass
+  `device="cpu"` for those, or set `JAX_COMPILATION_CACHE_DIR` so repeated
+  runs skip GPU compilation entirely.
+- `"cpu"` / `"gpu"` — that platform, raising if it is not visible.
+- a concrete `jax.Device` — used as-is.
+- `None` — hamon never touches placement.
+
+Routing re-commits the entry arrays (program tensors, states, β ladder) to
+the chosen device and returns outputs committed there; pass `device=None` to
+keep full manual control of placement. Orchestrators resolve the device once
+and reuse it across all tuning phases, so jit caches stay warm.
+
 ## What makes Hamon fast
 
-On a GPU the wall-clock cost of tuning-heavy sampling is **XLA compilation,
-not the sampling itself** (measured ~85% of a cold chain-count search; the
-actual device work is well under a second). Hamon is engineered so everything
-compiles once:
+On a GPU the wall-clock cost of tuning-heavy sampling is dominated by **XLA
+compilation, not the sampling itself** — the actual device work in a cold
+chain-count search is well under a second. Hamon is engineered so that as
+little as possible compiles more than once:
 
-**One kernel, compiled once, for every configuration.** All chains run under
-one `jax.vmap` (compile time is flat in chain count), the round count is
-traced (any number of rounds reuses one executable), and **chain masking**
-pads the ladder to a fixed width with the live count as traced data — so the
-entire autotune (every probe, polish, production run, and the tempered draw,
-which records the cold chain at a *traced* index via `ColdIndexObserver`)
-shares a single compiled round loop, even as the discovered chain count
-drifts across a parameter sweep or training run. Masking is bit-identical to
-the unpadded run: JAX's key/uniform streams are prefix-stable and masked
-swaps keep the identity permutation.
+**Chain count is not a compile axis.** All chains run under one `jax.vmap`, so
+compile time is flat in chain count, and **chain masking** pads the ladder to a
+fixed width with the live count as traced data. Every probe, polish, production
+run, and tempered draw therefore shares one compiled round loop even as the
+discovered chain count drifts across a parameter sweep or a training run.
+Masking is bit-identical to the unpadded run: JAX's key/uniform streams are
+prefix-stable and masked swaps keep the identity permutation.
+
+**Round count is not a compile axis when nothing is observing.** With no
+observer attached, `n_rounds` is passed as traced data and any number of rounds
+reuses one executable. An observed run needs `scan`'s static length, so each
+distinct round count compiles once — which is why the tempered draw uses fixed
+chunk sizes and reads the cold chain at a *traced* index (`ColdIndexObserver`)
+rather than a static one.
 
 **Caches that actually hit.** Jit caches key on program *structure*
 (value-based `BlockSpec` equality), so `with_ebm` rebuilds and repeated tuner
-calls reuse executables; the persistent compile cache is on by default in
-`autotune`, so a repeat run in a new process does **zero** XLA compiles.
+calls reuse executables. On an accelerator, `autotune` enables JAX's persistent
+compile cache by default, so a repeat run in a fresh process loads executables
+from disk instead of recompiling (measured ≈ −72% wall on repeat cold runs). On
+a CPU-only backend it is deliberately left off: CPU compiles are cheap and
+XLA's AOT loader is net-negative there.
 
 **A lean sampler loop.** State threads through `lax.scan` as a carry with
 static-offset slice writebacks; post-hoc diagnostics run in host numpy (no
@@ -340,10 +462,12 @@ If you use Hamon in your research, please cite:
     title        = {Hamon: JAX-Native Thermal Sampling for Discrete and Continuous Energy-Based Models},
     year         = {2026},
     url          = {https://github.com/dek3rr/hamon},
-    version      = {0.11.0},
     license      = {Apache-2.0},
 }
 ```
+
+Add the `version` you used — see
+[Releases](https://github.com/dek3rr/hamon/releases), or `hamon.__version__`.
 
 Hamon's block sampling and PGM infrastructure is derived from
 [thrml](https://github.com/Extropic-AI/thrml) (v0.1.3) by

@@ -90,3 +90,50 @@ def test_readme_annealed_example():
     assert annealed.proper_at_beta_zero is True
     assert annealed.beta_affine is True
     assert program.samplers
+
+
+def test_readme_log_z_example():
+    """The log Z / ESS block. Untested until now, and it did not import."""
+    import jax
+    import jax.numpy as jnp
+
+    from hamon import (
+        Block,
+        NRPTEnergyObserver,
+        SpinNode,
+        nrpt_log_normalizing_constant,
+        report_nrpt_diagnostics,
+        tune_schedule,
+    )
+    from hamon.models import IsingEBM, IsingSamplingProgram, hinton_init
+
+    nodes = [SpinNode() for _ in range(6)]
+    edges = [(nodes[i], nodes[i + 1]) for i in range(5)]
+    ebm = IsingEBM(nodes, edges, jnp.zeros(6), jnp.ones(5) * 0.6, jnp.array(1.0))
+    free_blocks = [Block(nodes[::2]), Block(nodes[1::2])]
+    program = IsingSamplingProgram(ebm, free_blocks, clamped_blocks=[])
+    init_state = hinton_init(jax.random.key(0), ebm, free_blocks, ())
+
+    obs = NRPTEnergyObserver(n_chains=8)
+    _states, stats = tune_schedule(
+        jax.random.key(0),
+        init_states=[init_state] * 8,
+        clamp_state=[],
+        n_rounds=500,
+        gibbs_steps_per_round=5,
+        initial_betas=jnp.linspace(0.0, 1.0, 8),
+        ebm=ebm,
+        program=program,
+        observer=obs,
+        device="cpu",
+    )
+
+    log_z = nrpt_log_normalizing_constant(stats, log_z0=len(nodes) * jnp.log(2.0))
+    # Z(1) >= Z(0) for a ferromagnet: the cold measure concentrates on states
+    # cheaper than uniform, so log Z(1) sits above the uniform reference.
+    assert jnp.isfinite(log_z)
+    assert float(log_z) > float(len(nodes) * jnp.log(2.0))
+
+    cold = jnp.zeros((200, 6), dtype=jnp.bool_)
+    report = report_nrpt_diagnostics(stats, samples=cold)
+    assert "ess" in report.summary().lower()
