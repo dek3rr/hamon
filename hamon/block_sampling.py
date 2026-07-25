@@ -1,6 +1,5 @@
 # Modified from the original thrml library (https://github.com/Extropic-AI/thrml)
 
-import contextlib
 import dataclasses
 from collections import defaultdict
 from typing import TypeAlias
@@ -24,6 +23,7 @@ from hamon.block_management import (
 )
 from hamon.device import (
     DeviceLike,
+    default_device_ctx,
     free_node_count,
     resolve_entry_device,
     tree_device_put,
@@ -810,9 +810,7 @@ def sample_with_observation(
             ),
             dev,
         )
-    device_ctx = (
-        jax.default_device(dev) if dev is not None else contextlib.nullcontext()
-    )
+    device_ctx = default_device_ctx(dev)
 
     # Device placement stays out here (a no-op under jit/vmap); the jitted
     # core compiles its scans once and reuses them across calls — the old
@@ -989,9 +987,7 @@ def sample_states_batched(
         key, program, init_states_free, state_clamp = tree_device_put(
             (key, program, init_states_free, state_clamp), dev
         )
-    device_ctx = (
-        jax.default_device(dev) if dev is not None else contextlib.nullcontext()
-    )
+    device_ctx = default_device_ctx(dev)
 
     f_observe = StateObserver(nodes_to_sample)
     carry_init = f_observe.init()

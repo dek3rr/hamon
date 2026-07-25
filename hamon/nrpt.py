@@ -11,7 +11,6 @@ rectangular block partitions.
 
 from __future__ import annotations
 
-import contextlib
 import logging
 from collections.abc import Sequence
 from functools import partial
@@ -31,6 +30,7 @@ from hamon.interaction import interaction_float_dtype as _interaction_float_dtyp
 from hamon.block_sampling import _run_blocks, BlockSamplingProgram
 from hamon.device import (
     DeviceLike,
+    default_device_ctx,
     free_node_count,
     resolve_entry_device,
     tree_device_put,
@@ -539,8 +539,7 @@ def _swap_rate_stats(
     """The base NRPT stats dict shared by the production run and tuning batches.
 
     Jitted so the handful of reductions fuse into a single dispatch/compile
-    rather than running as separate eager ops on every phase (see
-    ``_phase_diagnostics`` for the same motivation)."""
+    rather than running as separate eager ops on every phase."""
     acceptance_rate = _acceptance_rate(accepted, attempted, betas.dtype)
     return {
         "accepted": accepted,
@@ -588,37 +587,6 @@ def _swap_rate_stats_host(
         "rejection_rates": np.asarray(1, dtype=dtype) - acceptance_rate,
         "betas": betas_np,
     }
-
-
-@jax.jit
-def _phase_diagnostics(
-    rej: jax.Array,
-    old_betas: jax.Array,
-    new_betas: jax.Array,
-    acceptance_rate: jax.Array,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-    """``(rej_std, max_beta_shift, Lambda, mean_acceptance, max_rej)`` for one
-    ``tune_schedule`` phase, in one fused kernel (same motivation as
-    ``_swap_rate_stats``: separate eager reductions each pay a dispatch and a
-    first-shape compile, dominating the cold cost of a tiny computation).
-
-    ``rej_std`` drives keep-best and the equalization stop; ``max_beta_shift``
-    the settle check; ``max_rej`` the saturation checks (keep-best ranking and
-    the Λ-plateau gate)."""
-    return (
-        jnp.std(rej),
-        jnp.max(jnp.abs(new_betas - old_betas)),
-        jnp.sum(rej),
-        jnp.mean(acceptance_rate),
-        jnp.max(rej),
-    )
-
-
-@partial(jax.jit, static_argnums=(2,))
-def _pooled_lambda(accepted: jax.Array, attempted: jax.Array, dtype) -> jax.Array:
-    """Pooled barrier estimate ``Λ = Σ(1 − acceptance_rate)`` for one tuning
-    batch, fused into a single dispatch (called once per ``round_batch``)."""
-    return jnp.sum(1.0 - _acceptance_rate(accepted, attempted, dtype))
 
 
 class _RunInputs(NamedTuple):
@@ -1039,9 +1007,7 @@ def nrpt(
                 # base_pbi aliases the program's interactions; re-derive it
                 # from the moved program so the kernel reads on-device tensors.
                 base_pbi = run_program.per_block_interactions
-    device_ctx = (
-        jax.default_device(dev) if dev is not None else contextlib.nullcontext()
-    )
+    device_ctx = default_device_ctx(dev)
 
     with device_ctx:
         # When list-form states feed a masked ladder, pad the *list* before

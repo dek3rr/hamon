@@ -1,11 +1,8 @@
 # Boundary Energy
 
-Edge classification and incremental energy delta computation. These functions
-support the energy caching optimization in NRPT, avoiding full energy
-recomputation after each Gibbs sweep.
-
-::: hamon.EdgePartition
-
-::: hamon.make_rectangular_blocks
+Incremental energy-delta computation for Ising models. After a block update,
+ΔE depends only on the edges incident to that block, so the swap energies in
+[`nrpt`][hamon.nrpt] can be advanced by a delta instead of recomputed in full —
+pass the factory's result as `nrpt`'s `energy_delta_fn`.
 
 ::: hamon.make_ising_delta_fn

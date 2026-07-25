@@ -11,10 +11,15 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import pytest
 
 from hamon import Block, SpinNode
 from hamon.models import IsingEBM, IsingSamplingProgram, hinton_init
-from hamon.tuning import _select_gibbs_steps, tune_exploration
+from hamon.tuning import (
+    _select_gibbs_steps,
+    _select_gibbs_steps_cost,
+    tune_exploration,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +82,102 @@ class TestSelectGibbsSteps:
         best, hist = _select_gibbs_steps(probe, 1, 4, 0.0)
         assert [h["n_expl"] for h in hist] == [1, 2, 4]
         assert best["n_expl"] == 4
+
+
+# ---------------------------------------------------------------------------
+# Unit: the reuse-timing (fitted cost line) strategy
+# ---------------------------------------------------------------------------
+
+
+def _fake_cost_probe(ess_table, t_table, limiter_at=None):
+    """Synthetic probe for the ESS-driven, cost-line-scored search."""
+
+    def probe(n):
+        return {
+            "n_expl": n,
+            "ess_median": ess_table[n],
+            "t_round": t_table[n],
+            "efficiency_limiter": "schedule" if n == limiter_at else None,
+        }
+
+    return probe
+
+
+class TestSelectGibbsStepsCost:
+    """``_select_gibbs_steps_cost`` doubles on ESS, then scores on a fitted line.
+
+    Doubling is driven by ESS alone so the probe set is deterministic; wall time
+    enters only through the least-squares cost line fitted across all probes.
+    """
+
+    def test_doubles_until_ess_saturates(self):
+        ess = {1: 10.0, 2: 25.0, 4: 60.0, 8: 61.0, 16: 62.0}
+        t = {1: 1.0, 2: 2.0, 4: 4.0, 8: 8.0, 16: 16.0}
+        best, hist = _select_gibbs_steps_cost(
+            _fake_cost_probe(ess, t), 1, 16, 0.05, rounds_per_probe=10
+        )
+        # n=8 gains only 1.7% over n=4, under the 5% tolerance -> stop there.
+        assert [h["n_expl"] for h in hist] == [1, 2, 4, 8]
+        assert best["n_expl"] == 4
+
+    def test_schedule_limiter_stops_immediately(self):
+        ess = {1: 10.0, 2: 25.0, 4: 60.0}
+        t = {1: 1.0, 2: 2.0, 4: 4.0}
+        _, hist = _select_gibbs_steps_cost(
+            _fake_cost_probe(ess, t, limiter_at=2), 1, 16, 0.0, rounds_per_probe=10
+        )
+        assert [h["n_expl"] for h in hist] == [1, 2]
+
+    def test_max_steps_ceiling(self):
+        ess = {1: 10.0, 2: 40.0, 4: 160.0}  # always improving
+        t = {1: 1.0, 2: 2.0, 4: 4.0}
+        best, hist = _select_gibbs_steps_cost(
+            _fake_cost_probe(ess, t), 1, 4, 0.0, rounds_per_probe=10
+        )
+        assert [h["n_expl"] for h in hist] == [1, 2, 4]
+        assert best["n_expl"] == 4
+
+    def test_history_is_rescored_against_the_fitted_line(self):
+        """t_round is replaced by its fitted value and objective is filled in.
+
+        Callers surface this same list, so the fitted numbers are what users
+        see -- not the raw per-probe timings.
+        """
+        ess = {1: 10.0, 2: 40.0, 4: 160.0}
+        t = {1: 5.0, 2: 6.0, 4: 8.0}  # exactly linear: t = 4 + 1*n
+        _, hist = _select_gibbs_steps_cost(
+            _fake_cost_probe(ess, t), 1, 4, 0.0, rounds_per_probe=10
+        )
+        for r in hist:
+            assert r["t_round"] == pytest.approx(4.0 + r["n_expl"], rel=1e-9)
+            assert r["objective"] == pytest.approx(
+                r["ess_median"] / (10 * r["t_round"]), rel=1e-9
+            )
+
+    def test_zero_cost_line_yields_zero_objective(self):
+        """A degenerate (all-zero) timing fit must not divide by zero."""
+        ess = {1: 10.0, 2: 40.0, 4: 160.0}
+        best, hist = _select_gibbs_steps_cost(
+            _fake_cost_probe(ess, dict.fromkeys([1, 2, 4], 0.0)),
+            1,
+            4,
+            0.0,
+            rounds_per_probe=10,
+        )
+        assert all(r["objective"] == 0.0 for r in hist)
+        assert best["n_expl"] == 1  # no record beats the first
+
+    def test_marginal_objective_gain_prefers_smaller(self):
+        """Hysteresis: climbing needs a > improve_tol gain, so a near-flat peak
+        resolves to the cheaper count instead of flipping on timing noise."""
+        # ESS doubles (keeps the search going) but cost doubles too, so the
+        # objective is nearly flat across counts.
+        ess = {1: 100.0, 2: 201.0, 4: 403.0}
+        t = {1: 1.0, 2: 2.0, 4: 4.0}
+        best, _ = _select_gibbs_steps_cost(
+            _fake_cost_probe(ess, t), 1, 4, 0.05, rounds_per_probe=10
+        )
+        assert best["n_expl"] == 1
 
 
 # ---------------------------------------------------------------------------

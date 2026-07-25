@@ -73,14 +73,6 @@ from .round_trips import thermodynamic_integration as thermodynamic_integration
 from .round_trips import (
     nrpt_log_normalizing_constant as nrpt_log_normalizing_constant,
 )
-from .boundary_energy import EdgePartition as EdgePartition
-from .boundary_energy import make_rectangular_blocks as make_rectangular_blocks
-from .dynamic_blocks import compute_aggregate_influence as compute_aggregate_influence
-from .dynamic_blocks import influence_aware_partition as influence_aware_partition
-from .dynamic_blocks import per_temperature_block_config as per_temperature_block_config
-from .dynamic_blocks import dynamic_reblock as dynamic_reblock
-from .dynamic_blocks import classify_nodes as classify_nodes
-
 from . import diagnostics as diagnostics
 from .models.ising import ising_sample as ising_sample
 from .models.ising import ising_estimate_beta as ising_estimate_beta

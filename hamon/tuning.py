@@ -17,9 +17,18 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from hamon._tuning_host_schedule import (
+    _acceptance_rate_host as _acceptance_rate_host,
+    _optimize_schedule_host as _optimize_schedule_host,
+    _pchip_interp_host as _pchip_interp_host,
+    _pchip_slopes_host as _pchip_slopes_host,
+    _phase_diagnostics_host as _phase_diagnostics_host,
+    _pooled_lambda_host as _pooled_lambda_host,
+)
 from hamon.block_sampling import BlockSamplingProgram, SamplingSchedule
 from hamon.device import (
     DeviceLike,
+    default_device_ctx,
     enable_persistent_compile_cache,
     resolve_entry_device,
 )
@@ -35,108 +44,13 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Convenience: NRPT with iterative schedule tuning
+# Iterative schedule tuning
 # ---------------------------------------------------------------------------
+
 
 # Default "settled" floor for max|Δβ| (β units): a well-tuned ladder keeps
 # jittering by about this much, so a tighter value would never be reached.
 _DEFAULT_TUNE_TOL = 0.02
-
-
-def _acceptance_rate_host(accepted, attempted, dtype) -> np.ndarray:
-    """Acceptance rates for the small, host-driven tuning control loop."""
-    accepted = np.asarray(accepted)
-    attempted = np.asarray(attempted)
-    return np.divide(
-        accepted.astype(dtype),
-        np.maximum(attempted, 1).astype(dtype),
-        out=np.zeros_like(accepted, dtype=dtype),
-        where=attempted > 0,
-    )
-
-
-def _pooled_lambda_host(accepted, attempted, dtype) -> float:
-    return float(
-        np.sum(
-            np.asarray(1, dtype=dtype)
-            - _acceptance_rate_host(accepted, attempted, dtype)
-        )
-    )
-
-
-def _pchip_slopes_host(h: np.ndarray, delta: np.ndarray) -> np.ndarray:
-    """NumPy counterpart of the private JAX PCHIP tangent calculation."""
-    h0, h1 = h[:-1], h[1:]
-    d0, d1 = delta[:-1], delta[1:]
-    w1 = 2.0 * h1 + h0
-    w2 = h1 + 2.0 * h0
-    same_sign = (d0 * d1) > 0
-    safe0 = np.where(d0 == 0, 1.0, d0)
-    safe1 = np.where(d1 == 0, 1.0, d1)
-    denom = w1 / safe0 + w2 / safe1
-    interior = np.where(same_sign, (w1 + w2) / np.where(same_sign, denom, 1.0), 0.0)
-
-    def edge(hh0, hh1, m0, m1):
-        d = ((2.0 * hh0 + hh1) * m0 - hh0 * m1) / (hh0 + hh1)
-        d = np.where(np.sign(d) != np.sign(m0), 0.0, d)
-        clamp = (np.sign(m0) != np.sign(m1)) & (np.abs(d) > 3.0 * np.abs(m0))
-        return np.where(clamp, 3.0 * m0, d)
-
-    left = edge(h[0], h[1], delta[0], delta[1]).astype(delta.dtype)
-    right = edge(h[-1], h[-2], delta[-1], delta[-2]).astype(delta.dtype)
-    return np.concatenate([left[None], interior.astype(delta.dtype), right[None]])
-
-
-def _pchip_interp_host(xq: np.ndarray, x: np.ndarray, y: np.ndarray) -> np.ndarray:
-    h = np.maximum(x[1:] - x[:-1], np.finfo(x.dtype).eps)
-    delta = (y[1:] - y[:-1]) / h
-    d = _pchip_slopes_host(h, delta)
-    n = x.shape[0]
-    idx = np.clip(np.searchsorted(x, xq, side="right") - 1, 0, n - 2)
-    hx = h[idx]
-    t = (xq - x[idx]) / hx
-    t2 = t * t
-    t3 = t2 * t
-    return (
-        (2.0 * t3 - 3.0 * t2 + 1.0) * y[idx]
-        + (t3 - 2.0 * t2 + t) * hx * d[idx]
-        + (-2.0 * t3 + 3.0 * t2) * y[idx + 1]
-        + (t3 - t2) * hx * d[idx + 1]
-    )
-
-
-def _optimize_schedule_host(rejection_rates, betas) -> np.ndarray:
-    """Host-only schedule update used by tuning's Python control loop.
-
-    This mirrors ``nrpt.optimize_schedule`` including endpoint pinning and its
-    monotone-cubic inverse.  Keeping it here avoids changing the traced public
-    helper while eliminating per-ladder XLA executables during chain discovery.
-    """
-    betas = np.asarray(betas)
-    rej = np.asarray(rejection_rates, dtype=betas.dtype)
-    cum = np.concatenate([np.zeros(1, dtype=betas.dtype), np.cumsum(rej)])
-    target = np.linspace(0.0, cum[-1], len(betas), dtype=betas.dtype)
-    if betas.shape[0] >= 3:
-        new = _pchip_interp_host(target, cum, betas)
-    else:
-        new = np.interp(target, cum, betas).astype(betas.dtype, copy=False)
-    new[0] = betas[0]
-    new[-1] = betas[-1]
-    return new
-
-
-def _phase_diagnostics_host(rej, old_betas, new_betas, acceptance_rate):
-    rej = np.asarray(rej)
-    old_betas = np.asarray(old_betas)
-    new_betas = np.asarray(new_betas)
-    acceptance_rate = np.asarray(acceptance_rate)
-    return (
-        float(np.std(rej)),
-        float(np.max(np.abs(new_betas - old_betas))),
-        float(np.sum(rej)),
-        float(np.mean(acceptance_rate)),
-        float(np.max(rej)),
-    )
 
 
 def _require_proper_beta_start(beta0: float, ebm) -> None:
@@ -231,6 +145,71 @@ def _tune_phase_adaptive_rounds(
         "betas": np.asarray(betas),
     }
     return states, pooled_stats, rounds_used
+
+
+def _finalize_schedule_stats(
+    stats: dict, betas: jax.Array | np.ndarray, n_rounds: int
+) -> None:
+    """Attach the two health verdicts to a finished ``tune_schedule`` run.
+
+    Post-hoc reporting only — reads the production stats and writes
+    ``barrier_identified`` and ``conveyor_alive`` back into ``stats`` in place.
+    Kept separate from the phase loop so "run the tuning" and "explain the
+    result" are not interleaved, and kept in this module so its log records
+    still carry the ``hamon.tuning`` logger name that callers capture on.
+
+    The two verdicts are independent: ``barrier_identified`` is structural (did
+    the ladder saturate?), ``conveyor_alive`` is dynamical (did the index
+    process actually round-trip?), and the latter is ``None`` when the window
+    was too short to tell — which must never be reported as a stall.
+    """
+    # Gate on the PRODUCTION run's rates (the kept ladder Lambda comes from) —
+    # the loop-local `rej` belongs to a schedule that may not have been kept.
+    prod_rej = stats["rejection_rates"]
+    resolved = barrier_is_identified(prod_rej)
+    stats["barrier_identified"] = resolved
+    if not resolved:
+        logger.warning(
+            "tune_schedule: barrier NOT resolved — the ladder saturates "
+            "(max rejection=%.3f), so Lambda=%.2f is capped by the chain count "
+            "(Lambda <= N-1 = %d) rather than measuring the barrier; it is an "
+            "underestimate. Add chains or equalize the ladder.",
+            float(np.asarray(prod_rej).max()),
+            float(np.asarray(prod_rej).sum()),
+            int(betas.shape[0]) - 1,
+        )
+
+    rtd = stats.get("round_trip_diagnostics")
+    if rtd is None:
+        return
+    n_rt = int(np.sum(np.asarray(rtd["round_trips_per_chain"])))
+    alive = conveyor_is_alive(
+        float(rtd["tau_observed"]), float(rtd["tau_predicted"]), n_rounds
+    )
+    stats["conveyor_alive"] = alive
+    if alive is None:
+        logger.info(
+            "tune_schedule: round-trip rate not measured — n_rounds=%d "
+            "affords only %.1f expected trips at the optimal rate "
+            "(tau_pred=%.4f), too few to distinguish a slow conveyor from an "
+            "unlucky window. Lambda=%.2f stands on its own (resolved=%s).",
+            n_rounds,
+            float(rtd["tau_predicted"]) * n_rounds,
+            float(rtd["tau_predicted"]),
+            float(rtd["Lambda"]),
+            resolved,
+        )
+    elif not alive:
+        logger.warning(
+            "tune_schedule: DEO conveyor is slow — %d round trips, "
+            "efficiency=%.3f of the optimal rate over %d rounds. Samples "
+            "decorrelate slowly even though Lambda=%.2f is resolved=%s.",
+            n_rt,
+            float(rtd["efficiency"]),
+            n_rounds,
+            float(rtd["Lambda"]),
+            resolved,
+        )
 
 
 def tune_schedule(
@@ -525,87 +504,18 @@ def tune_schedule(
     )
     stats["tuning_history"] = tuning_history
 
-    # Gate on the PRODUCTION run's rates (the kept ladder Lambda comes from) —
-    # the loop-local `rej` belongs to a schedule that may not have been kept.
-    prod_rej = stats["rejection_rates"]
-    resolved = barrier_is_identified(prod_rej)
-    stats["barrier_identified"] = resolved
-    if not resolved:
-        logger.warning(
-            "tune_schedule: barrier NOT resolved — the ladder saturates "
-            "(max rejection=%.3f), so Lambda=%.2f is capped by the chain count "
-            "(Lambda <= N-1 = %d) rather than measuring the barrier; it is an "
-            "underestimate. Add chains or equalize the ladder.",
-            float(np.asarray(prod_rej).max()),
-            float(np.asarray(prod_rej).sum()),
-            int(betas.shape[0]) - 1,
-        )
-
-    # Conveyor health: a *separate*, dynamical diagnostic. None = the window was
-    # too short to tell, which must not be reported as a stall.
-    rtd = stats.get("round_trip_diagnostics")
-    if rtd is not None:
-        n_rt = int(np.sum(np.asarray(rtd["round_trips_per_chain"])))
-        alive = conveyor_is_alive(
-            float(rtd["tau_observed"]), float(rtd["tau_predicted"]), n_rounds
-        )
-        stats["conveyor_alive"] = alive
-        if alive is None:
-            logger.info(
-                "tune_schedule: round-trip rate not measured — n_rounds=%d "
-                "affords only %.1f expected trips at the optimal rate "
-                "(tau_pred=%.4f), too few to distinguish a slow conveyor from an "
-                "unlucky window. Lambda=%.2f stands on its own (resolved=%s).",
-                n_rounds,
-                float(rtd["tau_predicted"]) * n_rounds,
-                float(rtd["tau_predicted"]),
-                float(rtd["Lambda"]),
-                resolved,
-            )
-        elif not alive:
-            logger.warning(
-                "tune_schedule: DEO conveyor is slow — %d round trips, "
-                "efficiency=%.3f of the optimal rate over %d rounds. Samples "
-                "decorrelate slowly even though Lambda=%.2f is resolved=%s.",
-                n_rt,
-                float(rtd["efficiency"]),
-                n_rounds,
-                float(rtd["Lambda"]),
-                resolved,
-            )
+    _finalize_schedule_stats(stats, betas, n_rounds)
     return states, stats
 
 
 # ---------------------------------------------------------------------------
-# Iterative chain count discovery
+# Energy-variance barrier pre-estimate
 # ---------------------------------------------------------------------------
+# Syed et al. (2021), Theorem 2. Seeds the chain-count search below so it
+# converges in one probe instead of two; also reused by the plain block-Gibbs
+# calibration in the last section, which shares the adaptive-warmup machinery.
 
 
-def _probe_history_entry(
-    iteration: int,
-    n: int,
-    lambda_raw: float,
-    lambda_max: float,
-    n_recommended: int,
-    rejection_rates,
-    betas,
-    barrier_identified: bool | None = None,
-) -> dict[str, Any]:
-    """One ``tune_chains`` per-probe history record."""
-    return {
-        "iteration": iteration,
-        "n": int(n),
-        "Lambda_raw": float(lambda_raw),
-        "Lambda_max": float(lambda_max),
-        "n_recommended": int(n_recommended),
-        "rejection_rates": rejection_rates,
-        "betas": betas,
-        "barrier_identified": barrier_identified,
-    }
-
-
-# Energy-variance barrier pre-estimate (Syed et al. 2021, Theorem 2). Used to
-# seed the chain-count search so it converges in one probe instead of two.
 _ENERGY_GRID = 11
 _ENERGY_SAMPLES = 500
 _ENERGY_RESTARTS = 8  # independent chains per β (coverage + the R̂ trap detector)
@@ -779,14 +689,18 @@ def _estimate_barrier_energy(
     single trapped chain looks stable), and the post-hoc R̂ gate on the recorded
     window remains the arbiter.
 
+    Deliberately **not** merged with ``tune_sampling_schedule`` despite the
+    similar shape: the two run different lane geometries (``n_grid × restarts``
+    here, ``R`` replicas there), derive their keys differently, and sweep
+    through separately jitted kernels (``_grid_sweep`` rebinds per-lane
+    interactions, ``_replica_sweep`` shares one program), so a shared driver
+    would merge two jit caches and change one path's key stream. Only the
+    warmup machinery is shared, and that is already factored out into
+    ``_adaptive_warmup``.
+
     Returns ``(Λ̂, R̂_max)``.
     """
-    import contextlib
-
     from hamon._nrpt_energy import _make_reference_ebm
-    from hamon.block_sampling import (
-        SamplingSchedule,
-    )
     from hamon.device import tree_device_put
     from hamon.nrpt import _stack_pbi_across_chains
     from hamon.observers import StateObserver
@@ -846,9 +760,7 @@ def _estimate_barrier_energy(
         )
     else:
         clamp_dev = clamp_state
-    device_ctx = (
-        jax.default_device(dev) if dev is not None else contextlib.nullcontext()
-    )
+    device_ctx = default_device_ctx(dev)
 
     f_obs = StateObserver(spec.free_blocks)
     carry = f_obs.init()
@@ -915,215 +827,32 @@ def _estimate_barrier_energy(
     )
 
 
-# ~p95 of the null single-series window R̂ at (8 restarts, 4-batch window):
-# simulated p50≈1.03, p95≈1.25. The grid's _ENERGY_WARMUP_RHAT is looser
-# (1.45) because it maximizes over 10 grid points; a single chain family
-# needs the tighter cut. Recalibrate if the window/restart counts change.
-_REPLICA_RHAT = 1.25
-_TAU_PROBE_TAG = 0x54415550  # "TAUP": fold_in tag for the autocorrelation probe
+# ---------------------------------------------------------------------------
+# Iterative chain count discovery
+# ---------------------------------------------------------------------------
 
 
-@eqx.filter_jit
-def _replica_sweep(keys, program, sched, states, clamp_state, f_obs, carry):
-    """Vmapped sweep of independent replicas sharing one program.
-
-    The single-program sibling of ``_grid_sweep``: serves the warmup batches
-    and probe passes of :func:`tune_sampling_schedule`.
-    """
-    from hamon.block_sampling import _sample_with_observation_core
-
-    nb = len(states)
-
-    def _lane(k, init_free):
-        _, res = _sample_with_observation_core(
-            k, program, sched, init_free, clamp_state, carry, f_obs
-        )
-        return res
-
-    return jax.vmap(_lane, in_axes=(0, [0] * nb))(keys, states)
-
-
-def _integrated_autocorr(series: np.ndarray, max_lag: int) -> float:
-    """Pooled integrated autocorrelation time of (R, M) series.
-
-    τ_int = 1 + 2·Σ ρ_k, truncated at the first lag whose pooled
-    autocorrelation drops below 0.05 (a simple, conservative cut)."""
-    x = series - series.mean(axis=1, keepdims=True)
-    denom = float((x * x).sum())
-    if denom <= 0.0:
-        return 1.0
-    tau = 1.0
-    for k in range(1, max_lag):
-        rho = float((x[:, :-k] * x[:, k:]).sum()) / denom
-        if rho < 0.05:
-            break
-        tau += 2.0 * rho
-    return tau
-
-
-def tune_sampling_schedule(
-    key: jax.Array,
-    ebm: AbstractEBM,
-    program: BlockSamplingProgram,
-    init_states: list,
-    clamp_state: list | None = None,
-    *,
-    target_ess: int = 64,
-    warmup_cap: int = _ENERGY_WARMUP_MAX,
-    probe_samples: int = 200,
-    rhat_threshold: float = _REPLICA_RHAT,
-    device: DeviceLike = "auto",
-) -> tuple[SamplingSchedule, dict]:
-    """Calibrate a :class:`~hamon.SamplingSchedule` for plain block-Gibbs runs.
-
-    Answers "what warmup, thinning, and sample count does *this* model at
-    *these* parameters need?" — the numbers users otherwise hand-pick for
-    ``estimate_kl_grad`` phases or ``sample_states`` draws. Designed as a
-    calibrate-then-freeze step (e.g. once per training epoch, at the current
-    θ): the returned schedule is static, so a jitted epoch stays one compiled
-    scan.
-
-    Mechanics, reusing the energy-grid warmup machinery:
-
-    - **n_warmup** — adaptive: ``_ENERGY_WARMUP_BATCH``-sweep batches over the
-      independent replica chains in ``init_states``, stopped by the windowed
-      cross-replica R̂ of batch-end energies (stable / plateau / ``warmup_cap``
-      exits, exactly as in ``_estimate_barrier_energy``). A plateau exit means
-      the replicas are trapped in separate basins: the returned warmup is then
-      a floor, not a guarantee — plain Gibbs cannot equilibrate that target
-      and tempered sampling (``autotune``) is the honest fix.
-    - **steps_per_sample** — the pooled integrated autocorrelation time of the
-      chain energy, measured over a ``probe_samples``-sweep probe after
-      warmup; thinning at ~τ makes recorded samples approximately
-      independent.
-    - **n_samples** — ``target_ess``: after thinning at τ the effective sample
-      size is roughly the recorded count (mild residual correlation makes
-      this an approximation, not a bound).
-
-    Arguments:
-        key: PRNG key.
-        ebm: the model (energies are evaluated through its β = 1 base, the
-            same scale the NRPT swap step uses).
-        program: sampling program for the phase being calibrated (clamped
-            blocks included for e.g. a positive/data-clamped phase).
-        init_states: per-block arrays with a leading replica axis ``(R, …)``
-            — e.g. ``hinton_init(key, ebm, free_blocks, (R,))``. R ≥ 2.
-        clamp_state: clamped-block values shared by all replicas.
-        target_ess: recorded samples (≈ effective samples after thinning).
-        warmup_cap: warmup ceiling in sweeps.
-        probe_samples: sweeps recorded for the autocorrelation estimate.
-        rhat_threshold: stopping threshold for the windowed replica R̂.
-        device: where to run; resolved once, as elsewhere.
-
-    Returns:
-        ``(schedule, info)`` — the calibrated schedule and a dict with
-        ``n_warmup``, ``warmup_exit``, ``tau``, ``rhat_final`` (the window R̂
-        at the stop), and ``steps_per_sample``.
-    """
-    import contextlib
-
-    from hamon._nrpt_energy import _make_reference_ebm
-    from hamon.block_sampling import SamplingSchedule
-    from hamon.device import free_node_count, tree_device_put
-    from hamon.observers import StateObserver
-
-    if clamp_state is None:
-        clamp_state = []
-    R = int(jax.tree.leaves(init_states)[0].shape[0])
-    if R < 2:
-        raise ValueError("tune_sampling_schedule needs at least 2 replicas.")
-
-    spec = program.gibbs_spec
-    base_ebm, beta_ref = _make_reference_ebm([ebm], jnp.ones(1))
-
-    dev = resolve_entry_device(
-        device,
-        n_chains=R,
-        n_nodes=free_node_count(program),
-        arrays=(init_states, clamp_state, key),
-    )
-    if dev is not None:
-        key, program, init_states, clamp_dev = tree_device_put(
-            (key, program, init_states, clamp_state), dev
-        )
-    else:
-        clamp_dev = clamp_state
-    device_ctx = (
-        jax.default_device(dev) if dev is not None else contextlib.nullcontext()
-    )
-
-    sched_batch = SamplingSchedule(_ENERGY_WARMUP_BATCH, 1, 1)
-    sched_probe = SamplingSchedule(0, int(probe_samples), 1)
-    f_obs = StateObserver(spec.free_blocks)
-    carry = f_obs.init()
-    keys_flat = jax.random.split(key, R)
-    fold_all = jax.vmap(jax.random.fold_in, in_axes=(0, None))
-    one_beta = np.ones(1)
-
-    with device_ctx:
-
-        def run_batch(states, batch_index):
-            out = _replica_sweep(
-                fold_all(keys_flat, batch_index),
-                program,
-                sched_batch,
-                states,
-                clamp_dev,
-                f_obs,
-                carry,
-            )
-            return [o[:, 0] for o in out]
-
-        def batch_energies(states):
-            return np.asarray(
-                _grid_base_energies(base_ebm, beta_ref, spec, states, clamp_state)
-            ).reshape(1, R)
-
-        states, total, exit_reason, rh = _adaptive_warmup(
-            init_states,
-            run_batch,
-            batch_energies,
-            cap=warmup_cap,
-            rhat_threshold=rhat_threshold,
-            rhat_betas=one_beta,
-            log_label="tune_sampling_schedule",
-        )
-
-        raw = _replica_sweep(
-            fold_all(keys_flat, _TAU_PROBE_TAG),
-            program,
-            sched_probe,
-            states,
-            clamp_dev,
-            f_obs,
-            carry,
-        )  # per free block: (R, probe_samples, …)
-        M = int(probe_samples)
-        flat = [blk.reshape((R * M, *blk.shape[2:])) for blk in raw]
-        E = np.asarray(
-            _grid_base_energies(base_ebm, beta_ref, spec, flat, clamp_state)
-        ).reshape(R, M)
-
-    tau = _integrated_autocorr(E, max_lag=M // 4)
-    steps = max(1, int(np.ceil(tau)))
-    if exit_reason == "plateau":
-        logger.warning(
-            "tune_sampling_schedule: replicas did not merge (window rhat=%.2f) — "
-            "plain Gibbs is trapped on this target; the returned warmup is a "
-            "floor, consider tempered sampling (autotune).",
-            rh,
-        )
-
-    schedule = SamplingSchedule(total, int(target_ess), steps)
-    info = {
-        "n_warmup": total,
-        "warmup_exit": exit_reason,
-        "tau": float(tau),
-        "steps_per_sample": steps,
-        "rhat_final": float(rh),
+def _probe_history_entry(
+    iteration: int,
+    n: int,
+    lambda_raw: float,
+    lambda_max: float,
+    n_recommended: int,
+    rejection_rates,
+    betas,
+    barrier_identified: bool | None = None,
+) -> dict[str, Any]:
+    """One ``tune_chains`` per-probe history record."""
+    return {
+        "iteration": iteration,
+        "n": int(n),
+        "Lambda_raw": float(lambda_raw),
+        "Lambda_max": float(lambda_max),
+        "n_recommended": int(n_recommended),
+        "rejection_rates": rejection_rates,
+        "betas": betas,
+        "barrier_identified": barrier_identified,
     }
-    logger.debug("tune_sampling_schedule: %s", info)
-    return schedule, info
 
 
 # Probe production-window floor, in units of the minimum DEO traversal
@@ -1378,6 +1107,11 @@ def tune_chains(
             "Lambda_raw": 0.0,
             "target_acceptance": target_acceptance,
             "converged_reason": "max_iters",
+            # No probe ran, so nothing measured the barrier — None is the same
+            # "could not tell" the normal path reports when round trips are
+            # missing. The key must be present either way: callers read it
+            # unconditionally.
+            "barrier_identified": None,
             "history": history,
         }
 
@@ -1480,6 +1214,224 @@ def tune_chains(
         "barrier_identified": final_stats.get("barrier_identified"),
         "history": history,
     }
+
+
+# ---------------------------------------------------------------------------
+# Plain block-Gibbs schedule calibration
+# ---------------------------------------------------------------------------
+
+
+# ~p95 of the null single-series window R̂ at (8 restarts, 4-batch window):
+# simulated p50≈1.03, p95≈1.25. The grid's _ENERGY_WARMUP_RHAT is looser
+# (1.45) because it maximizes over 10 grid points; a single chain family
+# needs the tighter cut. Recalibrate if the window/restart counts change.
+_REPLICA_RHAT = 1.25
+_TAU_PROBE_TAG = 0x54415550  # "TAUP": fold_in tag for the autocorrelation probe
+
+
+@eqx.filter_jit
+def _replica_sweep(keys, program, sched, states, clamp_state, f_obs, carry):
+    """Vmapped sweep of independent replicas sharing one program.
+
+    The single-program sibling of ``_grid_sweep``: serves the warmup batches
+    and probe passes of :func:`tune_sampling_schedule`.
+    """
+    from hamon.block_sampling import _sample_with_observation_core
+
+    nb = len(states)
+
+    def _lane(k, init_free):
+        _, res = _sample_with_observation_core(
+            k, program, sched, init_free, clamp_state, carry, f_obs
+        )
+        return res
+
+    return jax.vmap(_lane, in_axes=(0, [0] * nb))(keys, states)
+
+
+def _integrated_autocorr(series: np.ndarray, max_lag: int) -> float:
+    """Pooled integrated autocorrelation time of (R, M) series.
+
+    τ_int = 1 + 2·Σ ρ_k, truncated at the first lag whose pooled
+    autocorrelation drops below 0.05 (a simple, conservative cut)."""
+    x = series - series.mean(axis=1, keepdims=True)
+    denom = float((x * x).sum())
+    if denom <= 0.0:
+        return 1.0
+    tau = 1.0
+    for k in range(1, max_lag):
+        rho = float((x[:, :-k] * x[:, k:]).sum()) / denom
+        if rho < 0.05:
+            break
+        tau += 2.0 * rho
+    return tau
+
+
+def tune_sampling_schedule(
+    key: jax.Array,
+    ebm: AbstractEBM,
+    program: BlockSamplingProgram,
+    init_states: list,
+    clamp_state: list | None = None,
+    *,
+    target_ess: int = 64,
+    warmup_cap: int = _ENERGY_WARMUP_MAX,
+    probe_samples: int = 200,
+    rhat_threshold: float = _REPLICA_RHAT,
+    device: DeviceLike = "auto",
+) -> tuple[SamplingSchedule, dict]:
+    """Calibrate a :class:`~hamon.SamplingSchedule` for plain block-Gibbs runs.
+
+    Answers "what warmup, thinning, and sample count does *this* model at
+    *these* parameters need?" — the numbers users otherwise hand-pick for
+    ``estimate_kl_grad`` phases or ``sample_states`` draws. Designed as a
+    calibrate-then-freeze step (e.g. once per training epoch, at the current
+    θ): the returned schedule is static, so a jitted epoch stays one compiled
+    scan.
+
+    Mechanics, reusing the energy-grid warmup machinery:
+
+    - **n_warmup** — adaptive: ``_ENERGY_WARMUP_BATCH``-sweep batches over the
+      independent replica chains in ``init_states``, stopped by the windowed
+      cross-replica R̂ of batch-end energies (stable / plateau / ``warmup_cap``
+      exits, exactly as in ``_estimate_barrier_energy``). A plateau exit means
+      the replicas are trapped in separate basins: the returned warmup is then
+      a floor, not a guarantee — plain Gibbs cannot equilibrate that target
+      and tempered sampling (``autotune``) is the honest fix.
+    - **steps_per_sample** — the pooled integrated autocorrelation time of the
+      chain energy, measured over a ``probe_samples``-sweep probe after
+      warmup; thinning at ~τ makes recorded samples approximately
+      independent.
+    - **n_samples** — ``target_ess``: after thinning at τ the effective sample
+      size is roughly the recorded count (mild residual correlation makes
+      this an approximation, not a bound).
+
+    Arguments:
+        key: PRNG key.
+        ebm: the model (energies are evaluated through its β = 1 base, the
+            same scale the NRPT swap step uses).
+        program: sampling program for the phase being calibrated (clamped
+            blocks included for e.g. a positive/data-clamped phase).
+        init_states: per-block arrays with a leading replica axis ``(R, …)``
+            — e.g. ``hinton_init(key, ebm, free_blocks, (R,))``. R ≥ 2.
+        clamp_state: clamped-block values shared by all replicas.
+        target_ess: recorded samples (≈ effective samples after thinning).
+        warmup_cap: warmup ceiling in sweeps.
+        probe_samples: sweeps recorded for the autocorrelation estimate.
+        rhat_threshold: stopping threshold for the windowed replica R̂.
+        device: where to run; resolved once, as elsewhere.
+
+    Returns:
+        ``(schedule, info)`` — the calibrated schedule and a dict with
+        ``n_warmup``, ``warmup_exit``, ``tau``, ``rhat_final`` (the window R̂
+        at the stop), and ``steps_per_sample``.
+
+    Note:
+        This reuses the warmup machinery of ``_estimate_barrier_energy`` (via
+        ``_adaptive_warmup``) but is deliberately a separate driver — see that
+        function's docstring for why merging the two would fuse their jit
+        caches and change a key stream. Nothing here is tempered: no ladder,
+        no swaps, one β.
+    """
+    from hamon._nrpt_energy import _make_reference_ebm
+    from hamon.device import free_node_count, tree_device_put
+    from hamon.observers import StateObserver
+
+    if clamp_state is None:
+        clamp_state = []
+    R = int(jax.tree.leaves(init_states)[0].shape[0])
+    if R < 2:
+        raise ValueError("tune_sampling_schedule needs at least 2 replicas.")
+
+    spec = program.gibbs_spec
+    base_ebm, beta_ref = _make_reference_ebm([ebm], jnp.ones(1))
+
+    dev = resolve_entry_device(
+        device,
+        n_chains=R,
+        n_nodes=free_node_count(program),
+        arrays=(init_states, clamp_state, key),
+    )
+    if dev is not None:
+        key, program, init_states, clamp_dev = tree_device_put(
+            (key, program, init_states, clamp_state), dev
+        )
+    else:
+        clamp_dev = clamp_state
+    device_ctx = default_device_ctx(dev)
+
+    sched_batch = SamplingSchedule(_ENERGY_WARMUP_BATCH, 1, 1)
+    sched_probe = SamplingSchedule(0, int(probe_samples), 1)
+    f_obs = StateObserver(spec.free_blocks)
+    carry = f_obs.init()
+    keys_flat = jax.random.split(key, R)
+    fold_all = jax.vmap(jax.random.fold_in, in_axes=(0, None))
+    one_beta = np.ones(1)
+
+    with device_ctx:
+
+        def run_batch(states, batch_index):
+            out = _replica_sweep(
+                fold_all(keys_flat, batch_index),
+                program,
+                sched_batch,
+                states,
+                clamp_dev,
+                f_obs,
+                carry,
+            )
+            return [o[:, 0] for o in out]
+
+        def batch_energies(states):
+            return np.asarray(
+                _grid_base_energies(base_ebm, beta_ref, spec, states, clamp_state)
+            ).reshape(1, R)
+
+        states, total, exit_reason, rh = _adaptive_warmup(
+            init_states,
+            run_batch,
+            batch_energies,
+            cap=warmup_cap,
+            rhat_threshold=rhat_threshold,
+            rhat_betas=one_beta,
+            log_label="tune_sampling_schedule",
+        )
+
+        raw = _replica_sweep(
+            fold_all(keys_flat, _TAU_PROBE_TAG),
+            program,
+            sched_probe,
+            states,
+            clamp_dev,
+            f_obs,
+            carry,
+        )  # per free block: (R, probe_samples, …)
+        M = int(probe_samples)
+        flat = [blk.reshape((R * M, *blk.shape[2:])) for blk in raw]
+        E = np.asarray(
+            _grid_base_energies(base_ebm, beta_ref, spec, flat, clamp_state)
+        ).reshape(R, M)
+
+    tau = _integrated_autocorr(E, max_lag=M // 4)
+    steps = max(1, int(np.ceil(tau)))
+    if exit_reason == "plateau":
+        logger.warning(
+            "tune_sampling_schedule: replicas did not merge (window rhat=%.2f) — "
+            "plain Gibbs is trapped on this target; the returned warmup is a "
+            "floor, consider tempered sampling (autotune).",
+            rh,
+        )
+
+    schedule = SamplingSchedule(total, int(target_ess), steps)
+    info = {
+        "n_warmup": total,
+        "warmup_exit": exit_reason,
+        "tau": float(tau),
+        "steps_per_sample": steps,
+        "rhat_final": float(rh),
+    }
+    logger.debug("tune_sampling_schedule: %s", info)
+    return schedule, info
 
 
 # ---------------------------------------------------------------------------
@@ -1659,6 +1611,66 @@ def _select_gibbs_steps_ele(
         if _eff(r) >= best_eff * (1.0 - improve_tol):
             best = r
             break
+    return best, history
+
+
+def _select_gibbs_steps_cost(
+    probe: Callable[[int], dict],
+    start_steps: int,
+    max_steps: int,
+    improve_tol: float,
+    rounds_per_probe: int,
+) -> tuple[dict, list[dict]]:
+    """Pick n_expl by ESS-driven doubling, scored against one fitted cost line.
+
+    The reuse-timing strategy: because every probe reuses the same schedule, the
+    doubling is driven by **ESS** alone (a deterministic probe set), and wall
+    time enters only afterwards through a single least-squares cost line
+    ``t_round ≈ c₀ + c_s·n_expl`` fitted across all probes. Scoring every record
+    against that fitted line rather than its own measured time is what keeps the
+    near-flat peak from flipping between counts on timing noise; requiring a
+    ``> improve_tol`` gain to climb resolves it to the cheaper count.
+
+    Note the ``history`` records are rewritten in place: ``t_round`` is replaced
+    by its fitted value and ``objective`` is filled in. Callers surface that same
+    list, so the fitted numbers are what users see.
+
+    Sibling of :func:`_select_gibbs_steps` and :func:`_select_gibbs_steps_ele`.
+    The three share a doubling skeleton but differ in their stopping metric
+    (fitted objective / round-trip efficiency / raw ESS), the order their breaks
+    are tested, and how the winner is chosen (running best / cheapest within tol
+    of the plateau / post-hoc argmax over the rescored history). They are kept
+    separate deliberately: the probe count drives ``jax.random.split`` in
+    ``tune_exploration``, so merging them behind a shared predicate list would
+    risk silently reordering a break and re-baselining the sample stream.
+
+    Pure control logic (no JAX), unit-testable with a synthetic ``probe``.
+    """
+    history: list[dict] = []
+    n = start_steps
+    while True:
+        rec = probe(n)
+        history.append(rec)
+        if rec.get("efficiency_limiter") == "schedule":
+            break  # schedule-limited: more local exploration cannot help
+        if n >= max_steps:
+            break
+        if len(history) >= 2 and rec["ess_median"] <= history[-2]["ess_median"] * (
+            1.0 + improve_tol
+        ):
+            break  # ESS saturated: extra sweeps no longer decorrelate
+        n *= 2
+    c0, cs = _fit_cost_line(
+        [r["n_expl"] for r in history], [r["t_round"] for r in history]
+    )
+    for r in history:
+        tr = c0 + r["n_expl"] * cs
+        r["t_round"] = tr
+        r["objective"] = r["ess_median"] / (rounds_per_probe * tr) if tr > 0 else 0.0
+    best = history[0]
+    for r in history[1:]:
+        if r["objective"] > best["objective"] * (1.0 + improve_tol):
+            best = r
     return best, history
 
 
@@ -1911,36 +1923,13 @@ def tune_exploration(
             float(target_efficiency),
         )
     elif use_reuse_timing:
-        # ESS-driven doubling (deterministic probe set), then one fitted cost
-        # line; requiring a >improve_tol gain to climb resolves the near-flat
-        # peak to the cheaper count instead of flipping on timing noise.
-        history = []
-        n = int(start_steps)
-        while True:
-            rec = probe(n)
-            history.append(rec)
-            if rec.get("efficiency_limiter") == "schedule":
-                break  # schedule-limited: more local exploration cannot help
-            if n >= int(max_steps):
-                break
-            if len(history) >= 2 and rec["ess_median"] <= history[-2]["ess_median"] * (
-                1.0 + float(improve_tol)
-            ):
-                break  # ESS saturated: extra sweeps no longer decorrelate
-            n *= 2
-        c0, cs = _fit_cost_line(
-            [r["n_expl"] for r in history], [r["t_round"] for r in history]
+        best, history = _select_gibbs_steps_cost(
+            probe,
+            int(start_steps),
+            int(max_steps),
+            float(improve_tol),
+            int(rounds_per_probe),
         )
-        for r in history:
-            tr = c0 + r["n_expl"] * cs
-            r["t_round"] = tr
-            r["objective"] = (
-                r["ess_median"] / (rounds_per_probe * tr) if tr > 0 else 0.0
-            )
-        best = history[0]
-        for r in history[1:]:
-            if r["objective"] > best["objective"] * (1.0 + float(improve_tol)):
-                best = r
     else:
         best, history = _select_gibbs_steps(
             probe, int(start_steps), int(max_steps), float(improve_tol)

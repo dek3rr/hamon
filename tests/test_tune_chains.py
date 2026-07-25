@@ -310,6 +310,42 @@ class TestDiscoverChainCount:
             "max_iters",
         }
 
+    def test_zero_iters_returns_the_same_keys(self):
+        """The no-probe early return must not drop keys the normal path supplies.
+
+        max_iters<=0 short-circuits before any probe runs and builds its own
+        result dict. Callers read the result by key regardless of which branch
+        produced it, so the two key sets have to agree.
+        """
+        common = dict(
+            beta_range=(0.5, 1.5),
+            gibbs_steps_per_round=2,
+            rounds_per_probe=20,
+            n_tune_per_probe=2,
+            initial_n=4,
+        )
+        early = tune_chains(
+            jax.random.key(0),
+            _ebm_factory,
+            _program_factory,
+            _init_factory,
+            [],
+            max_iters=0,
+            **common,
+        )
+        normal = tune_chains(
+            jax.random.key(0),
+            _ebm_factory,
+            _program_factory,
+            _init_factory,
+            [],
+            max_iters=1,
+            **common,
+        )
+        assert set(early) == set(normal)
+        # Nothing measured the barrier, so it is unknown rather than False.
+        assert early["barrier_identified"] is None
+
 
 # ---------------------------------------------------------------------------
 # Max-Λ tracking

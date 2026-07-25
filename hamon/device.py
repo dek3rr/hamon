@@ -22,6 +22,7 @@ under ``jax.default_device``; outputs come back committed to that device.
 
 from __future__ import annotations
 
+import contextlib
 import os
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -258,4 +259,17 @@ def tree_device_put(tree: _T, device: JaxDevice | None) -> _T:
     return jax.tree.map(
         lambda x: jax.device_put(x, device) if isinstance(x, jax.Array) else x,
         tree,
+    )
+
+
+def default_device_ctx(device: JaxDevice | None) -> contextlib.AbstractContextManager:
+    """Pin ``jax.default_device`` to ``device``, or do nothing when it is ``None``.
+
+    The ``None`` case is hamon's opt-out (see the module docstring), and it must
+    stay a genuine no-op rather than a default placement, so every entry point
+    that resolves a device pairs it with this. Returns the context manager
+    itself rather than wrapping it in a generator, so entering it costs no extra
+    frame on paths that run it per tuning phase."""
+    return (
+        jax.default_device(device) if device is not None else contextlib.nullcontext()
     )
