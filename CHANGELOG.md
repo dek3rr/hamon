@@ -52,6 +52,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at 46; `gaussian_init` 15.2 s → 0.99 s cold and 149 ms → 27 ms warm at 46
   blocks, 19.2 s → 1.11 s and 391 ms → 57 ms at 128.
 
+### Removed
+
+- **BREAKING: the unused block-partitioning and edge-classification helpers are
+  gone.** `hamon.dynamic_blocks` is deleted outright, and `EdgePartition` /
+  `make_rectangular_blocks` are dropped from `hamon.boundary_energy`. The seven
+  names this removes from the top-level namespace are `compute_aggregate_influence`,
+  `influence_aware_partition`, `per_temperature_block_config`, `dynamic_reblock`,
+  `classify_nodes`, `EdgePartition`, and `make_rectangular_blocks`.
+
+  None of them was ever called by the sampling pipeline — they were exported and
+  tested but reached only from their own test files, so the block-Gibbs and NRPT
+  paths are untouched and the sample stream is unchanged. `make_ising_delta_fn`
+  and `ising_energy_delta` stay: they are the reference implementation for
+  `nrpt`'s `energy_delta_fn` extension point and remain covered.
+
+  Also removed, all private or unexported: `graph_utils.auto_color_blocks` (no
+  callers and no tests, despite the module docstring calling it the key entry
+  point — `rlf_coloring` is what the Ising path actually uses), and
+  `nrpt._phase_diagnostics` / `nrpt._pooled_lambda`, orphaned when schedule
+  tuning moved host-side to `tuning._phase_diagnostics_host` /
+  `tuning._pooled_lambda_host`.
+
 ### Fixed
 
 - **The `beta="auto"` descent probe no longer thrashes on dense graphs.** The

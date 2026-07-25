@@ -122,15 +122,6 @@ distinct chain count and each distinct `n_expl` recompiles the round loop,
 `autotune` enables JAX's persistent compilation cache by default so those
 recompiles are amortized across probes and across runs.
 
-## Dynamic blocks
-
-For models where different temperature levels benefit from different block
-granularity, `dynamic_blocks` provides influence-aware partitioning.
-`compute_aggregate_influence` measures how strongly each node couples to its
-neighbors. `influence_aware_partition` then groups nodes into blocks of a
-target size, keeping strongly-coupled nodes together. `per_temperature_block_config`
-can assign different block sizes to different chains based on temperature.
-
 ## Class hierarchy
 
 ### Factors

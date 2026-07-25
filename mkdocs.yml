@@ -123,7 +123,6 @@ nav:
             - 'api/diagnostics.md'
             - 'api/advisor.md'
         - Advanced:
-            - 'api/dynamic_blocks.md'
             - 'api/boundary_energy.md'
         - Models:
             - 'api/models/ebm.md'

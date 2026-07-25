@@ -32,3 +32,5 @@ tuners and the core single run are below them.
 ::: hamon.tune_chains
 
 ::: hamon.tune_exploration
+
+::: hamon.tune_sampling_schedule
