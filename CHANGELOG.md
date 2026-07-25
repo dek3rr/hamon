@@ -76,6 +76,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`tune_chains(max_iters=0)` now returns a `barrier_identified` key like every
+  other path.** With no probes to run, `tune_chains` short-circuits and builds
+  its own result dict, which omitted the key the docstring documents and the
+  normal path always supplies — so a caller reading `result["barrier_identified"]`
+  got a `KeyError` on that branch alone. It now reports `None` ("could not
+  tell"), the same value the normal path uses when nothing measured the barrier.
+  `autotune` never takes this branch, so nothing in hamon was affected.
+
 - **The `beta="auto"` descent probe no longer thrashes on dense graphs.** The
   greedy descent behind the excitation-cost spectrum flips a random half of
   the improvable sites each sweep, which descends on sparse graphs but

@@ -1107,6 +1107,11 @@ def tune_chains(
             "Lambda_raw": 0.0,
             "target_acceptance": target_acceptance,
             "converged_reason": "max_iters",
+            # No probe ran, so nothing measured the barrier — None is the same
+            # "could not tell" the normal path reports when round trips are
+            # missing. The key must be present either way: callers read it
+            # unconditionally.
+            "barrier_identified": None,
             "history": history,
         }
 
