@@ -358,8 +358,6 @@ def _block_layout(block: Block, spec: BlockSpec) -> tuple[int, int | None, np.nd
     # this holds under the per-block layout too; a block's nodes share one
     # slot, so the first node fixes it.
     sd_ind = spec.node_global_location_map[block.nodes[0]][0]
-    # int32: these are scatter/gather indices into a node axis (see the
-    # matching note in `_build_block_structure`).
     locs = np.array(
         [spec.node_global_location_map[node][1] for node in block], dtype=np.int32
     )

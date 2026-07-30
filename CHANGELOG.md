@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
+- **Block samplers split their PRNG keys once per sweep, not once per block.**
+  `_run_blocks` unrolls its block loop, so every
+  `AbstractParametricConditionalSampler` emitted its own threefry expansion —
+  ~93% of the per-block HLO, and the reason both compile time and sweep time
+  scaled linearly with block count at fixed work. The runner now pre-splits all
+  blocks' keys in one `vmap`, which is bit-identical (threefry is per-key).
+  Samplers declare their appetite via the new `AbstractConditionalSampler.n_keys`
+  (default 1, so custom samplers are unaffected). Gated at three blocks, below
+  which batching costs more than it saves, leaving 2-colour graphs untouched.
+  Sweep compile drops ~20% at 3 blocks, ~31% at 6 and ~40% at 32, with sweep
+  time down ~36% at 32; a 6-colour `ising_sample` is ~25% faster cold.
+
+- **The sample-collection scan threads global state instead of rebuilding it.**
+  Each collected sample went global → block-local → global, and that rebuild is
+  a real concatenation under the shared layout. `_run_blocks` now accepts the
+  caller's existing global state. Per collected sample: ~60% faster on
+  shared-layout models, ~12% on per-block ones.
+
+- **Assorted eager XLA compiles removed from the orchestration paths.** Sibling
+  eager ops of differing shapes each cost a standalone module, so they are now
+  fused: the per-chain key split in `sample_states_batched`, the chain-masking
+  unpad slices, `_stack_init_states`' per-block stacks, and `autotune`'s
+  trace/energy thinning. `ising_sample`'s degenerate-model checks and reported
+  mean moved to NumPy — they were device reductions run only to log a warning
+  or report one scalar — and an identity `jnp.tile` every Ising bias factor was
+  dispatching is now skipped. Cold `ising_sample` goes from 44 compiles (35 of
+  them eager) to 31 (21); `sample_states_batched` from 2 to 1, with none eager.
+  All bit-identical.
+
 - **The warm ladder stays in nrpt's stacked form from tuning through the draw.**
   `autotune`'s schedule-polish production run unstacked its final states into a
   per-chain, per-block list, which the first tempered draw then re-stacked —

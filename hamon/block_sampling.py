@@ -272,10 +272,6 @@ def _build_block_structure(
         ):
             if n_interactions > 0:
                 n_nodes = len(block.nodes)
-                # int32, not the platform default: these index node axes, so
-                # int32 spans any graph that fits in memory, and under
-                # `jax_enable_x64` the default would widen every gather index
-                # in the sweep to 64 bits for nothing.
                 interaction_slices = np.zeros((n_nodes, n_interactions), dtype=np.int32)
                 global_inds: list[int | None] = [
                     None for _ in interaction_group.tail_nodes
