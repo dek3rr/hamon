@@ -154,6 +154,20 @@ def _cold_trace_from_observations(observations: list, col_perm: jax.Array) -> ja
     return flat[:, col_perm]
 
 
+@partial(jax.jit, static_argnums=(2, 3, 4))
+def _thin_draws(trace, energy, n_warmup: int, steps: int, n_samples: int):
+    """Drop the warmup and thin the trace and its energies together.
+
+    One jit for the pair: the trace and the energies have different ranks, so
+    as separate eager strided slices they are two differently-shaped
+    dynamic_slices and XLA compiles a standalone module for each.
+    """
+    return (
+        trace[n_warmup::steps][:n_samples],
+        energy[n_warmup::steps][:n_samples],
+    )
+
+
 @dataclass
 class NRPTPlan:
     """A tuned NRPT configuration plus a warm, equilibrated ladder.
@@ -339,10 +353,12 @@ class NRPTPlan:
         self._last_steps = steps
         # Keep exactly the energies of the returned draws (post-warmup,
         # thinned) — the advisor reasons about what the caller actually holds.
-        self._energy_chunks = [energy[n_warmup::steps][:n_samples]]
+        # One jit for the pair: eagerly they are two standalone compiles.
+        kept_trace, kept_energy = _thin_draws(trace, energy, n_warmup, steps, n_samples)
+        self._energy_chunks = [kept_energy]
         self._window_stats = [self._window_dict(stats, n_total)]
         self._compute_advice(warn_beta_limited=False)
-        return trace[n_warmup::steps][:n_samples]
+        return kept_trace
 
     def extend(
         self,

@@ -1,5 +1,6 @@
 # Modified from the original thrml library (https://github.com/Extropic-AI/thrml)
 
+import collections
 import dataclasses
 from collections import defaultdict
 from typing import TypeAlias
@@ -15,9 +16,9 @@ from hamon.block_management import (
     Block,
     BlockSpec,
     _block_layout,
+    _gather_axis0,
     block_state_to_global,
     from_global_state,
-    scatter_block_to_global,
     to_per_block_layout,
     verify_block_state,
 )
@@ -119,7 +120,7 @@ class BlockGibbsSpec(BlockSpec):
 
 def _tree_slice(x, sl):
     if eqx.is_array(x):
-        return jnp.take(x, sl, axis=0)
+        return _gather_axis0(x, sl)
     return x
 
 
@@ -271,12 +272,16 @@ def _build_block_structure(
         ):
             if n_interactions > 0:
                 n_nodes = len(block.nodes)
-                interaction_slices = np.zeros((n_nodes, n_interactions), dtype=int)
+                # int32, not the platform default: these index node axes, so
+                # int32 spans any graph that fits in memory, and under
+                # `jax_enable_x64` the default would widen every gather index
+                # in the sweep to 64 bits for nothing.
+                interaction_slices = np.zeros((n_nodes, n_interactions), dtype=np.int32)
                 global_inds: list[int | None] = [
                     None for _ in interaction_group.tail_nodes
                 ]
                 global_slices = [
-                    np.zeros((n_nodes, n_interactions), dtype=int)
+                    np.zeros((n_nodes, n_interactions), dtype=np.int32)
                     for _ in interaction_group.tail_nodes
                 ]
                 active = np.zeros((n_nodes, n_interactions), dtype=bool)
@@ -483,6 +488,87 @@ class BlockSamplingProgram(eqx.Module):
 _State: TypeAlias = PyTree[Shaped[Array, "nodes ?*state"], "_State"]
 
 
+# Fewest same-`n_keys` blocks for which one batched pre-split is worth it. At
+# two the batched expansion plus its slices costs more to compile than the two
+# expansions it replaces; from three on, collapsing them wins. Measured — see
+# `_block_keys` for what the batching buys.
+_BATCHED_SPLIT_MIN_BLOCKS = 3
+
+
+def _block_keys(key: Key[Array, ""], samplers: list[AbstractConditionalSampler]):
+    """One PRNG key (or key stack) per free block, batching the sub-splits.
+
+    Samplers that consume more than one key per update — every
+    `AbstractParametricConditionalSampler`, which needs one for the parameters
+    and one for the draw — would otherwise each split their own key inside the
+    unrolled block loop, emitting a separate threefry expansion per block. That
+    expansion, not the neighbour gathers or the write-back, is the bulk of the
+    sweep's emitted HLO and of its compile time once a graph has many blocks.
+
+    Splitting them all in one `vmap` is bit-identical (threefry is per-key, so
+    the vmapped split reproduces each sampler's own split exactly) while
+    collapsing those expansions to one. Below
+    `_BATCHED_SPLIT_MIN_BLOCKS` blocks it does not pay, and each sampler keeps
+    splitting its own key.
+    """
+    keys = jax.random.split(key, len(samplers))
+    counts = collections.Counter(s.n_keys for s in samplers)
+
+    out = list(keys)
+    for m, n in counts.items():
+        if m == 1 or n < _BATCHED_SPLIT_MIN_BLOCKS:
+            continue
+        stacks = jax.vmap(lambda k, _m=m: jax.random.split(k, _m))(keys)
+        for i, sampler in enumerate(samplers):
+            if sampler.n_keys == m:
+                out[i] = stacks[i]
+    return out
+
+
+def _slot_after_write(slot_value, new_state, owns_slot, slice_start, positions):
+    """Value of one global-state slot after writing *new_state* into it.
+
+    Three cases, cheapest first: the block is the sole occupant of its slot
+    (the per-block layout), so the write is just the new state; it occupies a
+    contiguous range, so the write is a static-offset
+    `dynamic_update_slice`, which XLA fuses far better than a scatter; or it
+    covers an arbitrary node set and falls back to a gather-index scatter.
+    """
+    if owns_slot:
+        return new_state
+    if slice_start is not None:
+        return jax.tree.map(
+            lambda g, s: jax.lax.dynamic_update_slice_in_dim(g, s, slice_start, axis=0),
+            slot_value,
+            new_state,
+        )
+    return jax.tree.map(lambda g, s: g.at[positions].set(s), slot_value, new_state)
+
+
+def _write_block_to_global(
+    global_state: list[PyTree],
+    new_state: _State,
+    program: "BlockSamplingProgram",
+    block: int,
+) -> list[PyTree]:
+    """Write free block *block*'s new state back into the global state list.
+
+    Uses the program's precomputed layout metadata, so — unlike
+    [`hamon.scatter_block_to_global`][], which rederives it from the spec —
+    this costs no host work per call.
+    """
+    sd_ind = program._block_sd_inds[block]
+    new_global = list(global_state)
+    new_global[sd_ind] = _slot_after_write(
+        global_state[sd_ind],
+        new_state,
+        program._block_owns_slot[block],
+        program._block_slice_starts[block],
+        program._block_positions[block],
+    )
+    return new_global
+
+
 def sample_single_block(
     key: Key[Array, ""],
     state_free: list[_State],
@@ -534,7 +620,7 @@ def sample_single_block(
         for ind, sl in zip(interaction_global_inds, interaction_slices):
             this_interaction_states.append(
                 jax.tree.map(
-                    lambda x: jnp.take(x, sl, axis=0),  # shape -> (n, m, …)
+                    lambda x, _sl=sl: _gather_axis0(x, _sl),  # shape -> (n, m, …)
                     global_state[ind],
                 )
             )
@@ -590,7 +676,7 @@ def sample_blocks(
     state_free = list(state_free)
     sampler_state = list(sampler_state)
 
-    keys = jax.random.split(key, (len(program.gibbs_spec.free_blocks),))
+    keys = _block_keys(key, program.samplers)
     global_state = block_state_to_global(state_free + clamp_state, program.gibbs_spec)
 
     for sampling_group in program.gibbs_spec.sampling_order:
@@ -609,12 +695,9 @@ def sample_blocks(
             state_free[i] = new_state
             # Targeted scatter: update only the positions that changed rather
             # than rebuilding the full global tensor at the next group boundary.
-            global_state = scatter_block_to_global(
-                global_state,
-                new_state,
-                program.gibbs_spec.free_blocks[i],
-                program.gibbs_spec,
-            )
+            # Goes through the program's cached layout metadata, so no
+            # per-call host walk of the node-location map.
+            global_state = _write_block_to_global(global_state, new_state, program, i)
 
     return state_free, sampler_state
 
@@ -622,11 +705,12 @@ def sample_blocks(
 def _run_blocks(
     key: Key[Array, ""],
     program: BlockSamplingProgram,
-    init_chain_state: list[PyTree[Shaped[Array, "nodes ?*state"]]],
+    init_chain_state: list[PyTree[Shaped[Array, "nodes ?*state"]]] | None,
     state_clamp: list[_State],
     n_iters: int,
     sampler_states: list[_SamplerState],
     per_block_interactions: list[list[PyTree]] | None = None,
+    init_global_state: list[PyTree] | None = None,
 ) -> tuple[
     list[PyTree[Shaped[Array, "nodes ?*state"]]], list[_SamplerState], list[PyTree]
 ]:
@@ -643,14 +727,29 @@ def _run_blocks(
         When provided, replaces `program.per_block_interactions` throughout
         the scan. Used by parallel tempering to inject per-chain β-scaled
         weights into a vmapped runner.
+    - `init_global_state`: Optionally the already-assembled global state for
+        `init_chain_state + state_clamp`. A caller that runs `_run_blocks`
+        repeatedly — the sample-collection scan — already holds the global
+        state the previous call ended on, and under the shared layout
+        re-deriving it from block-local state is a real concatenation on every
+        call. When this is given, `init_chain_state` may be `None`.
     """
 
     # Build global state once before scan (clamped slice is static).
-    init_global_state = block_state_to_global(
-        init_chain_state + state_clamp, program.gibbs_spec
-    )
+    if init_global_state is None:
+        if init_chain_state is None:
+            raise ValueError(
+                "_run_blocks needs init_chain_state unless init_global_state is given."
+            )
+        init_global_state = block_state_to_global(
+            init_chain_state + state_clamp, program.gibbs_spec
+        )
 
     if n_iters == 0:
+        if init_chain_state is None:
+            init_chain_state = from_global_state(
+                init_global_state, program.gibbs_spec, program.gibbs_spec.free_blocks
+            )
         return init_chain_state, sampler_states, init_global_state
 
     pbi = (
@@ -667,7 +766,7 @@ def _run_blocks(
     def body_fn(carry, _key):
         sampler_state, global_state = carry
 
-        keys = jax.random.split(_key, len(program.gibbs_spec.free_blocks))
+        keys = _block_keys(_key, program.samplers)
 
         for sampling_group in program.gibbs_spec.sampling_order:
             # Collect all updates for this group before writing back.
@@ -689,37 +788,28 @@ def _run_blocks(
                 new_sampler_states[i] if i in new_sampler_states else sampler_state[i]
                 for i in range(len(sampler_state))
             ]
+            # One list rebuild for the whole group rather than one per block.
+            # Writes chain through `new_global`, so two blocks landing in
+            # different ranges of the same shared slot both survive.
+            new_global = list(global_state)
             for i in new_states:
                 sd_ind = block_sd_inds[i]
-                new_global = list(global_state)
-                if block_owns_slot[i]:
-                    # Sole occupant of its slot (per-block layout): replace
-                    # the whole slot with no slice/scatter — the main lever
-                    # against dispatch-bound Gibbs sweeps.
-                    new_global[sd_ind] = new_states[i]
-                elif block_slice_starts[i] is not None:
-                    # Contiguous block: a static-offset dynamic_update_slice,
-                    # which XLA fuses far better than a gather-index scatter.
-                    start = block_slice_starts[i]
-                    new_global[sd_ind] = jax.tree.map(
-                        lambda g, s: jax.lax.dynamic_update_slice_in_dim(
-                            g, s, start, axis=0
-                        ),
-                        global_state[sd_ind],
-                        new_states[i],
-                    )
-                else:
-                    positions = block_positions[i]
-                    new_global[sd_ind] = jax.tree.map(
-                        lambda g, s: g.at[positions].set(s),
-                        global_state[sd_ind],
-                        new_states[i],
-                    )
-                global_state = new_global
+                new_global[sd_ind] = _slot_after_write(
+                    new_global[sd_ind],
+                    new_states[i],
+                    block_owns_slot[i],
+                    block_slice_starts[i],
+                    block_positions[i],
+                )
+            global_state = new_global
 
         return (sampler_state, global_state), None
 
     keys = jax.random.split(key, n_iters)
+    # The whole global state rides the carry, clamped-only slots included:
+    # carrying only the written slots was measured to change neither the
+    # compiled carry width nor the sweep time (XLA already hoists the invariant
+    # ones), and cannot help at all under the shared layout.
     (final_sampler_states, final_global), _ = jax.lax.scan(
         body_fn, (sampler_states, init_global_state), keys
     )
@@ -869,22 +959,27 @@ def _sample_with_observation_core(
         return mem, warmup_observation
 
     def body_fn(carry, input):
-        (prev_state, prev_sampler_state), _mem = carry
+        (prev_global, prev_sampler_state), _mem = carry
 
         _key, i = input
 
+        # Hand the previous global state straight back in, so a collected
+        # sample skips the global -> block-local -> global round trip (a real
+        # concatenation under the shared layout). The observer's free-block
+        # states still come out of `_run_blocks`.
         new_state, new_sampler_state, new_global = _run_blocks(
             _key,
             program,
-            prev_state,
+            None,
             state_clamp,
             schedule.steps_per_sample,
             prev_sampler_state,
+            init_global_state=prev_global,
         )
         _mem, observe_out = f_observe(
             program, new_state, state_clamp, _mem, i, new_global
         )
-        new_carry = ((new_state, new_sampler_state), _mem)
+        new_carry = ((new_global, new_sampler_state), _mem)
         return new_carry, observe_out
 
     keys = jax.random.split(key, schedule.n_samples - 1)
@@ -893,7 +988,7 @@ def _sample_with_observation_core(
     inputs = (keys, outer_iters)
 
     (_, mem_out), observed_results = jax.lax.scan(
-        body_fn, ((warmup_state, warmup_sampler_states), mem), inputs
+        body_fn, ((warmup_global, warmup_sampler_states), mem), inputs
     )
 
     # need to prepend the first observation from the warmup
@@ -991,8 +1086,45 @@ def sample_states_batched(
 
     f_observe = StateObserver(nodes_to_sample)
     carry_init = f_observe.init()
-    keys = jax.random.split(key, n_chains)
     n_free = len(program.gibbs_spec.free_blocks)
+
+    with device_ctx:
+        return _sample_states_batched_core(
+            key,
+            program,
+            schedule,
+            init_states_free,
+            state_clamp,
+            f_observe,
+            carry_init,
+            n_chains,
+            n_free,
+        )
+
+
+@eqx.filter_jit
+def _sample_states_batched_core(
+    key,
+    program,
+    schedule,
+    init_states_free,
+    state_clamp,
+    f_observe,
+    carry_init,
+    n_chains: int,
+    n_free: int,
+):
+    """Jitted core of :func:`sample_states_batched`.
+
+    The per-chain key split lives in here rather than in the caller. Dispatched
+    eagerly it is a threefry expansion sitting outside every jit boundary, so
+    XLA compiles a whole standalone module for it just to turn one key into
+    `n_chains`; traced alongside the vmapped chains it folds into their module
+    and costs nothing extra.
+
+    `n_chains` and `n_free` are plain ints and `schedule` is a frozen
+    dataclass, so all three are static cache keys.
+    """
 
     def _one_chain(k, init_free):
         _, results = sample_with_observation(
@@ -1007,5 +1139,5 @@ def sample_states_batched(
         )
         return results
 
-    with device_ctx:
-        return jax.vmap(_one_chain, in_axes=(0, [0] * n_free))(keys, init_states_free)
+    keys = jax.random.split(key, n_chains)
+    return jax.vmap(_one_chain, in_axes=(0, [0] * n_free))(keys, init_states_free)

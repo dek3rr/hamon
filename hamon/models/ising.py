@@ -860,16 +860,20 @@ def ising_sample(
             raise  # "auto" needs a cost spectrum; plain draws don't
 
     # --- degenerate model checks ---
+    # NumPy, not jnp: each of these would otherwise be an eagerly dispatched
+    # device reduction with its own XLA compile, just to decide whether to log
+    # a warning. Inputs are concrete here — `beta` was read as a float above.
+    biases_np = np.asarray(biases)
     if edges_np.shape[0] == 0:
         logger.warning(
             "No edges provided — variables are independent. NRPT is unnecessary; single-chain Gibbs sampling suffices."
         )
-    elif jnp.all(weights == 0):
+    elif not np.any(np.asarray(weights)):
         logger.warning(
             "All coupling weights are zero — variables are independent. "
             "NRPT is unnecessary; single-chain Gibbs sampling suffices."
         )
-    bias_range = float(jnp.max(biases) - jnp.min(biases))
+    bias_range = float(biases_np.max() - biases_np.min()) if biases_np.size else 0.0
     if bias_range == 0 and biases.shape[0] > 1:
         logger.warning(
             "All biases are identical (spread = 0). The model has no "
@@ -916,7 +920,9 @@ def ising_sample(
     if beta_estimate is not None:
         report.beta_estimate = beta_estimate
 
-    mean_spins = float(jnp.mean(jnp.sum(samples, axis=1).astype(jnp.float32)))
+    # NumPy as above: one reported scalar, but as jnp it is three eagerly
+    # dispatched modules (sum, convert, mean), each compiled on its own.
+    mean_spins = float(np.asarray(samples).sum(axis=1, dtype=np.float64).mean())
     diagnostics = {
         "n_chains": report.n_chains,
         "betas": report.betas,

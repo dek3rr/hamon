@@ -766,3 +766,163 @@ class TestMomentAccumulatorThroughSampling(unittest.TestCase):
             )
         # PassthroughSampler → 0 (False) → transform → -1; 5 × -1 = -5
         self.assertAlmostEqual(float(moments[0][0]), -5.0, places=4)
+
+
+def _ising_ring(n_nodes, n_blocks):
+    """A ring Ising model partitioned into `n_blocks` free blocks."""
+    from hamon.models.ising import IsingEBM, IsingSamplingProgram
+
+    nodes = [SpinNode() for _ in range(n_nodes)]
+    edges = [(nodes[i], nodes[(i + 1) % n_nodes]) for i in range(n_nodes)]
+    key = jax.random.key(11)
+    ebm = IsingEBM(
+        nodes,
+        edges,
+        jax.random.normal(key, (n_nodes,)) * 0.3,
+        jax.random.normal(jax.random.key(12), (len(edges),)) * 0.7,
+        jnp.asarray(1.0),
+    )
+    step = n_nodes // n_blocks
+    free = [
+        Block(nodes[i * step : (i + 1) * step if i < n_blocks - 1 else n_nodes])
+        for i in range(n_blocks)
+    ]
+    return ebm, IsingSamplingProgram(ebm, free, []), free
+
+
+class TestBatchedKeySplit(unittest.TestCase):
+    """`_block_keys` must hand every sampler exactly the keys it would have
+    produced by splitting its own key, whether or not the batched path fires."""
+
+    def test_matches_per_block_split(self):
+        from hamon.block_sampling import _block_keys
+        from hamon.models.discrete_ebm import SpinGibbsConditional
+
+        for n in (1, 2, 3, 5, 8):
+            samplers = [SpinGibbsConditional() for _ in range(n)]
+            key = jax.random.key(3)
+            got = _block_keys(key, samplers)
+            want = jax.random.split(key, n)
+            for i in range(n):
+                expected = jnp.stack(list(jax.random.split(want[i], 2)))
+                actual = (
+                    got[i]
+                    if jnp.ndim(got[i])
+                    else jnp.stack(list(jax.random.split(got[i], 2)))
+                )
+                self.assertTrue(
+                    jnp.array_equal(
+                        jax.random.key_data(actual), jax.random.key_data(expected)
+                    ),
+                    f"key mismatch for block {i} of {n}",
+                )
+
+    def test_single_key_samplers_get_a_single_key(self):
+        from hamon.block_sampling import _block_keys
+
+        samplers = [PlusMinusSampler() for _ in range(5)]
+        keys = _block_keys(jax.random.key(4), samplers)
+        want = jax.random.split(jax.random.key(4), 5)
+        for i, k in enumerate(keys):
+            self.assertEqual(jnp.ndim(k), jnp.ndim(want[i]))
+            self.assertTrue(
+                jnp.array_equal(jax.random.key_data(k), jax.random.key_data(want[i]))
+            )
+
+    def test_parametric_sampler_accepts_both_key_forms(self):
+        """`sample` given a single key and given the pre-split stack of that
+        same key must produce identical output."""
+        from hamon.models.discrete_ebm import SpinGibbsConditional
+
+        _, prog, free = _ising_ring(12, 3)
+        state = [jnp.zeros(len(b), jnp.bool_) for b in free]
+        key = jax.random.key(5)
+        one, _ = sample_single_block(key, state, [], prog, 0, None)
+        stacked = jnp.stack(list(jax.random.split(key, 2)))
+        two, _ = sample_single_block(stacked, state, [], prog, 0, None)
+        self.assertTrue(jnp.array_equal(one, two))
+        self.assertIsInstance(prog.samplers[0], SpinGibbsConditional)
+
+    def test_sampling_is_unchanged_by_the_batching_threshold(self):
+        """Crossing `_BATCHED_SPLIT_MIN_BLOCKS` must not perturb the draw."""
+        import hamon.block_sampling as bs
+
+        _, prog, free = _ising_ring(24, 4)
+        state = [jnp.zeros(len(b), jnp.bool_) for b in free]
+        schedule = SamplingSchedule(n_warmup=2, n_samples=4, steps_per_sample=2)
+
+        def draw():
+            return sample_states(
+                jax.random.key(6), prog, schedule, state, [], free, device=None
+            )
+
+        original = bs._BATCHED_SPLIT_MIN_BLOCKS
+        try:
+            bs._BATCHED_SPLIT_MIN_BLOCKS = 3  # batched path
+            batched = draw()
+            bs._BATCHED_SPLIT_MIN_BLOCKS = 999  # per-block path
+            per_block = draw()
+        finally:
+            bs._BATCHED_SPLIT_MIN_BLOCKS = original
+
+        for a, b in zip(batched, per_block):
+            self.assertTrue(jnp.array_equal(a, b))
+
+
+class TestRunBlocksInitGlobalState(unittest.TestCase):
+    """`_run_blocks(init_global_state=...)` is a pure shortcut: it must match
+    the version that rebuilds the global state from block-local state."""
+
+    def _prog(self):
+        _, prog, free = _ising_ring(16, 4)
+        return prog, [jnp.zeros(len(b), jnp.bool_) for b in free]
+
+    def test_matches_rebuilt_global_state(self):
+        prog, state = self._prog()
+        gs = block_state_to_global(state, prog.gibbs_spec)
+        for n_iters in (0, 1, 3):
+            a = _run_blocks(jax.random.key(7), prog, state, [], n_iters, [None] * 4)
+            b = _run_blocks(
+                jax.random.key(7),
+                prog,
+                None,
+                [],
+                n_iters,
+                [None] * 4,
+                init_global_state=gs,
+            )
+            for x, y in zip(jax.tree.leaves(a), jax.tree.leaves(b)):
+                self.assertTrue(jnp.array_equal(x, y), f"mismatch at n_iters={n_iters}")
+
+    def test_zero_iters_without_chain_state_reconstructs_it(self):
+        prog, state = self._prog()
+        gs = block_state_to_global(state, prog.gibbs_spec)
+        free_out, _, _ = _run_blocks(
+            jax.random.key(8), prog, None, [], 0, [None] * 4, init_global_state=gs
+        )
+        for a, b in zip(free_out, state):
+            self.assertTrue(jnp.array_equal(a, b))
+
+
+class TestCachedWriteBack(unittest.TestCase):
+    """`_write_block_to_global` uses cached layout metadata; it must agree with
+    `scatter_block_to_global`, which rederives it from the spec."""
+
+    def test_matches_scatter_block_to_global(self):
+        from hamon.block_management import scatter_block_to_global
+        from hamon.block_sampling import _write_block_to_global
+
+        for n_blocks in (1, 3):
+            _, prog, free = _ising_ring(12, n_blocks)
+            state = [
+                jax.random.bernoulli(jax.random.key(20 + i), 0.5, (len(b),))
+                for i, b in enumerate(free)
+            ]
+            gs = block_state_to_global(state, prog.gibbs_spec)
+            for i, block in enumerate(prog.gibbs_spec.free_blocks):
+                new = ~state[i]
+                want = scatter_block_to_global(gs, new, block, prog.gibbs_spec)
+                got = _write_block_to_global(gs, new, prog, i)
+                self.assertEqual(len(want), len(got))
+                for a, b in zip(want, got):
+                    self.assertTrue(jnp.array_equal(a, b))

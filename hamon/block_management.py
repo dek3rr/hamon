@@ -266,6 +266,25 @@ class BlockSpec:
         return h
 
 
+def _gather_axis0(x, sl):
+    """``x[sl]`` along axis 0, for indices that are in bounds by construction.
+
+    Every index gathered through this helper is a position taken from
+    ``node_global_location_map`` or from an interaction group's own node list,
+    and padded entries are zero, so all of them lie in ``[0, x.shape[0])`` and
+    the default ``mode="fill"`` bounds machinery is provably dead.
+
+    Stating that — ``mode="clip"``, or an explicit ``lax.gather`` with
+    ``PROMISE_IN_BOUNDS``; the two lower identically — does remove the
+    compare/select pair around each gather, and is nonetheless a large net
+    loss: the unguarded gather stops fusing into its consumer and materializes
+    the whole padded neighbour tensor instead. That costs far more on the
+    collected-sample path than the bounds ops ever did, and it gets worse the
+    denser the graph. The guarded form fuses, so keep it.
+    """
+    return jnp.take(x, sl, axis=0)
+
+
 def _stack(*args):
     if eqx.is_array(args[0]):
         if args[0].shape == ():
@@ -339,7 +358,11 @@ def _block_layout(block: Block, spec: BlockSpec) -> tuple[int, int | None, np.nd
     # this holds under the per-block layout too; a block's nodes share one
     # slot, so the first node fixes it.
     sd_ind = spec.node_global_location_map[block.nodes[0]][0]
-    locs = np.array([spec.node_global_location_map[node][1] for node in block])
+    # int32: these are scatter/gather indices into a node axis (see the
+    # matching note in `_build_block_structure`).
+    locs = np.array(
+        [spec.node_global_location_map[node][1] for node in block], dtype=np.int32
+    )
     start = None
     if locs.size and np.array_equal(locs, np.arange(locs[0], locs[0] + locs.size)):
         start = int(locs[0])
@@ -472,10 +495,10 @@ def from_global_state(
                     )
                 )
             else:
-                positions = jnp.array(locs)
+                positions = jnp.asarray(locs)
                 out.append(
                     jax.tree.map(
-                        lambda x, _p=positions: jnp.take(x, _p, axis=0),
+                        lambda x, _p=positions: _gather_axis0(x, _p),
                         global_state[sd_ind],
                     )
                 )
@@ -494,10 +517,10 @@ def from_global_state(
                 lambda *xs: jnp.concatenate(xs, axis=0),
                 *[global_state[s] for s in involved],
             )
-            flat_pos = jnp.array([offset[s] + p for s, p in zip(slots, positions)])
-            out.append(
-                jax.tree.map(lambda x, _p=flat_pos: jnp.take(x, _p, axis=0), full)
+            flat_pos = jnp.array(
+                [offset[s] + p for s, p in zip(slots, positions)], dtype=jnp.int32
             )
+            out.append(jax.tree.map(lambda x, _p=flat_pos: _gather_axis0(x, _p), full))
     return out
 
 
