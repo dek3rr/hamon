@@ -783,6 +783,17 @@ def _stack_init_states(
                 )
         return stacked_states
     states = [list(s) for s in init_states]
+    return _stack_blocks(states, n_chains, n_free_blocks)
+
+
+@partial(jax.jit, static_argnums=(1, 2))
+def _stack_blocks(states: list, n_chains: int, n_free_blocks: int) -> list:
+    """Stack the per-chain block states, one `jnp.stack` per free block.
+
+    Fused under one jit so the per-block stacks compile once together rather
+    than once per distinct block shape — the same treatment, and the same
+    reason, as ``_pad_stacked_states``.
+    """
     return [
         jnp.stack([states[c][b] for c in range(n_chains)]) for b in range(n_free_blocks)
     ]
@@ -800,6 +811,35 @@ def _pad_stacked_states(stacked_states: list, pad: int) -> list:
         jnp.concatenate([x, jnp.broadcast_to(x[-1:], (pad, *x.shape[1:]))])
         for x in stacked_states
     ]
+
+
+@partial(eqx.filter_jit, donate="none")
+def _unpad_carry(final, n_chains: int, host_stats: bool, keep_states: bool):
+    """Slice a padded NRPT carry back to its live chain prefix.
+
+    Chain masking pads every carried array to a fixed ladder length, and on the
+    way out they have to be sliced back down. Written inline these are half a
+    dozen eagerly dispatched slices of *different* shapes — the free-block
+    states, the two pair counters, each index-process array, the base energies
+    — so XLA compiles a standalone module for each one. Under a single jit they
+    become one executable; this is the counterpart of ``_pad_stacked_states``
+    on the way in.
+
+    ``n_chains`` and the two flags are static, so each distinct live count
+    still gets its own specialization, as before.
+    """
+    states = final.states if keep_states else [st[:n_chains] for st in final.states]
+    if host_stats:
+        # The private host-stats path slices counters and the index process on
+        # host instead; only the states are cut here.
+        return final._replace(states=states)
+    return final._replace(
+        states=states,
+        accepted=final.accepted[: n_chains - 1],
+        attempted=final.attempted[: n_chains - 1],
+        idx_state={k: v[:n_chains] for k, v in final.idx_state.items()},
+        base_E=final.base_E[:n_chains],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1090,23 +1130,7 @@ def nrpt(
             # host-stats path instead slices counters and the index process
             # on host (a device slice here is a per-live-N XLA executable).
             if pad_to is not None and pad_to > n_chains:
-                if _host_stats:
-                    if not _keep_padded_states:
-                        final = final._replace(
-                            states=[st[:n_chains] for st in final.states]
-                        )
-                else:
-                    final = final._replace(
-                        states=(
-                            final.states
-                            if _keep_padded_states
-                            else [st[:n_chains] for st in final.states]
-                        ),
-                        accepted=final.accepted[: n_chains - 1],
-                        attempted=final.attempted[: n_chains - 1],
-                        idx_state={k: v[:n_chains] for k, v in final.idx_state.items()},
-                        base_E=final.base_E[:n_chains],
-                    )
+                final = _unpad_carry(final, n_chains, _host_stats, _keep_padded_states)
         else:
             final = NRPTCarry(
                 key=key,

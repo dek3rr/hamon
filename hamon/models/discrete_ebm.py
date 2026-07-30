@@ -173,10 +173,15 @@ class DiscreteEBMFactor(EBMFactor, WeightedFactor):
                 self.spin_node_groups, self.categorical_node_groups
             )
 
-            tiler = [1] * len(self.weights.shape)
-            tiler[0] = n_spin
-
-            rep_weights = jnp.tile(self.weights, tiler)
+            # With one spin group the tiler is all ones, so the tile is an
+            # identity copy — but an eagerly dispatched one, so it still costs a
+            # compile per weight shape. Every Ising bias factor lands here.
+            if n_spin == 1:
+                rep_weights = self.weights
+            else:
+                tiler = [1] * len(self.weights.shape)
+                tiler[0] = n_spin
+                rep_weights = jnp.tile(self.weights, tiler)
             interaction_groups.append(
                 InteractionGroup(
                     DiscreteEBMInteraction(n_spin - 1, rep_weights),

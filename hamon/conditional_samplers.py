@@ -1,12 +1,24 @@
 import abc
-from typing import TypeVar
+from typing import ClassVar, TypeVar
 
 import equinox as eqx
 import jax
+import jax.numpy as jnp
 from jaxtyping import Array, Key, PyTree, Shaped
 
 _State = PyTree[Shaped[Array, "nodes ?*state"], "State"]
 _SamplerState = TypeVar("_SamplerState", bound=PyTree)
+
+
+def _is_single_key(key) -> bool:
+    """Whether *key* is one PRNG key rather than a stack of them.
+
+    Handles both key flavours: a typed key array has an empty shape when it
+    holds a single key, while a raw ``uint32`` ``PRNGKey`` has shape ``(2,)``.
+    """
+    if jnp.issubdtype(key.dtype, jax.dtypes.prng_key):
+        return jnp.ndim(key) == 0
+    return jnp.ndim(key) == 1
 
 
 class AbstractConditionalSampler(eqx.Module):
@@ -17,7 +29,21 @@ class AbstractConditionalSampler(eqx.Module):
     It takes in the states of all the neighbors and produces a sample for the current block of nodes.
     This can often be done exactly, but need not be. One could embed MCMC methods within this sampler
     (to do Metropolis within Gibbs, for example).
+
+    **Attributes:**
+
+    - `n_keys`: how many PRNG keys `sample` consumes. With the default of 1,
+        `sample` is handed a single key and splits it itself if it needs more.
+        A sampler that sets `n_keys = m > 1` is handed a stack of `m` keys
+        instead, and the block runner produces every block's stack in one
+        batched `jax.random.split` — bit-identical to each sampler splitting
+        its own key, but a single threefry expansion in the compiled sweep
+        rather than one per block. Because the block loop is unrolled, that
+        expansion is a large fraction of both the emitted HLO and the compile
+        time on graphs with many blocks.
     """
+
+    n_keys: ClassVar[int] = 1
 
     @abc.abstractmethod
     def sample(
@@ -79,6 +105,11 @@ class AbstractParametricConditionalSampler(AbstractConditionalSampler):
     draw a sample from the corresponding Gaussian distribution by appropriately transforming a vector of standard
     normal random variables."""
 
+    # One key for `compute_parameters`, one for `sample_given_parameters`.
+    # Declaring it lets the block runner batch the split across blocks; `sample`
+    # still accepts a single key, so direct calls keep working unchanged.
+    n_keys: ClassVar[int] = 2
+
     @abc.abstractmethod
     def compute_parameters(
         self,
@@ -114,8 +145,16 @@ class AbstractParametricConditionalSampler(AbstractConditionalSampler):
         output_sd: PyTree[jax.ShapeDtypeStruct],
     ) -> tuple[_State, _SamplerState]:
         """Sample from the distribution by first computing the parameters and then generating
-        a sample based off of them."""
-        key, subkey = jax.random.split(key, 2)
+        a sample based off of them.
+
+        `key` is either a single key — split here, as before — or the
+        `n_keys`-long stack the block runner batch-split on this sampler's
+        behalf. The two are the same keys either way.
+        """
+        if _is_single_key(key):
+            key, subkey = jax.random.split(key, 2)
+        else:
+            key, subkey = key[0], key[1]
         parameters, state = self.compute_parameters(
             subkey, interactions, active_flags, states, sampler_state, output_sd
         )
