@@ -12,7 +12,6 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import pytest
-
 from hamon import Block, SpinNode
 from hamon.models import IsingEBM, IsingSamplingProgram, hinton_init
 from hamon.tuning import (
@@ -20,7 +19,6 @@ from hamon.tuning import (
     _select_gibbs_steps_cost,
     tune_exploration,
 )
-
 
 # ---------------------------------------------------------------------------
 # Unit: peak-finding control logic (deterministic, no NRPT)
@@ -250,19 +248,19 @@ def test_discover_gibbs_steps_ele_smoke():
     keys = jax.random.split(jax.random.key(2), n_chains)
     init = [hinton_init(keys[c], ebm, free_blocks, ()) for c in range(n_chains)]
 
-    kw = dict(
-        init_states=init,
-        clamp_state=[],
-        initial_betas=betas,
-        start_steps=1,
-        max_steps=4,
-        rounds_per_probe=150,
-        n_tune_per_probe=2,
-        select_by="ele",
-        ebm=ebm,
-        program=program,
-        device="cpu",
-    )
+    kw = {
+        "init_states": init,
+        "clamp_state": [],
+        "initial_betas": betas,
+        "start_steps": 1,
+        "max_steps": 4,
+        "rounds_per_probe": 150,
+        "n_tune_per_probe": 2,
+        "select_by": "ele",
+        "ebm": ebm,
+        "program": program,
+        "device": "cpu",
+    }
     res = tune_exploration(jax.random.key(3), **kw)
 
     assert res["gibbs_steps_per_round"] in (1, 2, 4)

@@ -8,23 +8,22 @@ All original tests are preserved. Added:
 import unittest
 
 import equinox as eqx
+import hamon.pgm
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array
-
-import hamon.pgm
 from hamon import block_management
 from hamon.block_management import (
     Block,
     BlockSpec,
+    _hash_pytree,
     block_state_to_global,
     from_global_state,
     get_node_locations,
     make_empty_block_state,
     scatter_block_to_global,
-    _hash_pytree,
 )
 from hamon.pgm import CategoricalNode, SpinNode
+from jaxtyping import Array
 
 
 class Node1(hamon.pgm.AbstractNode):
@@ -114,7 +113,10 @@ class TestBlocks(unittest.TestCase):
                     type_inds, arr_inds = block_management.get_node_locations(
                         block, spec
                     )
-                    vals = jax.tree.map(lambda x: x[arr_inds], global_state[type_inds])
+                    vals = jax.tree.map(
+                        lambda x, arr_inds=arr_inds: x[arr_inds],
+                        global_state[type_inds],
+                    )
                     self.assertTrue(eqx.tree_equal(vals, state))
 
     def test_empty_state(self):

@@ -60,11 +60,11 @@ from hamon.models.gaussian import (
 from hamon.pgm import AbstractNode, GaussianNode, _as_identity_seq
 
 __all__ = [
-    "PolynomialSelfInteraction",
-    "PolynomialSelfEBMFactor",
-    "SliceGibbsConditional",
     "DoubleWellEBM",
     "DoubleWellSamplingProgram",
+    "PolynomialSelfEBMFactor",
+    "PolynomialSelfInteraction",
+    "SliceGibbsConditional",
     "double_well_init",
 ]
 
@@ -174,7 +174,7 @@ class SliceGibbsConditional(AbstractConditionalSampler):
                 (x_tail,) = state
                 coef_c += jnp.sum(interaction.coupling * x_tail.astype(dtype), axis=-1)
             else:
-                raise RuntimeError("Unsupported interaction found")
+                raise TypeError("Unsupported interaction found")
         if x0 is None:
             raise RuntimeError(
                 "SliceGibbsConditional needs a PolynomialSelfInteraction on "

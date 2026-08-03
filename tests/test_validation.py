@@ -4,7 +4,6 @@ import unittest
 
 import jax
 import jax.numpy as jnp
-
 from hamon import Block, SpinNode
 from hamon.models import IsingEBM, IsingSamplingProgram, hinton_init
 from hamon.models.ising import ising_sample

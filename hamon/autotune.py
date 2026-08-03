@@ -92,9 +92,11 @@ class AutotuneReport:
     def summary(self) -> str:
         """Human-readable multi-line summary."""
         lines = [
-            "AUTOTUNE: "
-            f"N={self.n_chains}  n_expl={self.gibbs_steps_per_round}  "
-            f"Lambda={self.Lambda:.3f}  device={self.device}",
+            (
+                "AUTOTUNE: "
+                f"N={self.n_chains}  n_expl={self.gibbs_steps_per_round}  "
+                f"Lambda={self.Lambda:.3f}  device={self.device}"
+            ),
         ]
         if self.exploration is not None:
             ess_sec = self.exploration.get("objective")

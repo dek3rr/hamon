@@ -15,11 +15,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 from hamon import Block, SpinNode
 from hamon.models import IsingEBM, IsingSamplingProgram, hinton_init
 from hamon.tuning import tune_chains
-
 
 # ---------------------------------------------------------------------------
 # Shared graph — built ONCE, all factories close over these objects
@@ -62,17 +60,17 @@ class TestDiscoverChainCount:
         # result is bit-identical (only the reported Λ, a max over probes, differs).
         ebm = IsingEBM(_NODES, _EDGES, _BIASES, _WEIGHTS, jnp.array(1.0))
         program = IsingSamplingProgram(ebm, _FREE_BLOCKS, [])
-        kw = dict(
-            ebm=ebm,
-            program=program,
-            init_factory=_init_factory,
-            clamp_state=[],
-            beta_range=(0.0, 1.0),
-            gibbs_steps_per_round=1,
-            max_chains=32,
-            rounds_per_probe=60,
-            n_tune_per_probe=2,
-        )
+        kw = {
+            "ebm": ebm,
+            "program": program,
+            "init_factory": _init_factory,
+            "clamp_state": [],
+            "beta_range": (0.0, 1.0),
+            "gibbs_steps_per_round": 1,
+            "max_chains": 32,
+            "rounds_per_probe": 60,
+            "n_tune_per_probe": 2,
+        }
         pilot = tune_chains(jax.random.key(7), seed_from_energy=False, **kw)
         energy = tune_chains(jax.random.key(7), seed_from_energy=True, **kw)
         assert energy["n_chains"] == pilot["n_chains"]
@@ -94,17 +92,17 @@ class TestDiscoverChainCount:
 
         ebm = IsingEBM(_NODES, _EDGES, _BIASES, _WEIGHTS, jnp.array(1.0))
         program = IsingSamplingProgram(ebm, _FREE_BLOCKS, [])
-        kw = dict(
-            ebm=ebm,
-            program=program,
-            clamp_state=[],
-            beta_range=(0.0, 1.0),
-            gibbs_steps_per_round=1,
-            max_chains=16,
-            rounds_per_probe=60,
-            n_tune_per_probe=2,
-            seed_from_energy=seed_from_energy,
-        )
+        kw = {
+            "ebm": ebm,
+            "program": program,
+            "clamp_state": [],
+            "beta_range": (0.0, 1.0),
+            "gibbs_steps_per_round": 1,
+            "max_chains": 16,
+            "rounds_per_probe": 60,
+            "n_tune_per_probe": 2,
+            "seed_from_energy": seed_from_energy,
+        }
         a = tune_chains(jax.random.key(7), init_factory=_init_factory, **kw)
         b = tune_chains(jax.random.key(7), init_factory=_stacked_factory, **kw)
         assert b["n_chains"] == a["n_chains"]
@@ -317,13 +315,13 @@ class TestDiscoverChainCount:
         result dict. Callers read the result by key regardless of which branch
         produced it, so the two key sets have to agree.
         """
-        common = dict(
-            beta_range=(0.5, 1.5),
-            gibbs_steps_per_round=2,
-            rounds_per_probe=20,
-            n_tune_per_probe=2,
-            initial_n=4,
-        )
+        common = {
+            "beta_range": (0.5, 1.5),
+            "gibbs_steps_per_round": 2,
+            "rounds_per_probe": 20,
+            "n_tune_per_probe": 2,
+            "initial_n": 4,
+        }
         early = tune_chains(
             jax.random.key(0),
             _ebm_factory,
@@ -444,7 +442,7 @@ class TestChainMasking:
         nc = 5
         betas = jnp.linspace(0.0, 1.0, nc)
         inits = _init_factory(nc, [ebm] * nc, [program] * nc)
-        kw = dict(betas=betas, track_round_trips=True, device=None)
+        kw = {"betas": betas, "track_round_trips": True, "device": None}
         key = jax.random.key(3)
         s_a, st_a = nrpt(key, ebm, program, inits, [], 40, 2, **kw)
         for pad in (nc, 12):  # pad == n (structural no-op) and pad > n
@@ -465,17 +463,17 @@ class TestChainMasking:
 
     def test_pad_probes_bit_identical_discovery(self):
         ebm, program = self._template()
-        kw = dict(
-            ebm=ebm,
-            program=program,
-            init_factory=_init_factory,
-            clamp_state=[],
-            beta_range=(0.0, 1.0),
-            gibbs_steps_per_round=1,
-            max_chains=16,
-            rounds_per_probe=60,
-            n_tune_per_probe=2,
-        )
+        kw = {
+            "ebm": ebm,
+            "program": program,
+            "init_factory": _init_factory,
+            "clamp_state": [],
+            "beta_range": (0.0, 1.0),
+            "gibbs_steps_per_round": 1,
+            "max_chains": 16,
+            "rounds_per_probe": 60,
+            "n_tune_per_probe": 2,
+        }
         plain = tune_chains(jax.random.key(7), **kw)
         masked = tune_chains(jax.random.key(7), pad_probes=True, **kw)
         assert masked["n_chains"] == plain["n_chains"]
@@ -498,7 +496,7 @@ class TestChainMasking:
         betas = jnp.linspace(0.0, 1.0, nc)
         inits = _init_factory(nc, [ebm] * nc, [program] * nc)
         key = jax.random.key(5)
-        kw = dict(betas=betas, track_round_trips=False, device=None)
+        kw = {"betas": betas, "track_round_trips": False, "device": None}
         _, st_a = nrpt(
             key, ebm, program, inits, [], 12, 1, observer=NRPTStateObserver((-1,)), **kw
         )
@@ -541,7 +539,12 @@ class TestChainMasking:
         nc = 4
         betas = jnp.linspace(0.0, 1.0, nc)
         inits = _init_factory(nc, [ebm] * nc, [program] * nc)
-        kw = dict(betas=betas, track_round_trips=False, device=None, pad_chains_to=8)
+        kw = {
+            "betas": betas,
+            "track_round_trips": False,
+            "device": None,
+            "pad_chains_to": 8,
+        }
         for obs in (NRPTEnergyObserver(nc), NRPTStateObserver((-1,))):
             assert not obs.masking_safe
             with pytest.raises(ValueError, match="observer"):
@@ -783,7 +786,7 @@ class TestTuneSamplingSchedule:
 
         ebm, program = self._model()
         init = hinton_init(jax.random.key(1), ebm, program.gibbs_spec.free_blocks, (4,))
-        sched, info = tune_sampling_schedule(
+        _sched, info = tune_sampling_schedule(
             jax.random.key(2),
             ebm,
             program,

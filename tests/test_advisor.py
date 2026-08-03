@@ -9,18 +9,16 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-
 from hamon.advisor import (
     SearchVerdict,
+    _pool_windows,
     communication_barrier,
     diagnose_search,
     estimate_beta_max,
     excess_energy,
     gs_occupancy,
-    _pool_windows,
 )
 from hamon.models.ising import ising_excitation_costs
-
 
 # ---------------------------------------------------------------------------
 # estimator: closed forms vs brute-force enumeration

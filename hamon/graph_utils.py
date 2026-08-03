@@ -90,7 +90,7 @@ def rlf_coloring(n_nodes: int, edges: Iterable[tuple[int, int]]) -> list[int]:
         cU = gU.copy()
         cW.fill(0)
 
-        def select(v: int, in_U=in_U, cU=cU) -> int:
+        def select(v: int, in_U=in_U, cU=cU, k=k) -> int:
             """Color v, expel its U-neighbors to W, update counters/keys."""
             colors[v] = k
             in_U[v] = False

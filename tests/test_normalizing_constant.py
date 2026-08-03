@@ -17,15 +17,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 from hamon import Block, NRPTEnergyObserver, SpinNode
 from hamon.models import IsingEBM, IsingSamplingProgram, hinton_init
-from hamon.tuning import tune_schedule
 from hamon.round_trips import (
     nrpt_log_normalizing_constant,
     thermodynamic_integration,
 )
-
+from hamon.tuning import tune_schedule
 
 # ---------------------------------------------------------------------------
 # 1. Analytic check: independent spins

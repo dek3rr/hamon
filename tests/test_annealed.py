@@ -24,7 +24,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 from hamon import Block, GaussianNode
 from hamon.models import (
     AnnealedEBM,
@@ -102,7 +101,7 @@ def _annealed_gaussian(L=4, r=2.0, d=4.5, c=-1.0, seed=0):
 
 class TestAnnealedEnergy:
     def test_energy_is_convex_combination(self):
-        (nodes, reference, target, annealed, program, blocks, P, R, h, _) = (
+        (nodes, reference, target, annealed, _program, blocks, _P, _R, _h, _) = (
             _annealed_gaussian()
         )
         rng = np.random.default_rng(1)
@@ -120,7 +119,7 @@ class TestAnnealedEnergy:
             assert np.isclose(got, expected, rtol=1e-5, atol=1e-4), (beta, got)
 
     def test_beta_zero_member_is_the_reference(self):
-        (nodes, reference, target, annealed, *_) = _annealed_gaussian()
+        (_nodes, _reference, target, annealed, *_) = _annealed_gaussian()
         # The target's OWN tempered family is improper at beta=0 (weights -> 0,
         # flat over R^n) — but the annealed family's beta=0 member is the
         # reference at FULL weight, a proper PD Gaussian. So annealing is
@@ -137,7 +136,7 @@ class TestAnnealedLadderExactness:
         This is the end-to-end proof of the affine kernel and the Δ-swap
         energies: wrong swaps break joint invariance and drift these marginals.
         """
-        (nodes, reference, target, annealed, program, blocks, P, R, h, obs_perm) = (
+        (nodes, _reference, target, annealed, program, blocks, P, R, h, obs_perm) = (
             _annealed_gaussian()
         )
         n = len(nodes)
@@ -191,7 +190,7 @@ class TestAnnealedLadderExactness:
 
 class TestAnnealedGuardsAndMasking:
     def test_chain_masking_bit_identical_affine(self):
-        (nodes, reference, target, annealed, program, blocks, P, R, h, _) = (
+        (_nodes, _reference, target, annealed, program, blocks, _P, _R, _h, _) = (
             _annealed_gaussian()
         )
         nc = 5
@@ -203,7 +202,7 @@ class TestAnnealedGuardsAndMasking:
             for i, b in enumerate(betas)
         ]
         key = jax.random.key(6)
-        kw = dict(betas=betas, track_round_trips=True, device=None)
+        kw = {"betas": betas, "track_round_trips": True, "device": None}
         s_a, st_a = nrpt(key, annealed, program, inits, [], 30, 2, **kw)
         s_b, st_b = nrpt(
             key, annealed, program, inits, [], 30, 2, pad_chains_to=9, **kw
@@ -215,7 +214,7 @@ class TestAnnealedGuardsAndMasking:
             assert np.array_equal(np.asarray(st_a[k2]), np.asarray(st_b[k2]))
 
     def test_factory_route_rejected(self):
-        (nodes, reference, target, annealed, program, blocks, P, R, h, _) = (
+        (_nodes, _reference, target, annealed, program, blocks, _P, _R, _h, _) = (
             _annealed_gaussian()
         )
         nc = 3
@@ -232,7 +231,7 @@ class TestAnnealedGuardsAndMasking:
             nrpt(jax.random.key(0), ebms, programs, inits, [], 5, 1, betas=betas)
 
     def test_energy_delta_fn_rejected(self):
-        (nodes, reference, target, annealed, program, blocks, P, R, h, _) = (
+        (_nodes, _reference, target, annealed, program, blocks, _P, _R, _h, _) = (
             _annealed_gaussian()
         )
         nc = 3

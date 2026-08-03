@@ -10,13 +10,6 @@ import numpy as np
 from jax import numpy as jnp
 from jaxtyping import Array, Bool, Key, Shaped
 
-from hamon.device import (
-    DeviceLike,
-    default_device_ctx,
-    free_node_count,
-    resolve_entry_device,
-    tree_device_put,
-)
 from hamon.block_sampling import (
     Block,
     BlockGibbsSpec,
@@ -24,6 +17,13 @@ from hamon.block_sampling import (
     SamplingSchedule,
     SuperBlock,
     sample_with_observation,
+)
+from hamon.device import (
+    DeviceLike,
+    default_device_ctx,
+    free_node_count,
+    resolve_entry_device,
+    tree_device_put,
 )
 from hamon.factor import ModelSamplingProgram
 from hamon.models.discrete_ebm import SpinEBMFactor, SpinGibbsConditional

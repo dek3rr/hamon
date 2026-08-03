@@ -2,7 +2,6 @@
 
 import numpy as np
 import pytest
-
 from hamon.graph_utils import rlf_coloring
 
 

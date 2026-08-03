@@ -32,7 +32,6 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 import numpy as np
-
 from hamon import Block, SpinNode
 from hamon.models.ising import IsingEBM, IsingSamplingProgram, hinton_init, ising_sample
 
@@ -89,7 +88,7 @@ def make_planted_loops(L, loops_per_spin=2.0, seed=0, max_loop=None, gauge=True)
     m = len(edges)
     J = np.zeros(m)
     max_loop = max_loop or max(1, L // 2)
-    n_loops = int(round(loops_per_spin * n))
+    n_loops = round(loops_per_spin * n)
     for _ in range(n_loops):
         r0, c0 = int(rng.integers(L)), int(rng.integers(L))
         h, w = int(rng.integers(1, max_loop + 1)), int(rng.integers(1, max_loop + 1))

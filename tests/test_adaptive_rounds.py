@@ -7,7 +7,6 @@ import logging
 import jax
 import jax.numpy as jnp
 import numpy as np
-
 from hamon.models import hinton_init
 from hamon.nrpt import _nrpt_rounds_trace_count, optimize_schedule
 from hamon.tuning import _optimize_schedule_host, tune_chains, tune_schedule
@@ -17,7 +16,7 @@ from .utils import make_ising_grid
 
 def _setup(L, coupling, n_chains, *, key=0):
     betas = jnp.linspace(0.1, 1.0, n_chains)
-    nodes, edges, fb, ebms, progs = make_ising_grid(
+    _nodes, _edges, fb, ebms, progs = make_ising_grid(
         L, [float(b) for b in betas], coupling=coupling
     )
     inits = [
@@ -45,7 +44,7 @@ def _run(ebm, prog, betas, inits, **kw):
 
 def test_legacy_mode_unchanged():
     """adaptive_tuning=False runs exactly n_tune phases of rounds_per_tune rounds."""
-    ebm, prog, fb, betas, inits = _setup(4, 0.5, 6)
+    ebm, prog, _fb, betas, inits = _setup(4, 0.5, 6)
     stats = _run(
         ebm, prog, betas, inits, adaptive_tuning=False, n_tune=3, rounds_per_tune=20
     )
@@ -73,7 +72,7 @@ def test_host_schedule_update_matches_jax_implementation():
 
 def test_adaptive_respects_round_caps():
     """Each adaptive phase uses a whole number of batches, never above the ceiling."""
-    ebm, prog, fb, betas, inits = _setup(4, 0.5, 6)
+    ebm, prog, _fb, betas, inits = _setup(4, 0.5, 6)
     stats = _run(
         ebm,
         prog,
@@ -91,7 +90,7 @@ def test_adaptive_respects_round_caps():
 
 def test_min_tune_phases_floor():
     """A trivially-easy (equalized-immediately) problem still runs >= min_tune_phases."""
-    ebm, prog, fb, betas, inits = _setup(4, 0.0, 6)  # zero coupling -> rates ~0
+    ebm, prog, _fb, betas, inits = _setup(4, 0.0, 6)  # zero coupling -> rates ~0
     stats = _run(
         ebm, prog, betas, inits, n_tune=8, min_tune_phases=3, rounds_per_tune=100
     )
@@ -101,7 +100,7 @@ def test_min_tune_phases_floor():
 def test_adaptive_stops_early_and_saves_rounds():
     """On an easy problem, adaptive uses fewer total tuning rounds than the
     legacy fixed budget (n_tune * rounds_per_tune)."""
-    ebm, prog, fb, betas, inits = _setup(4, 0.05, 6)
+    ebm, prog, _fb, betas, inits = _setup(4, 0.05, 6)
     n_tune, rounds_per_tune = 6, 200
     stats = _run(
         ebm, prog, betas, inits, n_tune=n_tune, rounds_per_tune=rounds_per_tune
@@ -112,7 +111,7 @@ def test_adaptive_stops_early_and_saves_rounds():
 
 def test_keeps_best_schedule():
     """Production uses the best-equalized schedule seen, not necessarily the last."""
-    ebm, prog, fb, betas, inits = _setup(5, 0.7, 6)
+    ebm, prog, _fb, betas, inits = _setup(5, 0.7, 6)
     stats = _run(ebm, prog, betas, inits, n_tune=5, rounds_per_tune=120)
     h = stats["tuning_history"]
     best = min(h, key=lambda e: e["rej_std"])
@@ -121,7 +120,7 @@ def test_keeps_best_schedule():
 
 def test_tune_schedule_exposes_barrier_identified():
     """The production run reports the round-trip trust gate in stats."""
-    ebm, prog, fb, betas, inits = _setup(4, 0.5, 6)
+    ebm, prog, _fb, betas, inits = _setup(4, 0.5, 6)
     stats = _run(ebm, prog, betas, inits, n_tune=2, rounds_per_tune=120)
     assert "barrier_identified" in stats
     assert stats["barrier_identified"] in (True, False)
@@ -130,7 +129,7 @@ def test_tune_schedule_exposes_barrier_identified():
 def test_compile_count_bounded():
     """With round_batch == n_rounds, the tuning batches and the production run
     share one compiled round loop (<= 2 traces total)."""
-    ebm, prog, fb, betas, inits = _setup(4, 0.5, 6)
+    ebm, prog, _fb, betas, inits = _setup(4, 0.5, 6)
     before = _nrpt_rounds_trace_count[0]
     tune_schedule(
         jax.random.key(3),
@@ -153,7 +152,7 @@ def test_compile_count_bounded():
 def test_discover_forwards_tune_tol():
     """tune_chains accepts tune_tol and returns a sane chain count."""
     betas = jnp.linspace(0.0, 1.0, 8)
-    nodes, edges, fb, ebms, progs = make_ising_grid(
+    _nodes, _edges, _fb, ebms, progs = make_ising_grid(
         4, [float(b) for b in betas], coupling=0.4
     )
 
@@ -193,7 +192,7 @@ def test_short_window_is_not_measured_not_stalled(caplog):
     one reports "add chains" for a ladder that is already correct.
     """
     # 64 chains but only n_rounds=60: nowhere near enough to observe the rate.
-    ebm, prog, fb, betas, inits = _setup(4, 1.0, 64)
+    ebm, prog, _fb, betas, inits = _setup(4, 1.0, 64)
     with caplog.at_level(logging.INFO, logger="hamon.tuning"):
         stats = _run(ebm, prog, betas, inits, n_tune=1, rounds_per_tune=60)
     # Unmeasurable is None — never False, which would mean "stalled".
@@ -209,7 +208,7 @@ def test_discovery_identifies_barrier_via_pilot_budget():
     so it can actually round-trip — discovery then identifies the barrier on a
     bimodal ferromagnet instead of returning a budget-stalled artifact (option 2).
     """
-    nodes, edges, fb, ebms, progs = make_ising_grid(8, [1.0], coupling=1.0)
+    _nodes, _edges, _fb, ebms, progs = make_ising_grid(8, [1.0], coupling=1.0)
 
     def init_factory(n_chains, chain_ebms, chain_programs):
         f = chain_programs[0].gibbs_spec.free_blocks

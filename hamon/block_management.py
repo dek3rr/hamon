@@ -1,12 +1,12 @@
 # Modified from the original thrml library (https://github.com/Extropic-AI/thrml)
 
 import copy
+from collections.abc import Iterator, Mapping, Sequence
 from typing import (
     Generic,
     TypeAlias,
     TypeVar,
 )
-from collections.abc import Iterator, Mapping, Sequence
 
 import equinox as eqx
 import jax
@@ -86,9 +86,12 @@ class Block(Generic[_Node]):
 
     def __add__(self, other):
         if isinstance(other, Block):
-            if self.nodes and other.nodes:
-                if type(self.nodes[0]) is not type(other.nodes[0]):
-                    raise ValueError("Cannot add Blocks of different node types")
+            if (
+                self.nodes
+                and other.nodes
+                and type(self.nodes[0]) is not type(other.nodes[0])
+            ):
+                raise ValueError("Cannot add Blocks of different node types")
             return Block(self.nodes + other.nodes)
         raise NotImplementedError
 
@@ -576,12 +579,14 @@ def make_empty_block_state(
         types = node_shape_dtypes[block.node_type]
         if batch_shape is None:
             this_state = jax.tree.map(
-                lambda x: jnp.zeros(shape=(len(block), *x.shape), dtype=x.dtype),
+                lambda x, block=block: jnp.zeros(
+                    shape=(len(block), *x.shape), dtype=x.dtype
+                ),
                 types,
             )
         else:
             this_state = jax.tree.map(
-                lambda x: jnp.zeros(
+                lambda x, block=block: jnp.zeros(
                     shape=(*batch_shape, len(block), *x.shape), dtype=x.dtype
                 ),
                 types,
@@ -674,6 +679,5 @@ def verify_block_state(
         expected_sd = node_shape_dtypes[type(block.nodes[0])]
         batch_shape = _check_pytree_compat(expected_sd, state)
         assert batch_shape is not None
-        if block_axis is not None:
-            if not batch_shape[block_axis] == len(block.nodes):
-                raise RuntimeError("State shape did not match detected block length")
+        if block_axis is not None and batch_shape[block_axis] != len(block.nodes):
+            raise RuntimeError("State shape did not match detected block length")

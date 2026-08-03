@@ -20,7 +20,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 from hamon import Block, GaussianNode
 from hamon.block_sampling import SamplingSchedule, sample_states
 from hamon.models import DoubleWellEBM, DoubleWellSamplingProgram, double_well_init
@@ -79,7 +78,7 @@ class TestSliceExactness:
         """c = 0 decouples the pair: each site is an independent 1-D tilted
         double well, checked against quadrature via histogram TV distance."""
         a, h1, beta = 1.2, 0.4, 1.0
-        nodes, ebm, program, blocks = _pair_model(a=a, h=(h1, 0.0), c=0.0, beta=beta)
+        _nodes, ebm, program, blocks = _pair_model(a=a, h=(h1, 0.0), c=0.0, beta=beta)
         n_samples = 40_000
         s = _draw(program, blocks, ebm, n_samples)
 
@@ -100,7 +99,7 @@ class TestSliceExactness:
         """c < 0 couples the wells; check the marginal AND the cross moment
         E[x1 x2] against 2-D quadrature."""
         a, h1, c, beta = 1.2, 0.4, -1.5, 1.0
-        nodes, ebm, program, blocks = _pair_model(a=a, h=(h1, 0.0), c=c, beta=beta)
+        _nodes, ebm, program, blocks = _pair_model(a=a, h=(h1, 0.0), c=c, beta=beta)
         n_samples = 60_000
         s = _draw(program, blocks, ebm, n_samples)
 
@@ -122,7 +121,7 @@ class TestSliceExactness:
 
     def test_energy_matches_closed_form(self):
         a, h1, c, beta = 1.2, 0.4, -1.5, 0.7
-        nodes, ebm, program, blocks = _pair_model(a=a, h=(h1, 0.0), c=c, beta=beta)
+        _nodes, ebm, _program, blocks = _pair_model(a=a, h=(h1, 0.0), c=c, beta=beta)
         x = np.array([0.3, -1.4], dtype=np.float32)
         state = [jnp.asarray([x[0]]), jnp.asarray([x[1]])]
         expected = beta * (
@@ -217,7 +216,7 @@ class TestSliceMaskingAndGuards:
         one mechanism that could break masking's prefix-stability. Draws are
         keyed per (site, iteration), so the padded run must stay bitwise
         identical on the live prefix."""
-        nodes, ebm, program, blocks = _lattice_model(L=3)
+        _nodes, ebm, program, blocks = _lattice_model(L=3)
         nc = 5
         betas = jnp.linspace(0.1, 1.0, nc)
         inits = [
@@ -225,7 +224,7 @@ class TestSliceMaskingAndGuards:
             for i, b in enumerate(betas)
         ]
         key = jax.random.key(5)
-        kw = dict(betas=betas, track_round_trips=True, device=None)
+        kw = {"betas": betas, "track_round_trips": True, "device": None}
         s_a, st_a = nrpt(key, ebm, program, inits, [], 40, 2, **kw)
         s_b, st_b = nrpt(key, ebm, program, inits, [], 40, 2, pad_chains_to=9, **kw)
         for chain_a, chain_b in zip(s_a, s_b):
@@ -235,7 +234,7 @@ class TestSliceMaskingAndGuards:
             assert np.array_equal(np.asarray(st_a[k2]), np.asarray(st_b[k2]))
 
     def test_beta_zero_guard(self):
-        nodes, ebm, program, blocks = _lattice_model(L=3)
+        _nodes, ebm, program, blocks = _lattice_model(L=3)
         assert ebm.proper_at_beta_zero is False
         nc = 4
         betas = jnp.linspace(0.0, 1.0, nc)

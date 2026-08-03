@@ -14,7 +14,6 @@ import contextlib
 import jax
 import jax.numpy as jnp
 import numpy as np
-
 from hamon import Block
 from hamon.models.ising import IsingEBM, IsingSamplingProgram, hinton_init
 from hamon.nrpt import nrpt, optimize_schedule

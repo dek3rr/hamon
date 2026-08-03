@@ -31,10 +31,10 @@ Design notes:
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
-from collections.abc import Sequence
 
 import numpy as np
 

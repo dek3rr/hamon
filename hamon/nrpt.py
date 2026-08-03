@@ -12,10 +12,9 @@ rectangular block partitions.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from functools import partial
 from typing import Any, NamedTuple
-from collections.abc import Callable
 
 import equinox as eqx
 import jax
@@ -26,8 +25,7 @@ from jax import lax
 from hamon._nrpt_energy import _compute_base_energies, _make_reference_ebm
 from hamon._nrpt_schedule import _pchip_interp
 from hamon._nrpt_swap import _make_swap_branch
-from hamon.interaction import interaction_float_dtype as _interaction_float_dtype
-from hamon.block_sampling import _run_blocks, BlockSamplingProgram
+from hamon.block_sampling import BlockSamplingProgram, _run_blocks
 from hamon.device import (
     DeviceLike,
     default_device_ctx,
@@ -35,6 +33,7 @@ from hamon.device import (
     resolve_entry_device,
     tree_device_put,
 )
+from hamon.interaction import interaction_float_dtype as _interaction_float_dtype
 from hamon.models.ebm import AbstractEBM
 from hamon.observers import AbstractNRPTObserver
 from hamon.round_trips import (
@@ -663,7 +662,7 @@ def _resolve_run_inputs(
                 base_pbi_offset,
             )
     elif isinstance(ebms, AbstractEBM) or isinstance(programs, BlockSamplingProgram):
-        raise ValueError(
+        raise ValueError(  # noqa: TRY004 - public validation contract
             "Pass ebms and programs either both as per-chain sequences, or "
             "both as single template objects (temperature-linear mode)."
         )
@@ -685,9 +684,7 @@ def _resolve_run_inputs(
         base_spec = programs[0].gibbs_spec
         n_free_blocks = len(base_spec.free_blocks)
         base_clamped = len(base_spec.clamped_blocks)
-        base_nodes = [
-            set(id(n) for n in block.nodes) for block in base_spec.free_blocks
-        ]
+        base_nodes = [{id(n) for n in block.nodes} for block in base_spec.free_blocks]
         for i, prog in enumerate(programs[1:], 1):
             if (
                 len(prog.gibbs_spec.free_blocks) != n_free_blocks
@@ -695,7 +692,7 @@ def _resolve_run_inputs(
             ):
                 raise ValueError("All programs must share the same block structure.")
             for b, block in enumerate(prog.gibbs_spec.free_blocks):
-                prog_nodes = set(id(n) for n in block.nodes)
+                prog_nodes = {id(n) for n in block.nodes}
                 if prog_nodes != base_nodes[b]:
                     raise ValueError(
                         f"programs[{i}] free block {b} contains different node "
@@ -706,7 +703,9 @@ def _resolve_run_inputs(
 
         n_chains = len(ebms)
         if betas is None:
-            betas = jnp.array([float(getattr(ebm, "beta")) for ebm in ebms])
+            betas = jnp.array(
+                [float(ebm.beta) for ebm in ebms]  # type: ignore[reportAttributeAccessIssue]
+            )
         run_program = programs[0]
         stacked_pbi = [
             [

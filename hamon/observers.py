@@ -3,8 +3,8 @@
 
 import abc
 from collections import defaultdict
-from typing import TYPE_CHECKING, TypeVar
 from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, TypeVar
 
 import equinox as eqx
 import jax
@@ -15,7 +15,7 @@ from jaxtyping import Array, Int, PyTree
 from hamon.block_management import Block, block_state_to_global, from_global_state
 
 if TYPE_CHECKING:
-    from hamon.block_sampling import _State, BlockSamplingProgram
+    from hamon.block_sampling import BlockSamplingProgram, _State
 
 from hamon.pgm import AbstractNode
 

@@ -8,7 +8,6 @@ loop compiles and reuses its cache, and dtype preservation holds on device.
 import jax
 import jax.numpy as jnp
 import pytest
-
 from hamon.device import accelerator_device
 from hamon.models.ising import hinton_init
 from hamon.nrpt import nrpt

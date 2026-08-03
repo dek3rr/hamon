@@ -82,7 +82,6 @@ class AbstractConditionalSampler(eqx.Module):
 
         A new state for the block of nodes, matching the template given by `output_sd`.
         """
-        pass
 
     def init(self) -> None:
         """Initialize the sampler state before sampling begins.
@@ -93,7 +92,7 @@ class AbstractConditionalSampler(eqx.Module):
         Returns:
             the initial sampler state to use for the first iteration of block sampling.
         """
-        return None
+        return
 
 
 class AbstractParametricConditionalSampler(AbstractConditionalSampler):
@@ -122,7 +121,6 @@ class AbstractParametricConditionalSampler(AbstractConditionalSampler):
     ) -> PyTree:
         """Compute the parameters of the distribution. For a description of the arguments, see
         [`hamon.AbstractConditionalSampler.sample`][]"""
-        pass
 
     @abc.abstractmethod
     def sample_given_parameters(
@@ -133,7 +131,6 @@ class AbstractParametricConditionalSampler(AbstractConditionalSampler):
         output_sd: PyTree[jax.ShapeDtypeStruct],
     ) -> tuple[_State, _SamplerState]:
         """Produce a sample given the parameters of the distribution, passed in as the `parameters` argument."""
-        pass
 
     def sample(
         self,
@@ -184,7 +181,6 @@ class BernoulliConditional(AbstractParametricConditionalSampler):
     ) -> PyTree:
         r"""A concrete implementation of this function has to return a value of $\gamma$ for every node
         in the block that is being updated. This array should have shape [b]."""
-        pass
 
     def sample_given_parameters(
         self,
@@ -222,7 +218,6 @@ class SoftmaxConditional(AbstractParametricConditionalSampler):
         """A concrete implementation of this function has to return $\theta$ vector for every node
         in the block that is being updated. This array should have shape [b, M], where $M$ is the
         number of possible values that $X$ may take on."""
-        pass
 
     def sample_given_parameters(
         self,

@@ -25,7 +25,6 @@ import time
 import jax
 import jax.numpy as jnp
 import numpy as np
-
 from hamon import Block, nrpt, tune_chains, tune_schedule
 from hamon.device import accelerator_device
 from hamon.models.ising import IsingEBM, IsingSamplingProgram, hinton_init
@@ -98,7 +97,7 @@ def recommend_threshold(rows) -> int | None:
         min(s for s in gpu_wins if s > low) if any(s > low for s in gpu_wins) else low
     )
     geo = math.sqrt(low * high) if low > 0 else high
-    return 2 ** max(int(round(math.log2(geo))), 0)
+    return 2 ** max(round(math.log2(geo)), 0)
 
 
 def sweep(args) -> list[dict]:

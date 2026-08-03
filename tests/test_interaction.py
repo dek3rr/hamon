@@ -1,7 +1,6 @@
 import unittest
 
 import jax.numpy as jnp
-
 from hamon.block_management import Block
 from hamon.interaction import InteractionGroup
 from hamon.pgm import AbstractNode

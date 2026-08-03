@@ -7,10 +7,8 @@ Covers:
 
 import jax
 import jax.numpy as jnp
-
-from hamon.pgm import SpinNode
 from hamon.boundary_energy import ising_energy_delta
-
+from hamon.pgm import SpinNode
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -40,7 +38,7 @@ class TestEnergyDelta:
     def test_delta_matches_full(self):
         """ΔE from boundary-only computation should equal E_new - E_old."""
         L = 4
-        nodes_2d, nodes_flat, edges = _make_grid(L)
+        _nodes_2d, nodes_flat, edges = _make_grid(L)
         n_nodes = L * L
         n_edges = len(edges)
 
@@ -122,7 +120,7 @@ class TestMakeIsingDeltaFn:
                 if i + 1 < L:
                     edges.append((nodes_2d[i][j], nodes_2d[i + 1][j]))
 
-        k_b, k_w = jax.random.split(key)
+        k_b, _k_w = jax.random.split(key)
         biases = jax.random.normal(k_b, (len(nodes),)) * 0.3
         weights = jnp.ones(len(edges)) * coupling
 
@@ -140,14 +138,14 @@ class TestMakeIsingDeltaFn:
     def test_delta_matches_full_energy_diff(self):
         """delta_fn(old, new)[c] == E_base(new_c) - E_base(old_c) for all chains."""
         from hamon.boundary_energy import make_ising_delta_fn
-        from hamon.nrpt import _compute_base_energies
         from hamon.models.ising import IsingEBM, IsingSamplingProgram
+        from hamon.nrpt import _compute_base_energies
 
         L, n_chains = 4, 6
         betas_list = [0.3, 0.7, 1.0, 1.4, 1.8, 2.2]
         betas = jnp.array(betas_list)
 
-        nodes, edges, free_blocks, biases, weights, ebm = self._build_ising(
+        nodes, edges, free_blocks, biases, weights, _ebm = self._build_ising(
             L, coupling=0.5, beta=betas_list[0], key=jax.random.key(0)
         )
         ebms = [
@@ -204,7 +202,7 @@ class TestMakeIsingDeltaFn:
 
         delta_fn = make_ising_delta_fn(nodes, edges, free_blocks, biases, weights)
 
-        states_ref, stats_ref = nrpt(
+        _states_ref, stats_ref = nrpt(
             jax.random.key(7),
             ebms,
             progs,
@@ -215,7 +213,7 @@ class TestMakeIsingDeltaFn:
             betas=betas,
             track_round_trips=False,
         )
-        states_cac, stats_cac = nrpt(
+        _states_cac, stats_cac = nrpt(
             jax.random.key(7),
             ebms,
             progs,

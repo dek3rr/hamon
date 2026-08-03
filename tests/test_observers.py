@@ -14,7 +14,6 @@ import unittest
 import jax
 import jax.numpy as jnp
 import numpy as np
-
 from hamon.block_management import Block, block_state_to_global
 from hamon.block_sampling import BlockGibbsSpec
 from hamon.observers import (

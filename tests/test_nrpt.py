@@ -10,20 +10,18 @@ Validates:
 import jax
 import jax.numpy as jnp
 import pytest
-
 from hamon import (
     AbstractNRPTObserver,
-    nrpt_node_samples,
+    NRPTStateObserver,
     make_empty_block_state,
     make_ising_delta_fn,
-    NRPTStateObserver,
+    nrpt_node_samples,
 )
 from hamon.models import AbstractEBM, IsingEBM, hinton_init
 from hamon.nrpt import _compute_base_energies, _make_reference_ebm, nrpt
 from hamon.tuning import tune_schedule
 
 from .utils import make_ising_grid
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -584,7 +582,7 @@ class TestObserverEnergyAlignment:
     n_chains = 4
     # Close betas → high swap acceptance, so misalignment cannot hide
     # behind an identity permutation.
-    betas = [0.8, 1.0, 1.2, 1.4]
+    betas = (0.8, 1.0, 1.2, 1.4)
 
     def _run(self, energy_delta_fn=None):
         nodes, edges, fb, ebms, progs = _make_ising(4, self.betas, coupling=0.5)
@@ -693,17 +691,17 @@ class TestTemperatureLinearMode:
             assert jnp.array_equal(o_seq, o_lin)
 
     def test_mixed_single_and_sequence_raises(self):
-        betas, fb, ebms, progs, inits = self._setup()
+        betas, _fb, ebms, progs, inits = self._setup()
         with pytest.raises(ValueError, match="both"):
             nrpt(jax.random.key(0), ebms[-1], progs, inits, [], 5, 1, betas=betas)
 
     def test_requires_betas(self):
-        betas, fb, ebms, progs, inits = self._setup()
+        _betas, _fb, ebms, progs, inits = self._setup()
         with pytest.raises(ValueError, match="betas"):
             nrpt(jax.random.key(0), ebms[-1], progs[-1], inits, [], 5, 1)
 
     def test_init_states_length_mismatch_raises(self):
-        betas, fb, ebms, progs, inits = self._setup()
+        betas, _fb, ebms, progs, inits = self._setup()
         with pytest.raises(ValueError, match="init_states"):
             nrpt(
                 jax.random.key(0),
@@ -812,7 +810,7 @@ class TestNodeOrderSamples:
         return nodes, fb, ebms, progs
 
     def test_synthetic_permutation_inverted(self):
-        nodes, fb, ebms, progs = self._setup()
+        nodes, fb, _ebms, progs = self._setup()
         node_idx = {id(n): i for i, n in enumerate(nodes)}
         n_rounds = 3
         observations = []
@@ -858,7 +856,7 @@ class TestNodeOrderSamples:
                     break
 
     def test_subset_and_reorder(self):
-        nodes, fb, ebms, progs = self._setup()
+        nodes, fb, _ebms, progs = self._setup()
         node_idx = {id(n): i for i, n in enumerate(nodes)}
         observations = []
         for block in fb:
@@ -871,20 +869,20 @@ class TestNodeOrderSamples:
     def test_foreign_node_raises(self):
         from hamon import SpinNode
 
-        nodes, fb, ebms, progs = self._setup()
+        _nodes, fb, _ebms, progs = self._setup()
         observations = [jnp.zeros((2, 1, len(b)), dtype=jnp.int32) for b in fb]
         with pytest.raises(ValueError, match="not found"):
             nrpt_node_samples(observations, progs[0], [SpinNode()])
 
     def test_wrong_observation_count_raises(self):
-        nodes, fb, ebms, progs = self._setup()
+        nodes, _fb, _ebms, progs = self._setup()
         with pytest.raises(ValueError, match="per free block"):
             nrpt_node_samples([jnp.zeros((2, 1, 2))], progs[0], nodes)
 
 
 class TestBetaLadderValidation:
     def test_descending_betas_raise_linear_mode(self):
-        nodes, _, fb, ebms, progs = _make_ising(2, [0.5, 1.0, 1.5])
+        _nodes, _, fb, ebms, progs = _make_ising(2, [0.5, 1.0, 1.5])
         inits = _make_states(jax.random.key(0), ebms, fb, 3)
         with pytest.raises(ValueError, match="ascending"):
             nrpt(
@@ -899,7 +897,7 @@ class TestBetaLadderValidation:
             )
 
     def test_shuffled_betas_raise_sequence_mode(self):
-        nodes, _, fb, ebms, progs = _make_ising(2, [0.5, 1.0, 1.5])
+        _nodes, _, fb, ebms, progs = _make_ising(2, [0.5, 1.0, 1.5])
         inits = _make_states(jax.random.key(0), ebms, fb, 3)
         with pytest.raises(ValueError, match="ascending"):
             nrpt(
@@ -914,7 +912,7 @@ class TestBetaLadderValidation:
             )
 
     def test_betas_length_mismatch_raises(self):
-        nodes, _, fb, ebms, progs = _make_ising(2, [0.5, 1.0, 1.5])
+        _nodes, _, fb, ebms, progs = _make_ising(2, [0.5, 1.0, 1.5])
         inits = _make_states(jax.random.key(0), ebms, fb, 3)
         with pytest.raises(ValueError, match="one entry per chain"):
             nrpt(
@@ -932,7 +930,7 @@ class TestBetaLadderValidation:
 class TestStackedInitStates:
     def test_stacked_matches_per_chain_lists(self):
         betas = jnp.array([0.5, 1.0, 1.5])
-        nodes, _, fb, ebms, progs = _make_ising(4, [float(b) for b in betas])
+        _nodes, _, fb, ebms, progs = _make_ising(4, [float(b) for b in betas])
         per_chain = _make_states(jax.random.key(0), ebms, fb, 3)
         stacked = [
             jnp.stack([per_chain[c][b] for c in range(3)]) for b in range(len(fb))
@@ -951,7 +949,7 @@ class TestStackedInitStates:
 
     def test_hinton_init_batch_shape_works_directly(self):
         betas = jnp.array([0.5, 1.0, 1.5])
-        nodes, _, fb, ebms, progs = _make_ising(4, [float(b) for b in betas])
+        _nodes, _, fb, ebms, progs = _make_ising(4, [float(b) for b in betas])
         stacked = hinton_init(jax.random.key(0), ebms[0], fb, (3,))
         _, stats = nrpt(
             jax.random.key(1), ebms[-1], progs[-1], stacked, [], 10, 1, betas=betas
@@ -960,7 +958,7 @@ class TestStackedInitStates:
 
     def test_wrong_leading_dim_raises(self):
         betas = jnp.array([0.5, 1.0, 1.5])
-        nodes, _, fb, ebms, progs = _make_ising(4, [float(b) for b in betas])
+        _nodes, _, fb, ebms, progs = _make_ising(4, [float(b) for b in betas])
         stacked = hinton_init(jax.random.key(0), ebms[0], fb, (2,))  # 2 != 3
         with pytest.raises(ValueError, match="leading dimension"):
             nrpt(jax.random.key(1), ebms[-1], progs[-1], stacked, [], 4, 1, betas=betas)
@@ -973,7 +971,7 @@ class TestTuneEarlyStop:
     # in test_adaptive_rounds.py.
     def _run(self, tune_tol):
         betas = jnp.array([0.5, 1.0, 1.5])
-        nodes, _, fb, ebms, progs = _make_ising(4, [float(b) for b in betas])
+        _nodes, _, fb, ebms, progs = _make_ising(4, [float(b) for b in betas])
         inits = _make_states(jax.random.key(0), ebms, fb, 3)
         _, stats = tune_schedule(
             jax.random.key(1),

@@ -19,12 +19,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
-from hamon import Block, SpinNode, SamplingSchedule, sample_states
+from hamon import Block, SamplingSchedule, SpinNode, sample_states
 from hamon.models import IsingEBM, IsingSamplingProgram, hinton_init
 from hamon.nrpt import nrpt, optimize_schedule
 from hamon.tuning import tune_schedule
-
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -109,7 +107,7 @@ class TestBoltzmannMarginals:
             n, coupling=0.8, beta=beta_cold, key=k_bias
         )
         betas = [0.2, 0.5, beta_cold]
-        ebms, progs = _make_chain_set(nodes, edges, biases, weights, fb, betas)
+        ebms, _progs = _make_chain_set(nodes, edges, biases, weights, fb, betas)
         init = _init_states(k_init, len(betas), ebms, fb)
 
         # Warmup via tune_schedule so cold chain isn't stuck
@@ -143,9 +141,12 @@ class TestBoltzmannMarginals:
         )
         # samples[0]: (8000, 8) bool
 
-        return dict(
-            samples=samples[0], nodes=nodes, ebm_cold=ebm_cold, obs_block=obs_block
-        )
+        return {
+            "samples": samples[0],
+            "nodes": nodes,
+            "ebm_cold": ebm_cold,
+            "obs_block": obs_block,
+        }
 
     def test_first_order_marginals(self, model_8):
         """Empirical P(x_k=1) must match exact to within 3% relative error."""
@@ -215,7 +216,7 @@ class TestBoltzmannMarginals:
 
         # NRPT warmup → sample_states
         betas = [0.2, 0.5, beta]
-        ebms, progs = _make_chain_set(nodes, edges, biases, weights, fb, betas)
+        ebms, _progs = _make_chain_set(nodes, edges, biases, weights, fb, betas)
         pt_init = _init_states(k_pt, 3, ebms, fb)
 
         def ebm_f(b):
@@ -316,7 +317,7 @@ class TestDEODetailedBalance:
         """
         n = 4
         biases = [2.0] * n
-        nodes, fb, ebms, progs, inits, alpha = self._two_chain_setup(
+        _nodes, _fb, ebms, progs, inits, alpha = self._two_chain_setup(
             n,
             biases,
             coupling=0.0,
@@ -358,7 +359,7 @@ class TestDEODetailedBalance:
         # high-energy state and cold chain in a low-energy state.
         n = 6
         biases = [3.0] * n  # strong field: all-True is very low energy
-        nodes, fb, ebms, progs, inits, alpha = self._two_chain_setup(
+        _nodes, _fb, ebms, progs, inits, alpha = self._two_chain_setup(
             n,
             biases,
             coupling=0.0,
@@ -395,7 +396,7 @@ class TestDEODetailedBalance:
         """
         n = 4
         biases = [1.0, -0.5, 0.8, -0.3]
-        nodes, fb, ebms, progs, inits, _ = self._two_chain_setup(
+        _nodes, fb, ebms, progs, inits, _ = self._two_chain_setup(
             n,
             biases,
             coupling=0.0,
@@ -439,7 +440,7 @@ class TestDEODetailedBalance:
         s_a = [True, False, True, True]
         s_b = [False, True, False, False]
 
-        _, fb_fwd, ebms_fwd, progs_fwd, inits_fwd, alpha_fwd = self._two_chain_setup(
+        _, fb_fwd, ebms_fwd, _progs_fwd, inits_fwd, _alpha_fwd = self._two_chain_setup(
             n,
             biases,
             coupling=0.0,
@@ -447,13 +448,15 @@ class TestDEODetailedBalance:
             init_spins_0=s_a,
             init_spins_1=s_b,
         )
-        _, fb_rev, ebms_rev, progs_rev, inits_rev, alpha_rev = self._two_chain_setup(
-            n,
-            biases,
-            coupling=0.0,
-            betas=[0.5, 1.5],
-            init_spins_0=s_b,
-            init_spins_1=s_a,
+        _, _fb_rev, _ebms_rev, _progs_rev, _inits_rev, _alpha_rev = (
+            self._two_chain_setup(
+                n,
+                biases,
+                coupling=0.0,
+                betas=[0.5, 1.5],
+                init_spins_0=s_b,
+                init_spins_1=s_a,
+            )
         )
 
         # Detailed balance: α(a,b)·π(a)·π(b) = α(b,a)·π(b)·π(a)

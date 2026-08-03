@@ -397,7 +397,7 @@ class SpinGibbsConditional(BernoulliConditional):
                 # flags), so no per-step active multiply is needed.
                 gamma += jnp.sum(weights * spin_prod, axis=-1)
             else:
-                raise RuntimeError("Unsupported interaction found")
+                raise TypeError("Unsupported interaction found")
         return gamma, sampler_state
 
 
@@ -449,6 +449,6 @@ class CategoricalGibbsConditional(SoftmaxConditional):
                 theta += jnp.sum(spin_prod * weights, axis=-2)
 
             else:
-                raise RuntimeError("Unsupported interaction found")
+                raise TypeError("Unsupported interaction found")
 
         return theta, sampler_state

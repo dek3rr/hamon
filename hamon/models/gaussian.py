@@ -42,13 +42,13 @@ from hamon.models.ebm import AbstractFactorizedEBM, EBMFactor
 from hamon.pgm import AbstractNode, GaussianNode, _as_identity_seq, _fifo_cache
 
 __all__ = [
-    "QuadraticSelfInteraction",
+    "GaussianEBM",
+    "GaussianGibbsConditional",
+    "GaussianSamplingProgram",
+    "QuadraticPairEBMFactor",
     "QuadraticPairInteraction",
     "QuadraticSelfEBMFactor",
-    "QuadraticPairEBMFactor",
-    "GaussianGibbsConditional",
-    "GaussianEBM",
-    "GaussianSamplingProgram",
+    "QuadraticSelfInteraction",
     "gaussian_init",
 ]
 
@@ -189,7 +189,7 @@ class GaussianGibbsConditional(AbstractParametricConditionalSampler):
                 (x_tail,) = state
                 eta -= jnp.sum(interaction.coupling * x_tail.astype(dtype), axis=-1)
             else:
-                raise RuntimeError("Unsupported interaction found")
+                raise TypeError("Unsupported interaction found")
         return (prec, eta), sampler_state
 
     def sample_given_parameters(

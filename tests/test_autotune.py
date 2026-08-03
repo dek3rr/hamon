@@ -11,7 +11,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 from hamon import Block, SpinNode, autosample, autotune
 from hamon.models import IsingEBM, IsingSamplingProgram, hinton_init
 
@@ -33,16 +32,16 @@ def _model(n=8, coupling=0.6, seed=1):
     return nodes, ebm, program, init_factory
 
 
-_KW = dict(
-    clamp_state=[],
-    max_chains=20,
-    max_exploration_steps=4,
-    rounds_per_probe=150,
-    n_tune=2,
-    n_polish=2,
-    n_rounds=300,
-    device="cpu",
-)
+_KW = {
+    "clamp_state": [],
+    "max_chains": 20,
+    "max_exploration_steps": 4,
+    "rounds_per_probe": 150,
+    "n_tune": 2,
+    "n_polish": 2,
+    "n_rounds": 300,
+    "device": "cpu",
+}
 
 
 def _ferro_grid(L=8, coupling=1.0):
@@ -71,17 +70,17 @@ def _ferro_grid(L=8, coupling=1.0):
     return nodes, ebm, program, init_factory
 
 
-_BIMODAL_KW = dict(
-    clamp_state=[],
-    beta_range=(0.2, 1.0),
-    gibbs_steps_per_round=2,
-    max_chains=24,
-    rounds_per_probe=150,
-    n_tune=2,
-    n_polish=2,
-    n_rounds=400,
-    device="cpu",
-)
+_BIMODAL_KW = {
+    "clamp_state": [],
+    "beta_range": (0.2, 1.0),
+    "gibbs_steps_per_round": 2,
+    "max_chains": 24,
+    "rounds_per_probe": 150,
+    "n_tune": 2,
+    "n_polish": 2,
+    "n_rounds": 400,
+    "device": "cpu",
+}
 
 
 def _mode_fractions(samples):
@@ -139,7 +138,7 @@ class TestAutotune:
     def test_default_uses_device_calibrated_n_expl(self):
         # Default (search_exploration=False) sets n_expl deterministically by
         # device and runs no exploration search. On CPU the calibrated value is 1.
-        nodes, ebm, program, init_factory = _model()
+        _nodes, ebm, program, init_factory = _model()
         plan = autotune(
             jax.random.key(4),
             ebm=ebm,
@@ -152,7 +151,7 @@ class TestAutotune:
 
     def test_search_exploration_runs_the_search(self):
         # Opt-in: search_exploration=True runs tune_exploration and reports it.
-        nodes, ebm, program, init_factory = _model()
+        _nodes, ebm, program, init_factory = _model()
         plan = autotune(
             jax.random.key(4),
             ebm=ebm,
@@ -168,7 +167,7 @@ class TestAutotune:
     def test_explicit_gibbs_steps_override(self):
         # An explicit gibbs_steps_per_round pins n_expl and skips the search,
         # even when search_exploration=True.
-        nodes, ebm, program, init_factory = _model()
+        _nodes, ebm, program, init_factory = _model()
         plan = autotune(
             jax.random.key(4),
             ebm=ebm,
@@ -183,7 +182,7 @@ class TestAutotune:
 
     def test_compile_cache_opt_out(self):
         # compile_cache=False must not raise and must not touch jax config.
-        nodes, ebm, program, init_factory = _model()
+        _nodes, ebm, program, init_factory = _model()
         plan = autotune(
             jax.random.key(5),
             ebm=ebm,

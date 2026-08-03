@@ -55,7 +55,6 @@ class AbstractFactor(eqx.Module):
     @abc.abstractmethod
     def to_interaction_groups(self) -> list[InteractionGroup]:
         """Compile a factor to a set of directed interactions."""
-        pass
 
 
 class WeightedFactor(AbstractFactor):

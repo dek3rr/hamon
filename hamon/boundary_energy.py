@@ -14,7 +14,6 @@ import jax.numpy as jnp
 
 from hamon.pgm import AbstractNode
 
-
 # ---------------------------------------------------------------------------
 # Incremental energy delta for Ising
 # ---------------------------------------------------------------------------

@@ -1,10 +1,9 @@
+import itertools
 import unittest
 
 import equinox as eqx
 import jax
 import numpy as np
-from jax import numpy as jnp
-
 from hamon.block_management import Block, BlockSpec
 from hamon.block_sampling import SamplingSchedule, sample_with_observation
 from hamon.models.ising import (
@@ -18,6 +17,7 @@ from hamon.models.ising import (
 )
 from hamon.observers import StateObserver
 from hamon.pgm import SpinNode
+from jax import numpy as jnp
 
 from .utils import sample_and_compare_distribution
 
@@ -32,7 +32,7 @@ class TestLine(unittest.TestCase):
         dim = 5
         key = jax.random.key(43524)
         nodes = [SpinNode() for _ in range(dim)]
-        edges = [(x, y) for x, y in zip(nodes[:-1], nodes[1:])]
+        edges = [(x, y) for x, y in itertools.pairwise(nodes)]
         key, subkey = jax.random.split(key)
         biases = jax.random.uniform(subkey, (dim,), minval=-1.0, maxval=1.0)
         key, subkey = jax.random.split(key)
@@ -155,7 +155,7 @@ class TestEstimateKLGrad(unittest.TestCase):
         nodes = [SpinNode() for _ in range(4)]
         data_nodes = [nodes[0], nodes[2]]
         latent_nodes = [nodes[1], nodes[3]]
-        edges = [(a, b) for a, b in zip(nodes[:-1], nodes[1:])]
+        edges = [(a, b) for a, b in itertools.pairwise(nodes)]
 
         key, subkey = jax.random.split(key, 2)
         biases = jax.random.uniform(subkey, (4,))
@@ -224,7 +224,7 @@ class TestEstimateKLGrad(unittest.TestCase):
             return jnp.log(1 / norm_prob[0, 0])
 
         # this should match our MC grad
-        val, grad = eqx.filter_value_and_grad(compute_kl)(model)
+        _val, grad = eqx.filter_value_and_grad(compute_kl)(model)
 
         error_w = jnp.max(jnp.abs(grad_w - grad.weights)) / jnp.max(jnp.abs(grad_w))
         error_b = jnp.max(jnp.abs(grad_b - grad.biases)) / jnp.max(jnp.abs(grad_b))

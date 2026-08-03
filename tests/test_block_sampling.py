@@ -13,8 +13,6 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jaxtyping import Array, Key, PyTree
-
 from hamon.block_management import Block, block_state_to_global
 from hamon.block_sampling import (
     BlockGibbsSpec,
@@ -35,6 +33,7 @@ from hamon.conditional_samplers import (
 from hamon.interaction import InteractionGroup
 from hamon.observers import MomentAccumulatorObserver, StateObserver
 from hamon.pgm import AbstractNode, SpinNode
+from jaxtyping import Array, Key, PyTree
 
 
 class ContinousScalarNode(AbstractNode):
@@ -72,7 +71,7 @@ class PlusMinusSampler(AbstractConditionalSampler):
             elif isinstance(interaction, MinusInteraction):
                 output -= jnp.sum(interaction.multiplier * active * s, axis=-1)
             else:
-                raise RuntimeError("Invalid interaction passed to PlusMinusSampler")
+                raise TypeError("Invalid interaction passed to PlusMinusSampler")
         return output, sampler_state
 
     def init(self) -> _SamplerState:
@@ -352,7 +351,7 @@ class TestRunBlocksGlobalState(unittest.TestCase):
     def test_zero_iters_returns_init_global(self):
         """n_iters=0 early-return path must also return a valid global_state."""
         prog, init_state = self._make_simple_program()
-        final_state, _, returned_global = _run_blocks(
+        _final_state, _, returned_global = _run_blocks(
             jax.random.key(0),
             prog,
             init_state,
@@ -599,7 +598,7 @@ class TestPrecomputedOutputSDs(unittest.TestCase):
         for i, block in enumerate(prog.gibbs_spec.free_blocks):
             template = prog.gibbs_spec.node_shape_struct[block.node_type]
 
-            def _resize(leaf):
+            def _resize(leaf, block=block):
                 if isinstance(leaf, jax.ShapeDtypeStruct):
                     return jax.ShapeDtypeStruct(
                         (len(block.nodes), *leaf.shape), leaf.dtype
@@ -627,7 +626,6 @@ class TestFusedWeightBind(unittest.TestCase):
 
     def _ising(self, n=24, seed=0):
         import numpy as _np
-
         from hamon.models.ising import IsingEBM, IsingSamplingProgram, _ising_graph
 
         rng = _np.random.default_rng(seed)
@@ -680,7 +678,7 @@ class TestFusedWeightBind(unittest.TestCase):
         # A fresh program for a beta-scaled ebm must produce the same bound
         # weights as the original scaled by the same factor — the fused bind is
         # a pure function of the interaction values.
-        prog, ebm, edges = self._ising()
+        prog, ebm, _edges = self._ising()
         from hamon.models.ising import IsingSamplingProgram
 
         scaled = ebm.with_beta(ebm.beta * 2.0)

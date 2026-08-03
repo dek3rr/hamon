@@ -3,8 +3,8 @@
 import collections
 import dataclasses
 from collections import defaultdict
-from typing import TypeAlias
 from collections.abc import Mapping, Sequence
+from typing import TypeAlias
 
 import equinox as eqx
 import jax
@@ -788,11 +788,11 @@ def _run_blocks(
             # Writes chain through `new_global`, so two blocks landing in
             # different ranges of the same shared slot both survive.
             new_global = list(global_state)
-            for i in new_states:
+            for i, new_state in new_states.items():
                 sd_ind = block_sd_inds[i]
                 new_global[sd_ind] = _slot_after_write(
                     new_global[sd_ind],
-                    new_states[i],
+                    new_state,
                     block_owns_slot[i],
                     block_slice_starts[i],
                     block_positions[i],
@@ -1017,7 +1017,7 @@ def sample_states(
     f_observe = StateObserver(nodes_to_sample)
     carry_init = f_observe.init()
 
-    mem_out, results_out = sample_with_observation(
+    _mem_out, results_out = sample_with_observation(
         key,
         program,
         schedule,

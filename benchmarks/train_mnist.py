@@ -31,8 +31,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-from jaxtyping import Array, Key
-
 from hamon.block_management import Block
 from hamon.block_sampling import SamplingSchedule, sample_states
 from hamon.models.ising import (
@@ -45,6 +43,7 @@ from hamon.models.ising import (
 )
 from hamon.pgm import AbstractNode, SpinNode
 from hamon.tuning import tune_sampling_schedule
+from jaxtyping import Array, Key
 
 _DATA_DIR = Path(__file__).resolve().parent / "mnist_test_data"
 _ACCURACY_THRESHOLD = 0.9
@@ -438,13 +437,15 @@ class MnistTraining:
                 warm_sched = SamplingSchedule(neg_warmup, 1, 1)
                 keys_w = jax.random.split(k_w, bsz_negative)
                 warmed = jax.vmap(
-                    lambda k, init: sample_states(
-                        k,
-                        prog_neg,
-                        warm_sched,
-                        init,
-                        [],
-                        list(prog_neg.gibbs_spec.free_blocks),
+                    lambda k, init, prog_neg=prog_neg, warm_sched=warm_sched: (
+                        sample_states(
+                            k,
+                            prog_neg,
+                            warm_sched,
+                            init,
+                            [],
+                            list(prog_neg.gibbs_spec.free_blocks),
+                        )
                     )
                 )(keys_w, fresh)
                 neg_state = [blk[:, 0] for blk in warmed]

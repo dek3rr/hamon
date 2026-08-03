@@ -10,7 +10,6 @@ import unittest
 
 import jax
 import jax.numpy as jnp
-
 from hamon.block_management import Block, BlockSpec
 from hamon.block_sampling import BlockGibbsSpec
 from hamon.models.discrete_ebm import SpinEBMFactor

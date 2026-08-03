@@ -1,7 +1,6 @@
 import unittest
 
 import jax.numpy as jnp
-
 from hamon.block_management import Block
 from hamon.factor import AbstractFactor, WeightedFactor
 from hamon.interaction import InteractionGroup

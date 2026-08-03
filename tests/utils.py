@@ -2,9 +2,6 @@ import itertools
 
 import jax
 import numpy as np
-from jax import numpy as jnp
-from jaxtyping import Array, Key
-
 from hamon.block_management import Block
 from hamon.block_sampling import (
     BlockSamplingProgram,
@@ -14,6 +11,8 @@ from hamon.block_sampling import (
 from hamon.models.ebm import AbstractEBM
 from hamon.models.ising import IsingEBM, IsingSamplingProgram
 from hamon.pgm import DEFAULT_NODE_SHAPE_DTYPES, CategoricalNode, SpinNode
+from jax import numpy as jnp
+from jaxtyping import Array, Key
 
 
 def make_ising_grid(L, betas, coupling=1.0, biases=None, weights=None):

@@ -17,7 +17,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 from hamon import Block, GaussianNode
 from hamon.block_sampling import SamplingSchedule, sample_states
 from hamon.models import GaussianEBM, GaussianSamplingProgram, gaussian_init
@@ -105,7 +104,7 @@ class TestGaussianExactness:
         assert rel_frob < 0.15, rel_frob
 
     def test_energy_matches_closed_form(self):
-        nodes, ebm, program, blocks, P, h, beta = _lattice_gmrf()
+        nodes, ebm, _program, blocks, P, h, beta = _lattice_gmrf()
         rng = np.random.default_rng(3)
         x = rng.normal(size=len(nodes)).astype(np.float32)
         # split x into the block layout
@@ -119,7 +118,7 @@ class TestGaussianExactness:
         assert np.isclose(got, expected, rtol=5e-5, atol=5e-4), (got, expected)
 
     def test_gaussian_init_shapes_and_dtype(self):
-        nodes, ebm, program, blocks, P, h, beta = _lattice_gmrf()
+        _nodes, ebm, _program, blocks, _P, _h, _beta = _lattice_gmrf()
         init = gaussian_init(jax.random.key(2), ebm, blocks)
         assert len(init) == len(blocks)
         for st, b in zip(init, blocks):
@@ -130,7 +129,7 @@ class TestGaussianExactness:
 
 class TestImproperBetaZeroGuard:
     def test_nrpt_rejects_beta_zero_ladder(self):
-        nodes, ebm, program, blocks, P, h, beta = _lattice_gmrf()
+        _nodes, ebm, program, blocks, _P, _h, _beta = _lattice_gmrf()
         nc = 4
         betas = jnp.linspace(0.0, 1.0, nc)
         inits = [gaussian_init(jax.random.key(i), ebm, blocks) for i in range(nc)]
@@ -138,7 +137,7 @@ class TestImproperBetaZeroGuard:
             nrpt(jax.random.key(0), ebm, program, inits, [], 5, 1, betas=betas)
 
     def test_tune_chains_rejects_beta_zero_range(self):
-        nodes, ebm, program, blocks, P, h, beta = _lattice_gmrf()
+        _nodes, ebm, program, blocks, _P, _h, _beta = _lattice_gmrf()
 
         def init_factory(n_chains, ebms, programs):
             return [
@@ -172,13 +171,13 @@ class TestImproperBetaZeroGuard:
             jnp.array(1.0),
         )
         assert ising.proper_at_beta_zero is True
-        nodes, ebm, program, blocks, P, h, beta = _lattice_gmrf()
+        _nodes, ebm, _program, _blocks, _P, _h, _beta = _lattice_gmrf()
         assert ebm.proper_at_beta_zero is False
 
 
 class TestGaussianNRPT:
     def test_template_mode_ladder_runs_finite(self):
-        nodes, ebm, program, blocks, P, h, beta = _lattice_gmrf(beta=1.0)
+        _nodes, ebm, program, blocks, _P, _h, _beta = _lattice_gmrf(beta=1.0)
         nc = 5
         betas = jnp.linspace(0.2, 1.0, nc)
         inits = [
@@ -203,7 +202,7 @@ class TestGaussianNRPT:
         assert np.all(np.isfinite(rej)) and np.all((rej >= 0) & (rej <= 1))
 
     def test_tune_schedule_runs_finite(self):
-        nodes, ebm, program, blocks, P, h, beta = _lattice_gmrf(beta=1.0)
+        nodes, ebm, program, blocks, _P, _h, _beta = _lattice_gmrf(beta=1.0)
         nc = 5
         betas = jnp.linspace(0.2, 1.0, nc)
         inits = [

@@ -7,12 +7,11 @@ GPU hardware execution lives in test_gpu_smoke.py.
 
 import importlib
 
+import hamon.device as device_mod
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
-import hamon.device as device_mod
 from hamon.block_sampling import SamplingSchedule, sample_states
 from hamon.device import (
     DEFAULT_DEVICE_THRESHOLD,
@@ -135,7 +134,7 @@ class TestTreeDevicePut:
         assert tree_device_put(moved, CPU) is moved
 
     def test_non_array_leaves_keep_identity(self):
-        _, _, fb, ebms, progs = make_ising_grid(2, [1.0])
+        _, _, _fb, _ebms, progs = make_ising_grid(2, [1.0])
         prog = progs[0]
         moved = tree_device_put(prog, CPU)
         # leaf-level static structure (the spec holds blocks and node objects
@@ -229,7 +228,7 @@ class TestEntryPoints:
     def test_adaptive_cpu_outputs_on_cpu(self):
         _, _, fb, ebms, progs = make_ising_grid(3, [1.0], coupling=0.5)
         inits = _make_states(jax.random.key(0), ebms, fb, 2)
-        states, stats = tune_schedule(
+        states, _stats = tune_schedule(
             jax.random.key(1),
             ebm=ebms[0],
             program=progs[0],
@@ -249,7 +248,7 @@ class TestEntryPoints:
     def test_sample_states_under_vmap_is_noop(self):
         # tracer guard: "auto" routing inside a vmap trace must not try to
         # open device contexts or transfer tracers
-        _, _, fb, ebms, progs = make_ising_grid(2, [1.0])
+        _, _, fb, _ebms, progs = make_ising_grid(2, [1.0])
         prog = progs[0]
         init = [jnp.zeros(len(b), dtype=jnp.bool_) for b in fb]
         schedule = SamplingSchedule(1, 2, 1)

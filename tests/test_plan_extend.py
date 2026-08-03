@@ -7,7 +7,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 from hamon import Block, SpinNode, autotune
 from hamon.models import IsingEBM, IsingSamplingProgram, hinton_init
 
@@ -31,15 +30,15 @@ def _model(n=10, seed=1):
     return nodes, ebm, program, init_factory, np.asarray(biases), np.asarray(weights)
 
 
-_KW = dict(
-    clamp_state=[],
-    max_chains=12,
-    rounds_per_probe=120,
-    n_tune=2,
-    n_polish=2,
-    n_rounds=200,
-    device="cpu",
-)
+_KW = {
+    "clamp_state": [],
+    "max_chains": 12,
+    "rounds_per_probe": 120,
+    "n_tune": 2,
+    "n_polish": 2,
+    "n_rounds": 200,
+    "device": "cpu",
+}
 
 
 def _make_plan(seed=1, **overrides):
@@ -100,7 +99,7 @@ def test_extend_is_deterministic():
 
 
 def test_extend_continues_not_restarts(plan_bw):
-    plan, b, w = plan_bw
+    plan, _b, _w = plan_bw
     plan.sample(jax.random.key(10), 50)
     first_ladder = plan._last_ladder
     plan.extend(jax.random.key(11), 50)

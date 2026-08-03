@@ -28,7 +28,7 @@ class _IdentitySeq(Sequence[_T]):
     differ, exactly as before.
     """
 
-    __slots__ = ("_items", "_hash")
+    __slots__ = ("_hash", "_items")
 
     def __init__(self, items):
         self._items = items if isinstance(items, tuple) else tuple(items)
@@ -172,8 +172,6 @@ class AbstractNode(_UniqueID):
 class SpinNode(AbstractNode):
     """A node that represents a random variable that takes on a state in {-1, 1}."""
 
-    pass
-
 
 class CategoricalNode(AbstractNode):
     """A node that represents a random variable that may take on any one of K possible discrete states,
@@ -182,8 +180,6 @@ class CategoricalNode(AbstractNode):
     The default state dtype is ``uint8`` (see ``DEFAULT_NODE_SHAPE_DTYPES``),
     which caps K at 256; pass a custom ``node_shape_dtypes`` mapping with a
     wider integer dtype for larger category counts."""
-
-    pass
 
 
 class GaussianNode(AbstractNode):
@@ -196,11 +192,9 @@ class GaussianNode(AbstractNode):
     ``AbstractEBM.proper_at_beta_zero``); use a β ladder with β_min > 0.
     """
 
-    pass
-
 
 DEFAULT_NODE_SHAPE_DTYPES = {
-    SpinNode: jax.ShapeDtypeStruct(tuple(), dtype=jnp.bool_),
-    CategoricalNode: jax.ShapeDtypeStruct(tuple(), dtype=jnp.uint8),
-    GaussianNode: jax.ShapeDtypeStruct(tuple(), dtype=jnp.float32),
+    SpinNode: jax.ShapeDtypeStruct((), dtype=jnp.bool_),
+    CategoricalNode: jax.ShapeDtypeStruct((), dtype=jnp.uint8),
+    GaussianNode: jax.ShapeDtypeStruct((), dtype=jnp.float32),
 }

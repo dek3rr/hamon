@@ -1,7 +1,6 @@
 def test_readme_quick_example():
     import jax
     import jax.numpy as jnp
-
     from hamon import Block, SamplingSchedule, SpinNode, sample_states
     from hamon.models import IsingEBM, IsingSamplingProgram, hinton_init
 
@@ -28,7 +27,6 @@ def test_readme_quick_example():
 def test_readme_continuous_example():
     import jax
     import jax.numpy as jnp
-
     from hamon import Block, GaussianNode, SamplingSchedule, sample_states
     from hamon.models import GaussianEBM, GaussianSamplingProgram, gaussian_init
 
@@ -59,7 +57,6 @@ def test_readme_continuous_example():
 
 def test_readme_annealed_example():
     import jax.numpy as jnp
-
     from hamon import Block, GaussianNode
     from hamon.models import (
         AnnealedEBM,
@@ -96,7 +93,6 @@ def test_readme_log_z_example():
     """The log Z / ESS block. Untested until now, and it did not import."""
     import jax
     import jax.numpy as jnp
-
     from hamon import (
         Block,
         NRPTEnergyObserver,

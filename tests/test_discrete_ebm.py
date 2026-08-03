@@ -7,8 +7,6 @@ import jax
 import networkx as nx
 import numpy as np
 import pytest
-from jax import numpy as jnp
-
 from hamon.block_management import Block
 from hamon.block_sampling import (
     BlockGibbsSpec,
@@ -28,6 +26,7 @@ from hamon.models.discrete_ebm import (
 )
 from hamon.models.ebm import FactorizedEBM
 from hamon.pgm import AbstractNode, CategoricalNode, SpinNode
+from jax import numpy as jnp
 
 from .utils import (
     count_samples,
@@ -387,7 +386,7 @@ class TestInteractions(unittest.TestCase):
             if node in head_block.nodes:
                 idx = head_block.nodes.index(node)
                 if weights[idx] == w:
-                    return set([b.nodes[idx] for b in tail_blocks]) == set(other_nodes)
+                    return {b.nodes[idx] for b in tail_blocks} == set(other_nodes)
             return False
 
         for i, head in enumerate(interaction.head_nodes):
@@ -443,7 +442,7 @@ class TestBlockSample(unittest.TestCase):
 
         state = []
         for i in range(3):
-            key, subkey = jax.random.split(key, 2)
+            key, _subkey = jax.random.split(key, 2)
             state.append(jax.random.bernoulli(key, 0.5, block_len))
 
         k, _ = jax.random.split(key, 2)
@@ -475,7 +474,7 @@ class TestBlockSample(unittest.TestCase):
 
         state = []
         for i in range(3):
-            key, subkey = jax.random.split(key, 2)
+            key, _subkey = jax.random.split(key, 2)
             state.append(jax.random.randint(key, (block_len,), minval=0, maxval=n_cats))
 
         k, _ = jax.random.split(key, 2)

@@ -3,13 +3,12 @@ import unittest
 import jax
 import jax.numpy as jnp
 import numpy as np
-
 from hamon.diagnostics import (
     ESSReport,
     effective_sample_size,
     energy_balance,
-    report_nrpt_diagnostics,
     marginal_entropy,
+    report_nrpt_diagnostics,
     sample_convergence,
 )
 
@@ -247,7 +246,6 @@ class TestNRPTHealthReport(unittest.TestCase):
 
     def test_barrier_is_identified_helper(self):
         import jax.numpy as jnp
-
         from hamon.round_trips import barrier_is_identified
 
         self.assertTrue(barrier_is_identified(jnp.array([0.4, 0.5, 0.6])))

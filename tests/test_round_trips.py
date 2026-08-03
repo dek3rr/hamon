@@ -13,16 +13,15 @@ Covers:
 """
 
 import jax.numpy as jnp
-
 from hamon.round_trips import (
-    init_index_state,
-    update_index_state,
-    estimate_local_barrier,
-    estimate_global_barrier,
-    predict_optimal_round_trip_rate,
     empirical_round_trip_rate,
-    round_trip_summary,
+    estimate_global_barrier,
+    estimate_local_barrier,
+    init_index_state,
+    predict_optimal_round_trip_rate,
     recommend_n_chains,
+    round_trip_summary,
+    update_index_state,
 )
 
 
@@ -213,7 +212,6 @@ class TestDiagnostics:
     def test_host_summary_matches_jax_implementation(self):
         """The compile-free tuning twin reproduces the public jitted summary."""
         import numpy as np
-
         from hamon.round_trips import _round_trip_summary_host
 
         idx_state = init_index_state(4)
