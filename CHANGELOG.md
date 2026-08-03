@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-08-02
+
 ### Performance
 
 - **Block samplers split their PRNG keys once per sweep, not once per block.**
