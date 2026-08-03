@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 """MNIST training demonstration for hamon.
 
 Trains an Ising energy-based model (a double-grid RBM-style architecture) on a

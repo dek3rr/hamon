@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 """Planted frustrated-loops Ising benchmark for hamon.
 
 Generates a 2D periodic-lattice ±J Ising with a **certified** planted ground

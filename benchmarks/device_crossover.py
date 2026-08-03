@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 """Measure where the CPU/GPU crossover sits for hamon's NRPT workloads.
 
 Sweeps lattice size x chain count, timing the same `nrpt` run on the CPU and
