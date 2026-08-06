@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`sample_until`'s plateau patience no longer truncates searches that are
+  still improving.** `patience_deliveries` defaulted to 30, which on targets
+  whose tempering conveyor is healthy expired while new minima were still
+  arriving — the call returned a worse minimum than the caller's own
+  `max_total` would have found, silently. Recalibrated to 180 by replaying
+  candidate values over recorded Gset ground-state searches: it is the
+  smallest patience whose hit rate matches drawing the full budget on every
+  graph, so the backstop now only ends searches that are genuinely finished.
+  Targets whose conveyor freezes out at cold β are unaffected — they never
+  accrue deliveries and run to `max_total` as before. Lower it explicitly if a
+  near-miss is cheaper than the draws.
+
 ## [0.12.0] — 2026-08-02
 
 ### Performance

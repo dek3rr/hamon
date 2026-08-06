@@ -147,6 +147,17 @@ def test_sample_until_stops_on_target(plan_bw):
     assert samples.shape[0] == 32  # first chunk already beats the target
 
 
+def test_sample_until_default_patience_does_not_truncate(plan_bw):
+    # The default patience is a backstop, not a budget optimizer: on a short
+    # run it must not cut the search off before the caller's own max_total.
+    # (Every other sample_until test pins patience explicitly, so without this
+    # one a tightened default would go unnoticed.)
+    plan, _, _ = plan_bw
+    samples, advice = plan.sample_until(jax.random.key(19), chunk=32, max_total=128)
+    assert samples.shape[0] == 128
+    assert advice is not None
+
+
 def test_sample_until_delivery_patience_stops_on_plateau(plan_bw):
     # A healthy conveyor that plateaus should stop before the budget: with a
     # low delivery threshold the flat stretch trips the patience quickly.

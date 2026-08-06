@@ -406,7 +406,7 @@ class NRPTPlan:
         *,
         chunk: int = 512,
         max_total: int | None = None,
-        patience_deliveries: float = 30.0,
+        patience_deliveries: float = 180.0,
         target_energy: float | None = None,
         n_warmup: int = 0,
         steps_per_sample: int = 1,
@@ -429,6 +429,15 @@ class NRPTPlan:
         delivered many independent states without improvement. A dead-slow
         conveyor therefore runs to ``max_total`` — set ``target_energy`` and a
         generous budget for an exhaustive search.
+
+        The default patience is deliberately **conservative**: it is a backstop
+        against drawing forever, not a budget optimizer. Calibrated by replaying
+        candidate values over recorded Gset ground-state searches, it is the
+        smallest value whose hit rate matches running the full ``max_total`` on
+        every graph — a tighter one truncates searches whose records were still
+        arriving, silently returning a worse minimum than the caller's own
+        budget would have found. Lower it only when a near-miss is cheaper than
+        the draws.
 
         ``stop_on_mixing`` (default ``False``) is off deliberately: a
         MIXING_LIMITED verdict recommends *more chains*, but with budget in
