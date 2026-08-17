@@ -2,14 +2,14 @@ repos:
   # 1. Lint with autofix. ruff's "UP" rules modernise syntax to the minimum
   #    supported Python (py312), replacing a standalone pyupgrade hook.
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.2
+    rev: v0.16.3
     hooks:
       - id: ruff-check
         args: [--fix]
 
   # 2. Format the result of the fixer.
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.2
+    rev: v0.16.3
     hooks:
       - id: ruff-format
         args: [--line-length=88]
