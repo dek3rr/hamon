@@ -130,9 +130,10 @@ from hamon.models import GaussianEBM, GaussianSamplingProgram, gaussian_init
 nodes = [GaussianNode() for _ in range(5)]
 edges = [(nodes[i], nodes[i + 1]) for i in range(4)]
 model = GaussianEBM(
-    nodes, edges,
-    diag=jnp.full(5, 2.0),        # precision diagonal (diagonally dominant ⇒ PD)
-    lin=jnp.zeros(5),             # linear term h
+    nodes,
+    edges,
+    diag=jnp.full(5, 2.0),  # precision diagonal (diagonally dominant ⇒ PD)
+    lin=jnp.zeros(5),  # linear term h
     couplings=jnp.full(4, -0.5),  # off-diagonal precision per edge
     beta=jnp.array(1.0),
 )
@@ -153,13 +154,17 @@ And a φ⁴ target annealed from a Gaussian reference, tempered from β = 0:
 ```python
 from hamon.models import AnnealedEBM, DoubleWellEBM, DoubleWellSamplingProgram
 
-reference = GaussianEBM(nodes, [], jnp.full(5, 2.0), jnp.zeros(5),
-                        jnp.zeros(0), jnp.array(1.0))
-target = DoubleWellEBM(nodes, edges,
-                       barrier=jnp.ones(5),           # well coefficient a
-                       lin=jnp.zeros(5),
-                       couplings=jnp.full(4, -0.6),   # ferromagnetic ⇒ bimodal
-                       beta=jnp.array(1.0))
+reference = GaussianEBM(
+    nodes, [], jnp.full(5, 2.0), jnp.zeros(5), jnp.zeros(0), jnp.array(1.0)
+)
+target = DoubleWellEBM(
+    nodes,
+    edges,
+    barrier=jnp.ones(5),  # well coefficient a
+    lin=jnp.zeros(5),
+    couplings=jnp.full(4, -0.6),  # ferromagnetic ⇒ bimodal
+    beta=jnp.array(1.0),
+)
 annealed = AnnealedEBM(reference, target, jnp.array(1.0))
 program = DoubleWellSamplingProgram(annealed, free_blocks, clamped_blocks=[])
 # beta_range=(0.0, 1.0) is valid here: every rung of the ladder is proper.
@@ -180,17 +185,22 @@ from hamon import autosample
 samples, report = autosample(
     jax.random.key(0),
     n_samples=2000,
-    ebm=ebm,                  # a single template EBM (any β)
+    ebm=ebm,  # a single template EBM (any β)
     program=program,
     init_factory=init_factory,  # (n_chains, ebms, programs) -> [init per chain]
     clamp_state=[],
     beta_range=(0.0, 1.0),
 )
-print(report.summary())       # N, n_expl, Λ, round-trip efficiency
+print(report.summary())  # N, n_expl, Λ, round-trip efficiency
 
 # Or keep the tuned plan and draw repeatedly without re-tuning:
-plan = autotune(jax.random.key(1), ebm=ebm, program=program,
-                init_factory=init_factory, clamp_state=[])
+plan = autotune(
+    jax.random.key(1),
+    ebm=ebm,
+    program=program,
+    init_factory=init_factory,
+    clamp_state=[],
+)
 more = plan.sample(jax.random.key(2), 5000)
 ```
 
@@ -300,8 +310,8 @@ samples, diag = ising_sample(
     biases, edges, weights, key=jax.random.key(0), beta="auto", n_samples=2000
 )
 
-est = diag["beta_estimate"]     # BetaEstimate
-print(est.summary())            # beta_max, predicted Λ and chain count, GS occupancy
+est = diag["beta_estimate"]  # BetaEstimate
+print(est.summary())  # beta_max, predicted Λ and chain count, GS occupancy
 
 advice = diag["search_advice"]  # SearchAdvice
 print(advice.summary())
@@ -331,8 +341,13 @@ is slow, and counting draws would abandon a still-improving search.
 ```python
 from hamon import autotune
 
-plan = autotune(jax.random.key(1), ebm=ebm, program=program,
-                init_factory=init_factory, clamp_state=[])
+plan = autotune(
+    jax.random.key(1),
+    ebm=ebm,
+    program=program,
+    init_factory=init_factory,
+    clamp_state=[],
+)
 samples, advice = plan.sample_until(jax.random.key(2), chunk=512, max_total=8192)
 print(advice.summary())
 
@@ -352,16 +367,21 @@ spec = IsingTrainingSpec(
     ebm=model,
     data_blocks=data_blocks,
     conditioning_blocks=[],
-    positive_sampling_blocks=positive_blocks,   # hidden units, data clamped
-    negative_sampling_blocks=negative_blocks,   # everything free
+    positive_sampling_blocks=positive_blocks,  # hidden units, data clamped
+    negative_sampling_blocks=negative_blocks,  # everything free
     schedule_positive=schedule_positive,
     schedule_negative=schedule_negative,
 )
 
 grad_w, grad_b, moments_pos, moments_neg = estimate_kl_grad(
-    key, spec, model.nodes, model.edges,
-    data=[batch], conditioning_values=[],
-    init_state_positive=init_pos, init_state_negative=init_neg,
+    key,
+    spec,
+    model.nodes,
+    model.edges,
+    data=[batch],
+    conditioning_values=[],
+    init_state_positive=init_pos,
+    init_state_negative=init_neg,
 )
 ```
 
@@ -380,8 +400,7 @@ from hamon import tune_sampling_schedule
 from hamon.models import hinton_init
 
 replicas = hinton_init(key, model, program.gibbs_spec.free_blocks, (8,))
-schedule, info = tune_sampling_schedule(key, model, program, replicas,
-                                        target_ess=64)
+schedule, info = tune_sampling_schedule(key, model, program, replicas, target_ess=64)
 print(info["n_warmup"], info["tau"], info["warmup_exit"])
 ```
 
