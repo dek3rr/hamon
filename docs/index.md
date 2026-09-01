@@ -1,6 +1,6 @@
 # Hamon
 
-**JAX-native thermal sampling for discrete energy-based models.**
+**JAX-native thermal sampling for discrete and continuous energy-based models.**
 
 ---
 
@@ -61,8 +61,16 @@ hardware by maximizing effective samples per measured wall-second. This is the
 primary way to solve a problem with hamon; the individual tuners (`tune_chains`,
 `tune_exploration`, `tune_schedule`) are available for manual control.
 
-**Dynamic block management** with influence-aware partitioning, per-temperature
-block sizing, and correlation-based re-blocking.
+**Continuous state spaces** alongside discrete ones: Gaussian MRFs sampled
+*exactly* by block Gibbs (the color-class conditionals are independent scalar
+Gaussians, so there is no linear solve anywhere), multimodal φ⁴ lattice fields
+via slice-within-Gibbs, and reference annealing (`AnnealedEBM`) so a β ladder
+can start at exactly 0 even when the target has no proper β = 0 member.
+
+**Ground-state search** with `beta="auto"`: hamon reads the coldest useful
+temperature off the model's own excitation-cost spectrum rather than making you
+guess, then tells you which failure mode a stalled search is in — too few
+chains, too few draws, or a cold chain that is still too hot.
 
 ## Origin
 

@@ -25,3 +25,5 @@ main entry point for collecting samples from a single chain.
 ::: hamon.sample_with_observation
 
 ::: hamon.sample_states
+
+::: hamon.sample_states_batched

@@ -20,7 +20,7 @@ theme:
         logo: material/sword
 
 site_name: Hamon
-site_description: JAX-native thermal sampling for discrete energy-based models.
+site_description: JAX-native thermal sampling for discrete and continuous energy-based models.
 site_author: Douglas E. Kerr Jr.
 site_url: https://dek3rr.github.io/hamon
 
@@ -111,6 +111,7 @@ nav:
         - Graph Primitives:
             - 'api/pgm.md'
             - 'api/interaction.md'
+            - 'api/graph_utils.md'
             - 'api/factor.md'
         - Sampling:
             - 'api/block_management.md'
@@ -124,7 +125,10 @@ nav:
             - 'api/advisor.md'
         - Advanced:
             - 'api/boundary_energy.md'
+            - 'api/device.md'
         - Models:
             - 'api/models/ebm.md'
             - 'api/models/discrete_ebm.md'
             - 'api/models/ising.md'
+            - 'api/models/gaussian.md'
+            - 'api/models/double_well.md'

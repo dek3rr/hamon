@@ -41,4 +41,13 @@ per-chain mean energy used for the log normalizing constant
         members:
             - __init__
 
+`ColdChainObserver` records only the coldest chain, which is what makes a
+*tempered* draw cheap: the tuned ladder keeps running so DEO swaps keep carrying
+barrier crossings into the samples, but only the target-β chain is stored.
+
+::: hamon.ColdChainObserver
+    options:
+        members:
+            - __init__
+
 ::: hamon.nrpt_node_samples
