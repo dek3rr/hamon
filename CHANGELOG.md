@@ -7,7 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **API reference pages for the continuous model stack, device routing, and
+  graph coloring.** `GaussianEBM`, `DoubleWellEBM`/`SliceGibbsConditional`, and
+  `AnnealedEBM` shipped in 0.10.0 with tests and README prose but had no page in
+  the API reference at all; neither did `hamon.device` or `rlf_coloring`. Also
+  filled in symbols the existing pages had skipped: the `ising_sample` /
+  `ising_estimate_beta` / `ising_excitation_costs` front door, `GaussianNode`,
+  `sample_states_batched`, `ColdChainObserver`, the discrete Gibbs conditionals,
+  `FactorizedEBM`/`EBMFactor`, `NRPTPlan.extend` and `NRPTPlan.sample_until`,
+  and the `barrier_is_identified` / `conveyor_is_alive` trust gates that other
+  modules' docstrings already pointed users to.
+
 ### Fixed
+
+- **The docs landing page advertised a module that no longer exists.**
+  `docs/index.md` claimed "dynamic block management with influence-aware
+  partitioning, per-temperature block sizing, and correlation-based
+  re-blocking"; `hamon/dynamic_blocks.py` was removed in 0.12.0's dead-code
+  pass. Replaced with the two shipped headline features that were missing from
+  that list instead — continuous state spaces and ground-state search.
+
+- **The package description still said "discrete" only.** Continuous support
+  shipped in 0.10.0, but `pyproject.toml`'s `description` (what PyPI displays),
+  `mkdocs.yml`'s `site_description`, and the docs landing tagline all still read
+  "for discrete energy-based models". They now match the README and the
+  citation.
 
 - **`sample_until`'s plateau patience no longer truncates searches that are
   still improving.** `patience_deliveries` defaulted to 30, which on targets

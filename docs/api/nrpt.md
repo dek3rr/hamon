@@ -15,6 +15,8 @@ tuners and the core single run are below them.
     options:
         members:
             - sample
+            - extend
+            - sample_until
 
 ::: hamon.AutotuneReport
     options:
