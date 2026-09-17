@@ -1,0 +1,269 @@
+/* ==========================================================================
+   Hamon — docs theme
+   Steel-blue palette · Inter body · JetBrains Mono code
+   ========================================================================== */
+
+/* -- Palette ------------------------------------------------------------ */
+:root {
+  --hamon-blue:        #5b8fb9;
+  --hamon-blue-dim:    #3d6a8f;
+  --hamon-blue-bright: #7fb3d8;
+  --hamon-blue-ghost:  rgba(91, 143, 185, 0.12);
+  --hamon-ice:         #c8dbe8;
+  --hamon-steel:       #2c3e50;
+  --hamon-fg:          #e4e8ec;
+  --hamon-fg-muted:    #99a8b5;
+  --hamon-bg:          #0d1117;
+  --hamon-bg-card:     #151b23;
+  --hamon-bg-code:     #1a2029;
+  --hamon-border:      #21262d;
+}
+
+/* -- Material overrides (slate) ----------------------------------------- */
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color:        var(--hamon-steel);
+  --md-primary-bg-color:        var(--hamon-fg);
+  --md-accent-fg-color:         var(--hamon-blue);
+  --md-default-bg-color:        var(--hamon-bg);
+  --md-default-fg-color:        var(--hamon-fg);
+  --md-typeset-color:           var(--hamon-fg);
+  --md-typeset-a-color:         var(--hamon-blue-bright);
+  --md-code-bg-color:           var(--hamon-bg-code);
+  --md-code-fg-color:           var(--hamon-ice);
+  --md-footer-bg-color:         var(--hamon-steel);
+  --md-footer-fg-color:         var(--hamon-fg-muted);
+}
+
+/* -- Global ------------------------------------------------------------- */
+html { scroll-padding-top: 56px; }
+
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* -- Header ------------------------------------------------------------- */
+.md-header {
+  background: var(--hamon-steel) !important;
+  border-bottom: 1px solid var(--hamon-border);
+}
+
+.md-header__title { font-weight: 600; letter-spacing: 0.02em; }
+
+div.md-header__source { width: revert; max-width: revert; }
+a.md-source { display: inline-block; }
+
+/* -- Navigation --------------------------------------------------------- */
+nav.md-nav { padding-left: 4px; }
+
+.md-nav__title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--hamon-fg-muted);
+}
+
+.md-nav__item--section > .md-nav__link {
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+.md-nav__link:hover {
+  background-color: var(--hamon-blue-ghost);
+  border-radius: 4px;
+}
+
+nav.md-nav--secondary { border-left: revert !important; }
+
+/* -- Typography --------------------------------------------------------- */
+.md-typeset {
+  font-size: 0.88rem;
+  line-height: 1.72;
+  color: var(--hamon-fg);
+}
+
+.md-typeset h1 {
+  font-weight: 700;
+  font-size: 2rem;
+  letter-spacing: -0.02em;
+  color: #fff;
+  border-bottom: 2px solid var(--hamon-blue-dim);
+  padding-bottom: 0.3em;
+  margin-bottom: 1em;
+}
+
+.md-typeset h2 {
+  font-weight: 600;
+  font-size: 1.45rem;
+  letter-spacing: -0.01em;
+  color: var(--hamon-ice);
+  margin-top: 2em;
+}
+
+.md-typeset h3 {
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: var(--hamon-fg-muted);
+}
+
+.md-typeset h4 { font-size: 1rem; }
+.md-typeset h5 { font-size: 0.88rem; }
+.md-typeset h6 { font-size: 0.8rem; }
+
+.md-typeset p {
+  color: var(--hamon-fg);
+  line-height: 1.72;
+}
+
+.md-typeset a { text-decoration-thickness: 1px; text-underline-offset: 2px; }
+.md-typeset a:hover { color: #fff; }
+
+/* -- Inline code -------------------------------------------------------- */
+.md-typeset :not(pre) > code {
+  background-color: var(--hamon-blue-ghost) !important;
+  color: var(--hamon-blue-bright) !important;
+  padding: 2px 6px !important;
+  border-radius: 3px !important;
+  font-size: 0.86em !important;
+  border: none !important;
+}
+
+/* -- Code blocks -------------------------------------------------------- */
+.md-typeset pre > code {
+  background-color: var(--hamon-bg-code) !important;
+  border-radius: 6px;
+  font-size: 0.84rem;
+  line-height: 1.6;
+}
+
+.md-typeset pre {
+  border: 1px solid var(--hamon-border);
+  border-radius: 6px;
+}
+
+/* -- Admonitions -------------------------------------------------------- */
+.md-typeset .admonition,
+.md-typeset details {
+  font-size: 0.88rem !important;
+  border-radius: 6px;
+  border-left-width: 3px;
+}
+
+.md-typeset .admonition.tip,
+.md-typeset details.tip {
+  border-color: var(--hamon-blue);
+}
+
+.md-typeset .admonition.note,
+.md-typeset details.note {
+  border-color: var(--hamon-blue-dim);
+}
+
+/* -- Blockquotes -------------------------------------------------------- */
+.md-typeset blockquote {
+  border-left: 3px solid var(--hamon-blue-dim);
+  background-color: var(--hamon-blue-ghost);
+  padding: 0.8rem 1.2rem;
+  border-radius: 0 6px 6px 0;
+  color: var(--hamon-fg-muted);
+  font-style: italic;
+}
+
+/* -- API docs headings -------------------------------------------------- */
+div.doc-contents {
+  padding-left: 20px;
+  border-left: 3px solid var(--hamon-blue-dim);
+}
+
+h4.doc-heading {
+  background-color: var(--hamon-bg-card);
+  border: 1px solid var(--hamon-border);
+  border-radius: 4px;
+  padding: 4px 10px 6px;
+}
+
+h5.doc-heading, h6.doc-heading {
+  background-color: rgba(255, 255, 255, 0.03);
+  border-radius: 4px;
+  padding: 2px 8px 4px;
+}
+
+.md-typeset details .mkdocstrings > h4,
+.md-typeset details .mkdocstrings > h5 {
+  display: none;
+}
+
+/* -- Tables ------------------------------------------------------------- */
+.md-typeset table:not([class]) {
+  border: 1px solid var(--hamon-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.md-typeset table:not([class]) th {
+  background-color: var(--hamon-bg-card);
+  color: var(--hamon-ice);
+  font-weight: 600;
+}
+
+.md-typeset table:not([class]) td {
+  border-color: var(--hamon-border);
+}
+
+/* -- Horizontal rules --------------------------------------------------- */
+.md-typeset hr {
+  border-bottom: 1px solid var(--hamon-border);
+}
+
+/* -- Footer ------------------------------------------------------------- */
+.md-footer__inner { display: none; }
+
+.md-main__inner { margin-bottom: 1.5rem; }
+
+/* -- Notebook output errors --------------------------------------------- */
+.output_error > pre { overflow: auto; }
+
+/* -- Selection color ---------------------------------------------------- */
+::selection {
+  background-color: rgba(91, 143, 185, 0.35);
+}
+
+/* -- Syntax highlighting (slate steel) ---------------------------------- */
+.highlight .k,  .codehilite .k  { color: #7fb3d8 }  /* keyword */
+.highlight .kd, .codehilite .kd { color: #7fb3d8 }
+.highlight .kn, .codehilite .kn { color: #7fb3d8 }
+.highlight .kp, .codehilite .kp { color: #7fb3d8 }
+.highlight .kr, .codehilite .kr { color: #7fb3d8 }
+.highlight .kt, .codehilite .kt { color: #a8d4ee }
+.highlight .nb, .codehilite .nb { color: #a8d4ee }  /* builtin */
+.highlight .nc, .codehilite .nc { color: #e0c882 }  /* class */
+.highlight .nf, .codehilite .nf { color: #e0c882 }  /* function */
+.highlight .nd, .codehilite .nd { color: #c49bdb }  /* decorator */
+.highlight .s,  .codehilite .s  { color: #a8d8a8 }  /* string */
+.highlight .s1, .codehilite .s1 { color: #a8d8a8 }
+.highlight .s2, .codehilite .s2 { color: #a8d8a8 }
+.highlight .sd, .codehilite .sd { color: #7fa87f }  /* docstring */
+.highlight .si, .codehilite .si { color: #c49bdb }  /* interpolation */
+.highlight .se, .codehilite .se { color: #c49bdb }
+.highlight .c,  .codehilite .c  { color: #6a7a8a; font-style: italic } /* comment */
+.highlight .c1, .codehilite .c1 { color: #6a7a8a; font-style: italic }
+.highlight .cm, .codehilite .cm { color: #6a7a8a; font-style: italic }
+.highlight .cp, .codehilite .cp { color: #6a7a8a }
+.highlight .mi, .codehilite .mi { color: #d4a8e0 }  /* number */
+.highlight .mf, .codehilite .mf { color: #d4a8e0 }
+.highlight .o,  .codehilite .o  { color: #99a8b5 }  /* operator */
+.highlight .ow, .codehilite .ow { color: #7fb3d8 }
+.highlight .bp, .codehilite .bp { color: #a8d4ee }
+.highlight .fm, .codehilite .fm { color: #e0c882 }
+.highlight .nn, .codehilite .nn { color: #c8dbe8 }  /* namespace */
+.highlight .na, .codehilite .na { color: #e0c882 }  /* attribute */
+.highlight, .codehilite         { color: #c8dbe8 }
+.highlight pre, .codehilite pre { color: #c8dbe8 }
+
+/* -- Responsive --------------------------------------------------------- */
+@media (max-width: 76.1875em) {
+  .md-typeset h1 { font-size: 1.6rem; }
+  .md-typeset h2 { font-size: 1.25rem; }
+}
